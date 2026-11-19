@@ -184,7 +184,7 @@ fn crossings(tx: &lee::PrivacyPreservingTransaction) -> impl Iterator<Item = (&A
 fn kind_of(to: AccountId, message: &[u8], registry: AccountId, board: Option<AccountId>) -> Option<&'static str> {
     if to == registry {
         return match borsh::from_slice::<RegistryMessage>(message).ok()? {
-            RegistryMessage::Instruction(Instruction::Register { .. })
+            RegistryMessage::Instruction(Instruction::Register { .. } | Instruction::RegisterWithDeed { .. })
             | RegistryMessage::Effect(names_core::Effect::Register { .. }) => Some("register"),
             RegistryMessage::Instruction(Instruction::Renew { .. })
             | RegistryMessage::Effect(names_core::Effect::Renew { .. }) => Some("renew"),

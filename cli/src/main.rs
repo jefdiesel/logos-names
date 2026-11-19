@@ -1764,24 +1764,15 @@ impl Client {
                 mentions.extend(self.deed_mentions(&id, &registration_nonce(&promised, claimed), &[holder], true));
             }
             let deeds = tier == TIER_NORMAL || lapsed_deed.is_some();
-            let sent = self
-                .send_with(
-                    mentions,
-                    &Instruction::Register {
-                        id,
-                        sealed: sealed.clone(),
-                        term,
-                        fee,
-                        treasury: cost.treasury,
-                        now: claimed,
-                        secret,
-                        deposit,
-                        length: length.clone(),
-                    },
-                    fee,
-                    deeds,
-                )
-                .await;
+            // A name of the normal tier is registered with its deed; plain Register mints none.
+            let (sealed, length) = (sealed.clone(), length.clone());
+            let treasury = cost.treasury;
+            let instruction = if tier == TIER_NORMAL {
+                Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now: claimed, secret, deposit, length }
+            } else {
+                Instruction::Register { id, sealed, term, fee, treasury, now: claimed, secret, deposit, length }
+            };
+            let sent = self.send_with(mentions, &instruction, fee, deeds).await;
             let Err(error) = sent else {
                 self.note_proof();
                 break;
@@ -3286,7 +3277,7 @@ fn gas_limit_for(cycles: u64) -> u64 {
 fn call_cycles(instruction: &Instruction) -> u64 {
     match instruction {
         Instruction::Commit { .. } => COMMIT_CYCLES,
-        Instruction::Register { .. } | Instruction::Claim { .. } | Instruction::MintDeed { .. } => REVEAL_CYCLES,
+        Instruction::Register { .. } | Instruction::RegisterWithDeed { .. } | Instruction::Claim { .. } | Instruction::MintDeed { .. } => REVEAL_CYCLES,
         Instruction::Release { .. } => 51_322,
         _ => CHANGE_CYCLES,
     }

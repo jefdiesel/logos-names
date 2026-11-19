@@ -392,7 +392,27 @@ pub enum Instruction {
         nonce: [u8; 32],
         length: LengthProof,
     },
+    /// [`Instruction::Register`], and the name, if of the normal tier, is minted its
+    /// deed in the same transaction (the client declares the deed's actors). Plain
+    /// `Register` mints none ([`PLAIN_REGISTER_MINTS`]), so clients built before deeds
+    /// keep registering; their names can be given a deed later with `MintDeed`.
+    RegisterWithDeed {
+        id: NameId,
+        sealed: Vec<u8>,
+        term: u8,
+        fee: u128,
+        treasury: Option<AccountId>,
+        now: u64,
+        secret: [u8; 32],
+        deposit: bool,
+        length: LengthProof,
+    },
 }
+
+/// Whether plain [`Instruction::Register`] mints a deed too. Off while clients built
+/// before deeds (which don't declare a deed's actors, so a minting registration of
+/// theirs would fail) are still in use; turning it on is this one line and an update.
+pub const PLAIN_REGISTER_MINTS: bool = false;
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Effect {
@@ -913,6 +933,14 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
     let program = &input.receiver.program_account_id;
     let signer = &input.receiver.account_id;
     let response = Response::keep_state();
+    // The two registrations share one body; only whether they mint differs.
+    let (instruction, mints) = match instruction {
+        Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now, secret, deposit, length } => {
+            (Instruction::Register { id, sealed, term, fee, treasury, now, secret, deposit, length }, true)
+        }
+        Instruction::Register { .. } => (instruction, PLAIN_REGISTER_MINTS),
+        other => (other, false),
+    };
 
     match instruction {
         Instruction::Register {
@@ -938,7 +966,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
             // another account.
             let promised = commitment(&id, &owner, &secret);
             // Only a name of the normal tier has a deed: locked, reserved and short ones don't.
-            let deed = (tier == TIER_NORMAL).then(|| new_deed(program, id, registration_nonce(&promised, now)));
+            let deed = (mints && tier == TIER_NORMAL).then(|| new_deed(program, id, registration_nonce(&promised, now)));
             let response = charge(response, program, signer, &id, treasury, term, fee, deposit, tier);
             bounded_window(response, now)
                 .send(self::effect(
@@ -1110,6 +1138,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
                     Effect::WritePage { sealed: Vec::new() },
                 ))
         }
+        Instruction::RegisterWithDeed { .. } => unreachable!("handled as Register"),
         Instruction::MintDeed { id, nonce, length } => {
             assert!(
                 length_tier(&id, &length) == TIER_NORMAL,
@@ -1848,12 +1877,12 @@ mod tests {
         assert_eq!(
             chain.record(&JEF),
             Some(NameRecord {
-                version: VERSION,
+                version: 6,
                 owner: owner_tag(&JEF, &ALICE),
                 expires: NOW + TERM_LENGTHS_MS[1],
                 sealed: b"sealed profile".to_vec(),
                 claimed: false,
-                deed: deed_of(&JEF, ALICE, NOW),
+                deed: None,
             })
         );
     }
@@ -2006,12 +2035,12 @@ mod tests {
         assert_eq!(
             chain.record(&JEF),
             Some(NameRecord {
-                version: VERSION,
+                version: 6,
                 owner: owner_tag(&JEF, &BOB),
                 expires: NOW + TERM_LENGTHS_MS[1],
                 sealed: Vec::new(),
                 claimed: false,
-                deed: deed_of(&JEF, ALICE, NOW),
+                deed: None,
             })
         );
         assert_eq!(chain.page(&JEF), None);
@@ -2349,12 +2378,12 @@ mod tests {
         assert_eq!(
             chain.record(&JEF),
             Some(NameRecord {
-                version: VERSION,
+                version: 6,
                 owner: owner_tag(&JEF, &BOB),
                 expires: later + MONTH,
                 sealed: b"bob's profile".to_vec(),
                 claimed: false,
-                deed: deed_of(&JEF, BOB, later),
+                deed: None,
             })
         );
         assert_eq!(chain.page(&JEF), None);
@@ -2736,7 +2765,7 @@ mod tests {
         let record = chain.record(&JEF).expect("registered");
         assert_eq!(record.expires, u64::MAX);
         assert_eq!(record.owner, owner_tag(&JEF, &ALICE));
-        assert_eq!(record.version, VERSION);
+        assert_eq!(record.version, 6, "a record without a deed keeps the version 6 layout");
     }
 
     #[test]
@@ -3236,9 +3265,49 @@ mod tests {
         assert_ne!(registration_nonce(&promised, NOW), registration_nonce(&commitment(&JEF, &tag, &[6; 32]), NOW));
     }
 
+    fn with_deed(instruction: Instruction) -> Instruction {
+        let Instruction::Register { id, sealed, term, fee, treasury, now, secret, deposit, length } = instruction else {
+            panic!("a registration");
+        };
+        Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now, secret, deposit, length }
+    }
+
+    #[test]
+    fn a_plain_registration_mints_no_deed_so_older_clients_keep_working() {
+        assert!(!PLAIN_REGISTER_MINTS);
+        let effects = run_plan(on_registration(&JEF, ALICE), register(JEF, Vec::new()));
+        assert!(effects.iter().any(|(_, effect)| matches!(effect, Effect::Register { deed: None, .. })));
+        let mut chain = Chain::default();
+        chain.register(&JEF, ALICE, b"x");
+        assert_eq!(chain.data(&record_address(&PROGRAM, &JEF)).first(), Some(&6), "written as version 6");
+        // Both registrations otherwise plan the same effects.
+        let plain = run_plan(on_registration(&JEF, ALICE), register(JEF, b"p".to_vec()));
+        let deeded = run_plan(on_registration(&JEF, ALICE), with_deed(register(JEF, b"p".to_vec())));
+        assert_eq!(plain.len(), deeded.len());
+        for ((at, a), (at2, b)) in plain.iter().zip(&deeded) {
+            assert_eq!(at, at2);
+            match (a, b) {
+                (Effect::Register { deed: None, owner, sealed, .. }, Effect::Register { deed: Some(_), owner: owner2, sealed: sealed2, .. }) => {
+                    assert_eq!((owner, sealed), (owner2, sealed2));
+                }
+                _ => assert_eq!(a, b),
+            }
+        }
+    }
+
+    #[test]
+    fn a_registration_with_deed_through_the_harness_records_it() {
+        let mut chain = Chain::default();
+        let instruction = with_deed(register(JEF, b"sealed".to_vec()));
+        chain.actors.insert(committed(&JEF, ALICE), to_bytes(&Commitment { version: VERSION, made: NOW - MIN_COMMIT_AGE_MS }));
+        chain.run_exactly(on_registration(&JEF, ALICE), instruction);
+        assert_eq!(chain.record(&JEF).expect("registered").deed, deed_of(&JEF, ALICE, NOW));
+        assert_eq!(chain.data(&record_address(&PROGRAM, &JEF)).first(), Some(&7), "a deeded record is version 7");
+    }
+
     #[test]
     fn a_registration_mints_the_names_deed_to_its_holder() {
-        let effects = run_plan(on_registration(&JEF, ALICE), register(JEF, Vec::new()));
+        let effects = run_plan(on_registration(&JEF, ALICE), with_deed(register(JEF, Vec::new())));
         let (record, Effect::Register { owner, deed: Some(deed), .. }) =
             effects.iter().find(|(_, effect)| matches!(effect, Effect::Register { .. })).cloned().expect("a register")
         else {
@@ -3298,7 +3367,7 @@ mod tests {
     #[test]
     fn locked_reserved_and_short_names_get_no_deed() {
         for id in [LOCKED_NAME, THREE_NAME] {
-            let effects = run_plan(on_registration(&id, ALICE), register(id, Vec::new()));
+            let effects = run_plan(on_registration(&id, ALICE), with_deed(register(id, Vec::new())));
             assert!(
                 effects.iter().any(|(_, effect)| matches!(effect, Effect::Register { deed: None, .. })),
                 "no deed for a name that is not of the normal tier"

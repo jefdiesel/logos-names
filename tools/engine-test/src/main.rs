@@ -197,6 +197,14 @@ fn register(id: NameId, secret: [u8; 32], now: u64, length: LengthProof) -> Inst
     }
 }
 
+/// [`register`], minting the name's deed.
+fn register_deeded(id: NameId, secret: [u8; 32], now: u64, length: LengthProof) -> Instruction {
+    let Instruction::Register { id, sealed, term, fee, treasury, now, secret, deposit, length } = register(id, secret, now, length) else {
+        unreachable!()
+    };
+    Instruction::RegisterWithDeed { id, sealed, term, fee, treasury, now, secret, deposit, length }
+}
+
 fn main() {
     let elf = names_methods::LOGOS_NAMES_ELF;
     let mut deployer = who(9);
@@ -282,7 +290,7 @@ fn main() {
     let nonce = registration_nonce(&promised, later);
     let definition = deed_definition_address(&program, &jef, &nonce);
     actors.extend(run.deed_actors(&definition, Some((&jef, &nonce)), &[alices]));
-    run.send("alice registers with a deposit", &mut alice, register(jef, secret, later, length), actors, later);
+    run.send("alice registers with a deposit", &mut alice, register_deeded(jef, secret, later, length), actors, later);
     let record = run.record(&jef).expect("registered");
     assert_eq!(record.owner, alices);
     assert_eq!(run.balance(alice.id), before - DEPOSIT, "the deposit left alice in the same transaction");
@@ -520,10 +528,35 @@ fn main() {
     let mut actors = run.registering(&jef, alice.id, &secret2);
     actors.extend(run.deed_actors(&definition2, Some((&jef, &nonce2)), &[alices]));
     let length = short_list().prove(&jef).expect("a proof");
-    run.send("alice registers jef again", &mut alice, register(jef, secret2, reveal_at, length), actors, reveal_at);
+    run.send("alice registers jef again", &mut alice, register_deeded(jef, secret2, reveal_at, length), actors, reveal_at);
     assert_ne!(definition2, definition, "a new registration, a new deed");
     assert_eq!(run.deed_balance(&definition2, &alices), Some(1));
     assert_eq!(run.supply(&definition), 0, "the old deed stays burned");
     println!("ok   a name registered again gets a new deed definition and deed account");
+
+    // A client built before deeds sends plain Register with the old actor list: it still
+    // works, the name has no deed, and its record is the version 6 layout older readers read.
+    let plain: NameId = [0xEE; 32];
+    let secret3 = [7; 32];
+    let promised3 = commitment(&plain, &owner_tag(&plain, &bob.id), &secret3);
+    run.seeds.extend(name_seeds(&plain));
+    run.seeds.push(commitment_seed(&promised3));
+    run.send(
+        "bob commits as an older client would",
+        &mut bob,
+        Instruction::Commit { commitment: promised3, now: again_at },
+        vec![run.actor(commitment_address(&program, &promised3))],
+        again_at,
+    );
+    let actors = run.registering(&plain, bob.id, &secret3);
+    let length = short_list().prove(&plain).expect("a proof");
+    run.send("bob registers with plain Register and no deed actors", &mut bob, register(plain, secret3, reveal_at, length), actors, reveal_at);
+    let record = run.record(&plain).expect("registered");
+    assert_eq!(record.deed, None);
+    let bytes = run.state.get_account_by_id(record_address(&program, &plain)).data.actor_state(program).to_vec();
+    assert_eq!(bytes.first(), Some(&6), "the version 6 layout");
+    let old: (u8, [u8; 32], u64, Vec<u8>, bool) = borsh::from_slice(&bytes).expect("a strict version 6 reader reads it");
+    assert_eq!(old.1, owner_tag(&plain, &bob.id));
+    println!("ok   an older client's plain Register still registers (no deed, version 6 record)");
     println!("\nall scenarios passed");
 }
