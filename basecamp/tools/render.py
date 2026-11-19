@@ -1264,6 +1264,35 @@ for _name, _js, _mock in WALLET_NEXT:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
 
+# ── ERC-20 as a first-class path (rfp-022 docs/ERC20-PATH.md): a bridge (added from its code) whose
+# config lists USDT (6 decimals) and DAI (18) and no ETH; Receive starts on USDT at its smallest
+# amount, its deposit steps say approve first; a paused token is named; Bridge to Ethereum offers USDT.
+_E20_USDT = "0x" + "11" * 20
+_E20_DAI = "0x" + "da" * 20
+_E20_TOKENS = [{"eth_token": _E20_USDT, "symbol": "USDT", "decimals": 6, "definition": "UsdtDef1111111111111111111111111111111111111", "denoms": ["100000000", "1000000000", "10000000000"]},
+               {"eth_token": _E20_DAI, "symbol": "DAI", "decimals": 18, "definition": "DaiDef11111111111111111111111111111111111111", "denoms": ["100000000000000000000", "1000000000000000000000", "10000000000000000000000"]}]
+_E20_CONFIG = dict(SB_CONFIG, deployment={"name": "added-0e20", "label": "bridge e20", "bridge_program": V4, "release": "proof", "tokens": _E20_TOKENS}, features=SB_FEATURES + ["bridges"])
+_E20_CODE = _copy.deepcopy(MOCKS["receive-code-words"]["bridge"]["make_public_deposit_request"])
+_E20_CODE.update({"symbol": "USDT", "denom_text": "100", "total_text": "100", "bridge_fee": None, "amount_text": "100 USDT"})
+_E20_CODE["deposit"]["symbol"] = "USDT"
+_E20_REG_PAUSED = {"tokens": [dict(_E20_TOKENS[0], denoms=[{"index": 0, "value": "100000000", "text": "100"}, {"index": 1, "value": "1000000000", "text": "1,000"}], freeze={"eth_deposits": False}),
+                              dict(_E20_TOKENS[1], denoms=[{"index": 0, "value": "100000000000000000000", "text": "100"}], freeze={"eth_deposits": True})]}
+_E20_RECEIVE = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.openEthReceive(); root.receivePublicOk = true; %s }) })' % (json.dumps(_E20_CONFIG), "%s")
+_E20_USDT_ASSET = '{ symbol: "USDT", name: "Wrapped USDT (demo)", amount: "1,500", bridge: "%s", base: "1500000000", decimals: 6, definition: "%s", ethToken: "%s" }' % (V4, _E20_TOKENS[0]["definition"], _E20_USDT)
+_E20_SB = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); root.openSendBack("%s", %s) }) })' % (json.dumps(_E20_CONFIG), OWNER, _E20_USDT_ASSET)
+for _name, _js, _mock in [
+    # Receive on a bridge without ETH: USDT chosen, 100 USDT pre-selected.
+    ("receive-erc20-choose", _E20_RECEIVE % "", {"bridge": {"config": _E20_CONFIG}}),
+    # Its code: step 3 says approve exactly the amount, then deposit.
+    ("receive-erc20-code", _E20_RECEIVE % "root.againAfter(300, function() { root.makeReceive() })", {"bridge": {"config": _E20_CONFIG, "make_public_deposit_request": _E20_CODE}}),
+    # The registry says DAI deposits are paused: DAI is not offered and one line says so.
+    ("receive-erc20-paused", _E20_RECEIVE % "", {"bridge": {"config": _E20_CONFIG, "registry": _E20_REG_PAUSED}}),
+    # Bridge to Ethereum from a USDT balance: amounts in USDT's 6 decimals, the smallest pre-selected.
+    ("sendback-erc20-amount", _E20_SB, {"bridge": dict(sb_mock()["bridge"], config=_E20_CONFIG), "bridgeNet": NET04_V4}),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+
 def _ago(text):
     """A job's start in a mock ("@AGO:n@"): n seconds before this render, in ms."""
     import re as _re, time as _time
