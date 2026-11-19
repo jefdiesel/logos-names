@@ -1065,8 +1065,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const { rateLimited } = await import("./qml/logic.mjs");
   check("429 words are a wait", [rateLimited("HTTP 429 Too Many Requests"), rateLimited("can't reach the bridge test network: too many requests"), rateLimited("The bridge's endpoint is busy; trying again shortly."), rateLimited("no such receive")], [true, true, true, false]);
   check("clock is HH:MM", /^[0-2][0-9]:[0-5][0-9]$/.test(clockShown(1763208000)), true);
-  check("send_backs rows", sendBacksFrom({ send_backs: [{ id: "sb-1", amount_text: "0.01 ETH", account: "Public/A", recipient: "0xAb", words_text: "a · b · c · d", stage: "burned" }, { stage: "x" }] }),
-    [{ id: "sb-1", amount: "0.01 ETH", account: "Public/A", recipient: "0xAb", words: "a · b · c · d", stage: "burned" }]);
+  check("send_backs rows", sendBacksFrom({ send_backs: [{ id: "sb-1", amount_text: "0.01 ETH", account: "Public/A", recipient: "0xAb", words_text: "a · b · c · d", stage: "burned", symbol: "ETH" }, { stage: "x" }] }),
+    [{ id: "sb-1", amount: "0.01 ETH", account: "Public/A", recipient: "0xAb", words: "a · b · c · d", stage: "burned", symbol: "ETH" }]);
   const rows = sendBackRowsShown([{ id: "a", stage: "burned" }, { id: "b", stage: "released" }, { id: "c", stage: "released" }], { a: { stage: "recorded" } }, { b: 1000 }, 2000);
   check("card rows: under way, and received only for a while", rows.map((x) => x.id + ":" + x.progress.stage), ["a:recorded", "b:released"]);
   const now = (st) => sendBackSteps(st).find((x) => x.state === "now");
@@ -1826,12 +1826,64 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [/var token = Logic\.receiveTokenArg\(receiveTokenList, receiveTokenNow\)\n\s*var args = priv \? \[token, /.test(qml2), /Logic\.receiveTokenNow\(receiveTokenList, receiveToken\)/.test(qml2), /model: Logic\.receiveTokensOpen\(root\.receiveTokenList\)/.test(qml2)], [true, true, true]);
   check("screen: Bridge to Ethereum and the card read the chosen bridge's table",
     [/tokens: bridgeTokenTable \} : null/.test(qml2), /Logic\.sendBackToken\(sbAsset, bridgeTokenTable\), String\((sbDenom|index)\)/.test(qml2), /Logic\.sendBackAmounts\(receiveRegistry, sbAsset, bridgeTokenTable\)/.test(qml2),
-     /Logic\.privateSendBackSources\(cliAccounts, bridgedHoldings, bridgeTokenTable\)/.test(qml2), /Logic\.bridgeNetRows\([^\n]*, bridgeTokenTable\)/.test(qml2)], [true, true, true, true, true]);
+     /Logic\.privateSendBackView\(cliAccounts, bridgedHoldings, bridgeTokenTable, /.test(qml2), /Logic\.bridgeNetRows\([^\n]*, bridgeTokenTable\)/.test(qml2)], [true, true, true, true, true]);
   check("screen: the deposit steps come from receiveDepositSteps", (qml2.match(/Logic\.receiveDepositSteps\(/g) || []).length, 2);
   const rows2 = L.privateSendBackSources(accts2, [], fromDep);
   check("private chips name their token, and only one is chosen at a time", [L.privateSourceLabel(rows2[1]), L.privateSourceLabel(L.privateSendBackSources(accts2, held2, fromDep)[0]),
     /label: Logic\.privateSourceLabel\(modelData\)\n\s*chosen: Logic\.sameSource\(root\.sbAccount, root\.sbAsset, modelData\)/.test(qml2)],
     ["yGrPEb…fe4Z · USDT · private", "yGrPEb…fe4Z · 0.1 wETH · private", true]);
+  // wallet-1120, the M2 install of 2026-11-19: Bridge to Ethereum offered 0.01 wETH of a private
+  // account whose 0.01 wETH an earlier send-back had burned (card: "Recorded on Ethereum · finish it").
+  const sbList = [{ id: "sb-9", account: PRIV2, symbol: "ETH", amount: "0.01 ETH", stage: "recorded" }];
+  const burns = L.sendBackBurns(sbList, {});
+  check("burns: a recorded send-back is a landed burn of its account and token", burns, { [PRIV2 + "|ETH"]: "landed" });
+  check("burns: the latest status wins; the symbol from the amount when the row has none",
+    [L.sendBackBurns([{ id: "a", account: PRIV2, amount: "0.01 ETH", stage: "planned" }], { a: { stage: "burning" } }), L.sendBackBurns([{ id: "a", account: PRIV2, symbol: "ETH", stage: "planned" }], {}),
+     L.sendBackBurns([{ id: "a", account: PRIV2, symbol: "ETH", stage: "released" }, { id: "b", account: PRIV2, symbol: "ETH", stage: "approve" }], {})],
+    [{ [PRIV2 + "|ETH"]: "pending" }, {}, { [PRIV2 + "|ETH"]: "pending" }]);
+  // 1. As on the M2: no token listing accepted yet, so the wallet can't read the account: its
+  // wETH isn't offered at every amount any more (the burn landed); the tokens it never burned are.
+  const m2 = L.privateSendBackView(accts2, [], fromDep, burns);
+  check("M2: a landed burn and an unreadable balance: that token is held back, said, the others offered",
+    [m2.rows.map((r) => r.symbol), m2.held, L.privateHeldUnread(m2.held), L.privateSendBackSources(accts2, [], fromDep, burns).length],
+    [["USDT", "DAI"], [{ account: PRIV2, symbol: "wETH", why: "unread" }], true, 2]);
+  check("M2: the line names the account and token", L.privateHeldLine(m2.held), "yGrPEb…fe4Z · wETH: a send-back already burned from it, and Names can't read what it holds now. Accept the LEZ Bridge's token listing to see it.");
+  // 2. The listing accepted, its first read not made yet (the module's read was dropped when the
+  // burn's private call ended): nothing offered yet, and the screen asks again.
+  const listing = (read, rows) => [{ token_program: "T", app: "lez_bridge", definitions: ["DefEth", "DefUsdt", "DefDai"], read: read, updating: !read, error: null, holdings: rows }];
+  const reading = L.privateSendBackView(accts2, listing(false, []), fromDep, burns);
+  check("a read not made yet is not \"holds none\": nothing offered, reading", [reading.rows.length, reading.reading, reading.held.map((h) => h.why)], [0, true, ["reading", "reading", "reading"]]);
+  // 3. Read: it holds no wETH (burned) and nothing else: no chip at all, no every-amount fallback.
+  const none = L.privateSendBackView(accts2, listing(true, [{ account: PRIV2, definition: "DefEth", symbol: "wETH", balance: "0", decimals: 18 }]), fromDep, burns);
+  check("read as holding none: nothing offered", [none.rows.length, none.reading, none.held.length], [0, false, 0]);
+  // 4. Read after the burn and it still holds some: offered, with what it holds.
+  const more = L.privateSendBackView(accts2, listing(true, [{ account: PRIV2, definition: "DefEth", symbol: "wETH", balance: D(2, 16), decimals: 18 }]), fromDep, burns);
+  check("read after a landed burn: what it holds now is offered", more.rows.map((r) => L.privateSourceLabel(r)), ["yGrPEb…fe4Z · 0.02 wETH · private"]);
+  check("read after a landed burn: the amounts are capped by it", L.sendBackAmounts(null, more.rows[0].asset, fromDep).map((d) => d.text), ["0.01"]);
+  // 5. A burn on its way: not offered even when the read still shows it (it is spent at the block).
+  const onWay = L.sendBackBurns([{ id: "sb-10", account: PRIV2, symbol: "ETH", stage: "burning" }], {});
+  const pending = L.privateSendBackView(accts2, listing(true, [{ account: PRIV2, definition: "DefEth", symbol: "wETH", balance: D(1, 16), decimals: 18 }]), fromDep, onWay);
+  check("a burn on its way holds the token back", [pending.rows.length, pending.held, L.privateHeldLine(pending.held)],
+    [0, [{ account: PRIV2, symbol: "wETH", why: "burning" }], "yGrPEb…fe4Z · wETH: a send-back's burn from it is on its way; it's offered again once that lands."]);
+  // Without a bridge token table (an older bridge): the same two rules.
+  const oldHeld = [{ token_program: "T", holdings: [{ account: PRIV2, account_kind: "private", symbol: "wETH", balance: D(1, 17), decimals: 18 }] }];
+  check("no table: a landed burn holds back the every-amount row, a pending one the holding",
+    [L.privateSendBackView(accts2, [], undefined, { [PRIV2 + "|ETH"]: "landed" }).held.map((h) => h.why), L.privateSendBackView(accts2, oldHeld, undefined, { [PRIV2 + "|ETH"]: "pending" }).rows.length,
+     L.privateSendBackView(accts2, oldHeld, undefined, { [PRIV2 + "|ETH"]: "landed" }).rows.length], [["unread"], 0, 1]);
+  // Planning checks the chosen account again, read just now: a burned holding stops before the sheet.
+  const chosenEth = L.privateSendBackView(accts2, [], fromDep, {}).rows[0];
+  check("plan check: the M2 case once the listing is read (holds none)", L.privateHoldingCheck(none, PRIV2, chosenEth.asset, D(1, 16)),
+    { error: "This account holds no wETH now (it was read again just now). Nothing was done." });
+  check("plan check: still enough, under way, less, a burn on its way",
+    [L.privateHoldingCheck(more, PRIV2, chosenEth.asset, D(1, 16)), L.privateHoldingCheck(reading, PRIV2, chosenEth.asset, D(1, 16)).wait, L.privateHoldingCheck(more, PRIV2, chosenEth.asset, D(3, 16)).error,
+     L.privateHoldingCheck(pending, PRIV2, chosenEth.asset, D(1, 16)).error, L.privateHoldingCheck(L.privateSendBackView(accts2, [], fromDep, {}), PRIV2, chosenEth.asset, D(1, 16))],
+    [{ ok: true }, true, "This account holds 0.02 wETH now, less than that amount. Choose the amount again. Nothing was done.",
+     "A send-back's burn from this account is on its way; send this one once it lands. Nothing was done.", { ok: true }]);
+  check("token listing asked: the bridge's answers said",
+    [L.listingAskedLine({ token_source: { accepted: true } }), L.listingAskedLine({ needs: "connect", token_source: { accepted: false } }), L.listingAskedLine({ token_source: { accepted: false, request: "r1" } }), L.listingAskedLine(null)],
+    ["The token listing is accepted; reading what the account holds…", "Connect the LEZ Bridge to this wallet first (its app asks for that).", "The LEZ Bridge asked to list its tokens in this wallet: approve it in the sheet.", "The LEZ Bridge didn't ask to list its tokens. Nothing changed."]);
+  check("screen: the private chips read the send-backs' burns, and the screen asks again while a read is being made",
+    [/Logic\.privateSendBackView\(cliAccounts, bridgedHoldings, bridgeTokenTable, Logic\.sendBackBurns\(sendBacks, sbStatuses\)\)/.test(qml2), /sbPrivateView\.reading/.test(qml2), /Logic\.privateHeldLine\(root\.sbPrivateView\.held\)/.test(qml2)], [true, true, true]);
 }
 
 

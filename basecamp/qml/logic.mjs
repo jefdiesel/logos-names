@@ -2740,7 +2740,7 @@ export function sendBacksFrom(value) {
     var rows = value && Array.isArray(value.send_backs) ? value.send_backs : Array.isArray(value) ? value : []
     return rows.filter(function(x) { return x && x.id }).map(function(x) {
         return { id: String(x.id), amount: String(x.amount_text || ""), account: String(x.account || ""), recipient: String(x.recipient || ""),
-                 words: String(x.words_text || ""), stage: String(x.stage || "") }
+                 words: String(x.words_text || ""), stage: String(x.stage || ""), symbol: String(x.symbol || "") }
     })
 }
 
@@ -3194,26 +3194,134 @@ export function privateClaimSteps(s) {
 /// the wallet lists for it (token_source_holdings) when it lists one, else no amount (the wallet's
 /// simulation checks the balance when it proves the burn). [{key, account, symbol, amount, asset,
 /// private: true}]; `asset.anyAmount` offers every denomination.
-export function privateSendBackSources(accounts, holdings, tokens) {
+export function privateSendBackSources(accounts, holdings, tokens, burns) {
+    return privateSendBackView(accounts, holdings, tokens, burns).rows
+}
+
+// ── A private holding with a burn (the M2 install of 2026-11-19: Bridge to Ethereum offered
+//    0.01 wETH of a private account whose 0.01 wETH an earlier send-back had burned). Three causes,
+//    each closed here: the module's token read was still the one from before the burn (it is now
+//    dropped when a private call ends, and a read not made yet is `read: false`, never "holds
+//    none"); an account the wallet read as holding none of a token was offered every amount (the
+//    fallback for a token the wallet can't read at all); and nothing looked at the bridge's own
+//    send-backs. A burn on its way (approved, or sent and waiting for its block) holds the
+//    account's token back: a private account can't make a second burn before the first lands. A
+//    landed burn holds it back while what the account holds can't be read. ──
+
+/// The send-back stages whose burn from the account is on its way, and those whose burn landed
+/// (rfp-022 modules/BRIDGE-API.md, "the send-back view").
+export const SEND_BACK_BURN_PENDING = ["approve", "burning"]
+export const SEND_BACK_BURN_LANDED = ["burned", "recorded", "proving", "proved", "wrapped", "releasable", "released"]
+
+/// The burns of each account and token, from the bridge's send-backs (sendBacksFrom: {id, account,
+/// symbol, stage}) and their latest statuses (id → send_back_status): {"<account>|<symbol>":
+/// "pending" | "landed"}, a burn on its way winning. `symbol` is the bridge's (ETH, not wETH).
+export function sendBackBurns(list, statuses) {
+    var st = statuses && typeof statuses === "object" ? statuses : {}
+    var out = {}
+    ;(Array.isArray(list) ? list : []).forEach(function(x) {
+        if (!x || !x.account) return
+        var s = st[x.id] && st[x.id].stage ? String(st[x.id].stage) : String(x.stage || "")
+        var symbol = String(x.symbol || (st[x.id] && st[x.id].symbol) || "")
+        if (symbol === "") {
+            var m = /\s(\S+)$/.exec(String(x.amount || ""))
+            symbol = m ? m[1] : ""
+        }
+        if (symbol === "") return
+        var key = String(x.account) + "|" + symbol
+        if (SEND_BACK_BURN_PENDING.indexOf(s) >= 0) out[key] = "pending"
+        else if (SEND_BACK_BURN_LANDED.indexOf(s) >= 0 && out[key] !== "pending") out[key] = "landed"
+    })
+    return out
+}
+
+function burnOf(burns, account, names) {
+    var b = burns && typeof burns === "object" ? burns : {}
+    var found = ""
+    names.forEach(function(n) {
+        var v = n ? b[account + "|" + n] : undefined
+        if (v === "pending" || (v === "landed" && found === "")) found = v
+    })
+    return found
+}
+
+/// The private sources and why the others aren't offered: {rows (as privateSendBackSources),
+/// reading (a token read not made yet: ask again), held: [{account, symbol, why}]}, `why` one of
+/// "reading" (the wallet is reading it), "burning" (a burn from it is on its way), "unread" (a burn
+/// landed and what it holds can't be read). `burns`: sendBackBurns.
+export function privateSendBackView(accounts, holdings, tokens, burns) {
     if (Array.isArray(tokens) && tokens.length > 0)
-        return privateSendBackSourcesOf(accounts, holdings, tokens)
-    var out = []
+        return privateSendBackSourcesOf(accounts, holdings, tokens, burns)
+    var out = [], held = []
     privateAccounts(accounts).forEach(function(acct) {
         var id = acct.replace(/^Private\//, "")
-        var held = null
+        var found = null
         ;(Array.isArray(holdings) ? holdings : []).forEach(function(src) {
             ;((src && src.holdings) || []).forEach(function(h) {
                 var sym = String(h.symbol || "")
                 var card = sym === "ETH" ? "wETH" : sym
-                if (held === null && String(h.account || "").replace(/^(Private|Public)\//, "") === id && SEND_BACK_FALLBACK[card] && someAmount(String(h.balance || "0")))
-                    held = { symbol: card, base: String(h.balance), amount: withDecimals(String(h.balance), Number(h.decimals) || SEND_BACK_FALLBACK[card].decimals) }
+                if (found === null && String(h.account || "").replace(/^(Private|Public)\//, "") === id && SEND_BACK_FALLBACK[card] && someAmount(String(h.balance || "0")))
+                    found = { symbol: card, base: String(h.balance), amount: withDecimals(String(h.balance), Number(h.decimals) || SEND_BACK_FALLBACK[card].decimals) }
             })
         })
-        var asset = held !== null ? { symbol: held.symbol, base: held.base, amount: held.amount, "private": true }
+        var asset = found !== null ? { symbol: found.symbol, base: found.base, amount: found.amount, "private": true }
             : { symbol: "wETH", base: "", amount: "", "private": true, anyAmount: true }
+        var burn = burnOf(burns, acct, [asset.symbol, asset.symbol === "wETH" ? "ETH" : ""])
+        if (burn === "pending" || (burn === "landed" && found === null)) {
+            held.push({ account: acct, symbol: asset.symbol, why: burn === "pending" ? "burning" : "unread" })
+            return
+        }
         out.push({ key: acct + "|" + asset.symbol, account: acct, symbol: asset.symbol, amount: asset.amount, asset: asset, "private": true })
     })
-    return out
+    return { rows: out, reading: false, held: held }
+}
+
+/// The line under the private chips for what is held back, "" for nothing.
+export function privateHeldLine(held) {
+    var list = Array.isArray(held) ? held : []
+    var words = { reading: "reading what it holds…", burning: "a send-back's burn from it is on its way; it's offered again once that lands.",
+                  unread: "a send-back already burned from it, and Names can't read what it holds now. Accept the LEZ Bridge's token listing to see it." }
+    return list.filter(function(h) { return words[h.why] }).map(function(h) {
+        return idShort(h.account) + " · " + h.symbol + ": " + words[h.why]
+    }).join("\n")
+}
+
+/// Before a private send-back is planned: is the chosen account's token, read now, still enough
+/// for `value` (base units)? {ok: true} | {wait: true} | {error}. `view`: privateSendBackView.
+export function privateHoldingCheck(view, account, asset, value) {
+    var v = view || {}
+    var row = (v.rows || []).filter(function(r) { return sameSource(account, asset, r) })[0]
+    var sym = asset ? String(asset.symbol || "") : ""
+    if (row) {
+        if (row.asset.anyAmount === true || atLeast(String(row.asset.base || "0"), String(value || "0"))) return { ok: true }
+        return { error: "This account holds " + row.asset.amount + " " + sym + " now, less than that amount. Choose the amount again. Nothing was done." }
+    }
+    var h = (v.held || []).filter(function(x) { return x.account === String(account || "") && x.symbol === sym })[0]
+    if (h && h.why === "reading") return { wait: true, error: "Names is still reading what this account holds. Try again in a moment. Nothing was done." }
+    if (h && h.why === "burning") return { error: "A send-back's burn from this account is on its way; send this one once it lands. Nothing was done." }
+    if (h) return { error: "A send-back already burned from this account, and Names can't read what it holds now. Nothing was done." }
+    return { error: "This account holds no " + sym + " now (it was read again just now). Nothing was done." }
+}
+
+/// What "Show the token listing" says once the LEZ Bridge answered (its wallet_status).
+export function listingAskedLine(status) {
+    var s = status || {}
+    var ts = s.token_source || {}
+    if (ts.accepted === true) return "The token listing is accepted; reading what the account holds…"
+    if (s.needs === "connect") return "Connect the LEZ Bridge to this wallet first (its app asks for that)."
+    if (ts.request) return "The LEZ Bridge asked to list its tokens in this wallet: approve it in the sheet."
+    if (ts.problem) return sentenceOf(String(ts.problem))
+    return "The LEZ Bridge didn't ask to list its tokens. Nothing changed."
+}
+
+function sentenceOf(text) {
+    var t = bridgeText(text)
+    return t === "" ? t : t.charAt(0).toUpperCase() + t.slice(1) + (/[.!?]$/.test(t) ? "" : ".")
+}
+
+/// Whether a held-back account would show once the LEZ Bridge's token listing is accepted.
+export function privateHeldUnread(held) {
+    return (Array.isArray(held) ? held : []).some(function(h) { return h.why === "unread" })
 }
 
 /// The account a send-back leaves from is private.
@@ -3842,28 +3950,69 @@ export function privateSourceLabel(row) {
 /// privateSendBackSources with the chosen bridge's tokens: a row per private account and token it
 /// holds (token_source_holdings), else, when the wallet lists nothing for it, a row per token with
 /// every amount (the wallet's simulation checks the balance when it proves the burn).
-function privateSendBackSourcesOf(accounts, holdings, tokens) {
-    var out = []
+function privateSendBackSourcesOf(accounts, holdings, tokens, burns) {
+    var out = [], held = [], reading = false
+    var sources = Array.isArray(holdings) ? holdings : []
+    // The token sources that list a token's definition (a module that says which it lists:
+    // `definitions`, and whether its read was made: `read`). What they read is what the account
+    // holds of it, none included; a token none lists is one the wallet can't read.
+    var covering = function(t) {
+        return t.definition === "" ? [] : sources.filter(function(src) { return src && Array.isArray(src.definitions) && src.definitions.indexOf(t.definition) >= 0 })
+    }
     privateAccounts(accounts).forEach(function(acct) {
         var id = acct.replace(/^Private\//, "")
-        var held = []
-        ;(Array.isArray(holdings) ? holdings : []).forEach(function(src) {
-            ;((src && src.holdings) || []).forEach(function(h) {
-                if (String(h.account || "").replace(/^(Private|Public)\//, "") !== id || !someAmount(String(h.balance || "0"))) return
-                var sym = String(h.symbol || "")
-                var byDef = h.definition ? tokens.filter(function(x) { return x.definition !== "" && x.definition === String(h.definition) }) : []
-                var byCard = byDef.length > 0 || h.definition ? [] : tokens.filter(function(x) { return x.card === sym })
-                var bySym = byDef.length > 0 || byCard.length > 0 || h.definition ? [] : tokens.filter(function(x) { return x.symbol === sym })
-                var t = byDef[0] || (byCard.length === 1 ? byCard[0] : null) || (bySym.length === 1 ? bySym[0] : null)
-                if (t && held.every(function(k) { return tokenKey(k) !== tokenKey(t) }))
-                    held.push({ symbol: t.card, ethToken: t.ethToken, base: String(h.balance), amount: withDecimals(String(h.balance), Number(h.decimals) || t.decimals), definition: t.definition })
+        var rowsOf = function(list) {
+            var r = []
+            list.forEach(function(src) {
+                ;((src && src.holdings) || []).forEach(function(h) {
+                    if (String(h.account || "").replace(/^(Private|Public)\//, "") === id && someAmount(String(h.balance || "0"))) r.push(h)
+                })
             })
+            return r
+        }
+        var found = []    // [{token, h}] read as held
+        var unread = []   // tokens no source lists
+        tokens.forEach(function(t) {
+            var cover = covering(t)
+            if (cover.length > 0) {
+                if (cover.some(function(src) { return src.read === false })) {
+                    reading = true
+                    held.push({ account: acct, symbol: t.card, why: "reading" })
+                    return
+                }
+                var h = rowsOf(cover).filter(function(h) { return String(h.definition || "") === t.definition })[0]
+                if (h) found.push({ token: t, h: h })
+                return
+            }
+            unread.push(t)
         })
-        var assets = held.length > 0 ? held.map(function(k) { return { symbol: k.symbol, base: k.base, amount: k.amount, definition: k.definition, ethToken: k.ethToken, "private": true } })
-            : tokens.map(function(t) { return { symbol: t.card, base: "", amount: "", definition: t.definition, ethToken: t.ethToken, "private": true, anyAmount: true } })
+        // The tokens no source lists: matched as before (by definition, else the card's or the
+        // bridge's symbol when only one token has it).
+        rowsOf(sources).forEach(function(h) {
+            var sym = String(h.symbol || "")
+            var byDef = h.definition ? unread.filter(function(x) { return x.definition !== "" && x.definition === String(h.definition) }) : []
+            var byCard = byDef.length > 0 || h.definition ? [] : unread.filter(function(x) { return x.card === sym })
+            var bySym = byDef.length > 0 || byCard.length > 0 || h.definition ? [] : unread.filter(function(x) { return x.symbol === sym })
+            var t = byDef[0] || (byCard.length === 1 ? byCard[0] : null) || (bySym.length === 1 ? bySym[0] : null)
+            if (t && found.every(function(k) { return tokenKey(k.token) !== tokenKey(t) }))
+                found.push({ token: t, h: h })
+        })
+        var assets = found.map(function(k) {
+            return { symbol: k.token.card, base: String(k.h.balance), amount: withDecimals(String(k.h.balance), Number(k.h.decimals) || k.token.decimals), definition: k.token.definition, ethToken: k.token.ethToken, "private": true }
+        })
+        // Nothing read as held: every token no source lists, at every amount (the wallet's
+        // simulation checks the balance when it proves the burn).
+        if (found.length === 0)
+            assets = unread.map(function(t) { return { symbol: t.card, base: "", amount: "", definition: t.definition, ethToken: t.ethToken, "private": true, anyAmount: true } })
         assets.forEach(function(asset) {
+            var t = tokens.filter(function(x) { return x.card === asset.symbol && x.definition === asset.definition })[0] || { symbol: asset.symbol, card: asset.symbol }
+            var burn = burnOf(burns, acct, [t.symbol, t.card])
+            if (burn === "pending" || (burn === "landed" && asset.anyAmount === true)) {
+                held.push({ account: acct, symbol: asset.symbol, why: burn === "pending" ? "burning" : "unread" })
+                return
+            }
             out.push({ key: acct + "|" + assetId(asset), account: acct, symbol: asset.symbol, amount: asset.amount, asset: asset, "private": true })
         })
     })
-    return out
+    return { rows: out, reading: reading, held: held }
 }

@@ -2054,6 +2054,9 @@ Item {
         walletView = "sendback"
         // The accounts as the wallet file has them now (an account imported meanwhile shows at once).
         loadAccounts()
+        // And what they hold: the module answers with its last read and reads again if it is old.
+        loadTokens()
+        sbListingLine = ""
         sbError = ""
         sbNeeds = null
         sbCheck = null
@@ -2214,7 +2217,10 @@ Item {
                 sbError = "This bridge doesn't offer " + shown.text + " " + sbAsset.symbol + " (its amounts changed since they were shown). Choose the amount again. Nothing was done."
                 return
             }
-            sbPlanIndex(index)
+            if (sbFromPrivate)
+                sbPrivateRecheck(shown.value, function() { sbPlanIndex(index) })
+            else
+                sbPlanIndex(index)
         }, function(message) {
             sbAsking = false
             sbError = sentence(message) + " The amounts couldn't be checked; nothing was done."
@@ -2245,7 +2251,7 @@ Item {
                 plans[id] = ticked
                 sbOwnPlans = plans
             }
-            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), kind: String(value.kind || ""), notice: String(value.account_notice || "") }
+            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), symbol: String(value.symbol || ""), kind: String(value.kind || ""), notice: String(value.account_notice || "") }
             sendBacks = [row].concat(sendBacks.filter(function(x) { return x.id !== id }))
             var all = sbStatuses
             all[id] = value
@@ -2271,7 +2277,67 @@ Item {
     readonly property var sbJob: sbFocus !== "" ? (sbJobs[sbFocus] || null) : null
     readonly property var sbJobView: Logic.privateJob(sbJob, "burn")
     readonly property bool sbPrivateAble: bridgeConfig !== null && Logic.privateCan(bridgeFeatures, "sendBack")
-    readonly property var sbPrivateSources: sbPrivateAble ? Logic.privateSendBackSources(cliAccounts, bridgedHoldings, bridgeTokenTable) : []
+    // The private accounts' holdings, with the send-backs' burns (wallet-1120): a holding with a
+    // burn on its way, or a landed one while it can't be read, isn't offered; a read not made
+    // yet is asked again every 3 s while this screen shows (sbHoldingsSoon).
+    readonly property var sbPrivateView: sbPrivateAble ? Logic.privateSendBackView(cliAccounts, bridgedHoldings, bridgeTokenTable, Logic.sendBackBurns(sendBacks, sbStatuses)) : ({ rows: [], reading: false, held: [] })
+    readonly property var sbPrivateSources: sbPrivateView.rows
+    property bool sbHoldingsAgain: false
+    onSbPrivateViewChanged: sbHoldingsSoon()
+    function sbHoldingsSoon() {
+        if (sbHoldingsAgain || walletView !== "sendback" || !sbPrivateView.reading)
+            return
+        sbHoldingsAgain = true
+        againAfter(3000, function() {
+            sbHoldingsAgain = false
+            if (walletView === "sendback" && sbPrivateView.reading)
+                loadTokens()
+        })
+    }
+    /// Before a private send-back is planned (and again after the token listing is approved in its
+    /// steps): what the account holds, read now. One it no longer holds stops here, before the
+    /// wallet's sheet; a read under way is waited for (3 s at a time, 30 s at most). A read that
+    /// fails lets it go on: the wallet's own simulation checks the balance before it proves.
+    function sbPrivateRecheck(value, go, tries) {
+        askLater("token_source_holdings", [], onNet(function(v) {
+            bridgedHoldings = Array.isArray(v) ? v : []
+            var view = Logic.privateSendBackView(cliAccounts, bridgedHoldings, bridgeTokenTable, Logic.sendBackBurns(sendBacks, sbStatuses))
+            var now = Logic.privateHoldingCheck(view, sbAccount, sbAsset, value)
+            if (now.wait && (tries || 0) < 10) {
+                againAfter(3000, function() { sbPrivateRecheck(value, go, (tries || 0) + 1) })
+                return
+            }
+            if (now.ok) {
+                go()
+                return
+            }
+            sbAsking = false
+            sbError = now.error
+        }), function(message) {
+            console.log("names_ui: send back: token_source_holdings:", message)
+            go()
+        })
+    }
+    property bool sbListingAsking: false
+    property string sbListingLine: ""
+    /// "Show the token listing": the LEZ Bridge's wallet_status, which proposes its tokens as a token
+    /// source in this wallet (its sheet then shows here); once approved, the holdings are read.
+    function sbAskListing() {
+        if (sbListingAsking)
+            return
+        sbListingAsking = true
+        sbListingLine = ""
+        bridgeCall("wallet_status", [], function(v) {
+            sbListingAsking = false
+            sbListingLine = Logic.listingAskedLine(v)
+            loadAppRequests()
+            loadTokens()
+        }, function(message, kind) {
+            sbListingAsking = false
+            sbListingLine = sentence(message)
+            console.log("names_ui: send back: wallet_status:", kind, message)
+        }, 30000)
+    }
     readonly property bool sbFromPrivate: Logic.sendBackIsPrivate(sbFocusRow !== null ? sbFocusRow : { account: sbAccount })
     function sbTakeJob(id, job) {
         var all = sbJobs
@@ -13127,6 +13193,11 @@ Item {
                                 }
                             }
                         }
+                        // What isn't offered and why: a read under way, a burn on its way, a landed burn
+                        // whose account can't be read (wallet-1120).
+                        Hint { visible: root.sbAsset === null && root.sbPrivateView.held.length > 0; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: Logic.privateHeldLine(root.sbPrivateView.held) }
+                        Link { visible: root.sbAsset === null && Logic.privateHeldUnread(root.sbPrivateView.held); text: root.sbListingAsking ? "Asking the LEZ Bridge…" : "Show the token listing"; font.pixelSize: root.px(15); onPressed: root.sbAskListing() }
+                        Hint { visible: root.sbListingLine !== ""; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: root.sbListingLine }
                         Hint { visible: Logic.sendBackPrivateNoteShown(root.sbPrivateSources, root.sbAccount, root.sbFromPrivate); color: root.ink; text: Logic.PRIVATE_SEND_BACK_NOTE }
                         // Then the amounts that account holds.
                         Flow {

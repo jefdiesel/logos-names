@@ -8722,6 +8722,9 @@ impl Names {
                     request["problem"] = json!(problem);
                 }
                 if request["kind"] == provider::PRIVATE_CALL {
+                    // A private call (a bridge's private burn, a private claim) changes what the
+                    // account holds: the token reads made before it are not shown again (wallet-1120).
+                    tokens_moved = true;
                     // The message and the simulation were only kept to be sent and shown.
                     if let Some(fields) = request.as_object_mut() {
                         fields.remove("message");
@@ -9977,7 +9980,18 @@ impl Names {
                     Some(merged(row.clone(), &json!({ "name": named["name"], "symbol": named["symbol"], "decimals": named["decimals"], "origin": named["origin"], "chain_name": row["name"] })))
                 })
                 .collect();
-            out.push(json!({ "token_program": source["token_program"], "app": source["app"], "holdings": holdings, "updating": read["updating"], "error": read["error"] }));
+            // `definitions`: the tokens this source lists, so the app can tell "holds none" (listed,
+            // read) from "can't be read here" (not listed). `read`: a read has been made; until
+            // then `holdings` is empty without meaning "holds none" (wallet-1120: a dropped read
+            // made a burned private holding look unreadable, and every amount was offered).
+            let definitions: Vec<Value> = source["definitions"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|d| d["definition"].as_str().or_else(|| d.as_str()).map(Value::from))
+                .collect();
+            out.push(json!({ "token_program": source["token_program"], "app": source["app"], "definitions": definitions, "read": !read["value"].is_null(), "holdings": holdings, "updating": read["updating"], "error": read["error"] }));
         }
         Ok(Value::from(out))
     }
@@ -15225,6 +15239,45 @@ mod tests {
         // The programs are remembered for the app: the next call's sheet doesn't flag them as new.
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         assert_eq!(names.store().private.programs_of("lez_bridge").len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// wallet-1120 (the M2 install of 2026-11-19: a private holding already burned was offered
+    /// again). The bridged token reads say which tokens each source lists and whether a read was
+    /// made, so an empty list before the first read isn't "holds none"; and a private call that
+    /// ends (the bridge's private burn) drops the reads made before it.
+    #[test]
+    fn bridged_token_reads_say_what_they_list_and_a_private_call_drops_them() {
+        let (mut names, dir) = with_wallet("source-reads", "exit 1");
+        let program = registry::account_text(&[21; 32]);
+        let definition = registry::account_text(&[22; 32]);
+        names.store().private.token_sources.push(json!({ "app": "lez_bridge", "token_program": program, "definitions": [{ "definition": definition, "name": "Wrapped Ether", "symbol": "wETH", "decimals": 18 }] }));
+        let wallet = names.cli_setup().unwrap().wallet;
+        let key = format!("{TOKENS_KEY}{program}:{}", wallet.display());
+        let kept = |names: &Names| {
+            let mut reads = names.board_reads.lock().unwrap();
+            let read = reads.entry(key.clone()).or_default();
+            read.value = Some(json!({ "holdings": [] }));
+            read.fetched = Some(std::time::Instant::now());
+            read.updating = false;
+        };
+        kept(&names);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let read = parsed(&names.token_source_holdings())["value"][0].clone();
+        assert_eq!((read["definitions"].clone(), read["read"].clone()), (json!([definition]), json!(true)), "{read}");
+        // Forgotten (as after a private call): no read made yet, which is said.
+        names.forget_tokens();
+        let again = parsed(&names.token_source_holdings())["value"][0].clone();
+        assert_eq!((again["read"].clone(), again["holdings"].clone()), (json!(false), json!([])), "{again}");
+
+        // A private call that ends drops the token reads made before it.
+        kept(&names);
+        let id = "pc-ended".to_owned();
+        let job = "job-ended".to_owned();
+        names.store().requests.push(json!({ "id": id, "kind": provider::PRIVATE_CALL, "app": "lez_bridge", "state": "running", "decided": provider::now_ms(), "job": job, "message": "00" }));
+        names.provider_refresh();
+        assert!(names.store().get_mut(&id).unwrap()["state"] != "running", "the job's record is gone, so it ended");
+        assert!(!names.board_reads.lock().unwrap().contains_key(&key), "the token read from before the private call is dropped");
         let _ = std::fs::remove_dir_all(dir);
     }
 
