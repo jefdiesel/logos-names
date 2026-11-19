@@ -1,0 +1,19 @@
+{
+  "format": "names-network/1",
+  "name": "Bridge test network",
+  "lez": "0.4",
+  "chain_id": "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374",
+  "rpc": "https://lez.nameswallet.app/",
+  "registry": "6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA",
+  "bridge_programs": [
+    "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7",
+    "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr",
+    "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf",
+    "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA",
+    "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed",
+    "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"
+  ],
+  "nft_programs": [],
+  "faucet": "https://lez.nameswallet.app/",
+  "updated": "2026-11-19"
+}

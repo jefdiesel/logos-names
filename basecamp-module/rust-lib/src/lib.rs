@@ -47,6 +47,7 @@ mod changes;
 mod cli;
 mod deposit;
 mod exit_recipient;
+mod network;
 mod nft;
 #[allow(dead_code)] // shared with the names CLI, which uses the rest
 mod nft_wire;
@@ -93,6 +94,16 @@ const DEFAULT_REGISTRY: &str = "38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq";
 const LEZ04_SEQUENCER: &str = "https://lez.nameswallet.app/";
 /// The LNS registry on LEZ 0.4 (branch `rc3-port`, deployed 2026-11-13; deposit mode).
 const LEZ04_REGISTRY: &str = "6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA";
+/// LEZ 0.4's chain id: the channel `getChannelId` gives at `LEZ04_SEQUENCER` (read 2026-11-19).
+/// With the built-in RPC, home never takes a sequencer that serves another chain; another chain
+/// is entered as a custom network (Settings, Network; docs/wallet/NETWORKS.md).
+const LEZ04_CHANNEL: &str = "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374";
+/// Written into config.json once our LEZ 0.4 became every install's network (wallet-1121, Jef:
+/// "next update goes to 0.4"): a file without it was saved by an earlier build, whose
+/// `names_network` was its default rather than a choice, and opens on LEZ 0.4 once (its LEZ 0.3
+/// settings kept as they are). With it, the saved network is the person's choice and stands.
+const NET_DEFAULT_MARK: &str = "default_network";
+const NET_DEFAULT_SEEN: &str = "lez-0.4";
 /// What LEZ 0.4's home zone is called in the history and in other apps' requests, so
 /// nothing done there is ever counted or approved as LEZ 0.3's (`bridge_net::ZONE`).
 const LEZ04_HOME_ID: &str = bridge_net::ZONE;
@@ -111,8 +122,9 @@ const LEZ04_TOOL_FILE: &str = "names-lez04";
 /// Which names network the module uses: where names are looked up, registered and paid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Net {
-    #[default]
     Lez03,
+    /// Every install's network since wallet-1121 (`NET_DEFAULT_MARK`).
+    #[default]
     Lez04,
 }
 
@@ -355,12 +367,30 @@ pub trait NamesModule: Send + 'static {
     /// (since 0.17.0; before, it was a plain object for every caller).
     fn get_config(&mut self) -> String;
 
-    /// Switches the names network to `network`: `lez-0.3` (the public Logos testnet, the
-    /// default) or `lez-0.4` (the bridge test network). Names are then looked up,
-    /// registered and paid there, with that network's own CLI, wallet folder, registry and
-    /// sequencer; the other network's settings are kept as they are. Refused while the
-    /// wallet is busy. The value is `get_config`'s. Names app only.
+    /// Switches the names network to `network`: `lez-0.3` (the public Logos testnet) or
+    /// `lez-0.4` (our bridge test network, the default since wallet-1121). Names are then looked
+    /// up, registered and paid there, with that network's own CLI, wallet folder, registry and
+    /// sequencer; the other network's settings are kept as they are. `lez-0.4` is always our own
+    /// LEZ 0.4: a custom network in use (`network_custom`) is left for it (its RPC, registry and
+    /// bridges go back to the built-in ones; the CLI and wallet folder stay) and kept as
+    /// `custom_network_last`. Refused while the wallet is busy. The value is `get_config`'s.
+    /// Names app only.
     fn set_names_network(&mut self, network: String) -> String;
+
+    /// A LEZ 0.4 network entered by hand (Settings, Network, Custom network; docs/wallet/NETWORKS.md):
+    /// the RPC at `rpc` must say it serves the chain `chain_id` (64 hex, `getChannelId`), or
+    /// nothing is done ("That RPC serves chain …, not …"). The registry, bridges, NFT programs and
+    /// faucet come from the network file at `file_url` (empty: `https://nameswallet.app/networks/<chain-id>.json`),
+    /// which must name the same chain; for our own LEZ 0.4's chain a missing file (404) keeps the
+    /// built-in ids. With `apply` false nothing changes: the value is what was found,
+    /// `{chain_id, rpc, height, file_url, file, file_missing, builtin, in_use, differs, reset}`,
+    /// where `reset` is `{before, now}` when this chain's height went down since it was last read
+    /// (a reset that kept the chain id: reads made before are dropped, and the reset is told as a
+    /// balance read tells one). With `apply` true the checks are made again, then the wallet is on
+    /// that network (LEZ 0.4, its RPC, the file's ids, its NFT programs added), and the value is
+    /// `get_config`'s with `network_set` (what was found). Refused while the wallet is busy.
+    /// Names app only.
+    fn network_custom(&mut self, rpc: String, chain_id: String, file_url: String, apply: bool) -> String;
 
     /// Sets the one bridge program the Wallet reads on LEZ 0.4 (its Config lists the bridged
     /// tokens): a program ID, or empty for the built-in default. It replaces the whole list
@@ -1448,6 +1478,14 @@ struct Names {
     /// `bridge_net::DEFAULT_BRIDGE_PROGRAM`. At most `bridge_net::MAX_BRIDGES`. A redeployed or
     /// second bridge is a setting, not a build.
     bridge_programs: Vec<AccountId>,
+    /// The LEZ 0.4 network entered by hand (`network_custom`), or null for our own LEZ 0.4:
+    /// `{chain_id, rpc, file_url, name, height, faucet, set_at}`. Kept in config.json under
+    /// `lez04.custom`; its RPC, registry and bridges are the ordinary LEZ 0.4 settings.
+    custom: Value,
+    /// The last custom network left for our own LEZ 0.4, so Settings can offer it again.
+    custom_last: Value,
+    /// The last reset of LEZ 0.4 (`reset_at`, seconds) whose reads were dropped here.
+    reset_handled: Option<u64>,
     /// What each CLI said its version is, by path and modification time.
     cli_lines: std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, String)>>,
     /// What each LEZ 0.4 tool said it can do (`cli::prover_status`), by path and modification
@@ -1676,6 +1714,9 @@ impl Default for Names {
             parked: Value::Null,
             rejected: HashMap::new(),
             bridge_programs: Vec::new(),
+            custom: Value::Null,
+            custom_last: Value::Null,
+            reset_handled: None,
             cli_lines: Default::default(),
             tool_status: Default::default(),
             sheet_reads: SheetReads::default(),
@@ -1687,12 +1728,15 @@ impl Default for Names {
         if let Some(dir) = config_dir() {
             tighten(&dir);
         }
-        // A missing or unreadable file just means the defaults stand.
+        // A missing or unreadable file just means the defaults stand: our LEZ 0.4's.
         let saved = config_dir()
             .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
             .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        if let Some(saved) = saved {
-            names.apply_network(&saved);
+        names.apply_network(saved.as_ref().unwrap_or(&json!({})));
+        // A file an earlier build saved opened on LEZ 0.4 just now (NET_DEFAULT_MARK): saved at
+        // once, so from here the network in it is the person's choice.
+        if saved.as_ref().is_some_and(|saved| saved[NET_DEFAULT_MARK] != NET_DEFAULT_SEEN) {
+            names.save();
         }
         names
     }
@@ -1712,7 +1756,7 @@ const MODULE_VERSION: &str = "0.17.0";
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
 /// `relayed_bridge_burn`: `propose_relayed_call` signs a burn of one denomination to a bridge whose
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
-const MODULE_FEATURES: [&str; 11] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import"];
+const MODULE_FEATURES: [&str; 12] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -2455,10 +2499,12 @@ fn saved_bridges(block: &Value) -> Vec<AccountId> {
 
 impl Names {
     /// Applies a saved configuration on the names network it names (`names_network`):
-    /// LEZ 0.3's settings are the flat fields, LEZ 0.4's are under `lez04`.
+    /// LEZ 0.3's settings are the flat fields, LEZ 0.4's are under `lez04`. A file an earlier
+    /// build saved (no `NET_DEFAULT_MARK`) opens on LEZ 0.4, its LEZ 0.3 settings kept as they are.
     fn apply_network(&mut self, saved: &Value) {
         self.bridge_programs = saved_bridges(&saved["lez04"]);
-        let net = saved["names_network"].as_str().and_then(Net::parse).unwrap_or_default();
+        let chosen = saved[NET_DEFAULT_MARK] == NET_DEFAULT_SEEN;
+        let net = if chosen { saved["names_network"].as_str().and_then(Net::parse).unwrap_or_default() } else { Net::default() };
         match net {
             Net::Lez03 => {
                 self.apply_saved(saved);
@@ -2492,6 +2538,10 @@ impl Names {
                 // Zones are LEZ 0.3's: LEZ 0.4 has its home only, known by its own id.
                 let home = self.zones.home().clone();
                 self.zones = zones::Zones::new(home).with_home_id(LEZ04_HOME_ID);
+                // A network entered by hand (`network_custom`): its RPC, registry and bridges are
+                // the settings above; this says which chain they must be.
+                self.custom = block["custom"].clone().as_object().filter(|custom| custom.get("chain_id").and_then(Value::as_str).is_some()).map_or(Value::Null, |custom| Value::Object(custom.clone()));
+                self.custom_last = block["custom_last"].clone();
                 self.parked = json!(NET_KEYS.iter().map(|key| (key.to_string(), saved[*key].clone())).collect::<Map<String, Value>>());
             }
         }
@@ -2624,6 +2674,189 @@ impl Names {
         Ok(())
     }
 
+    /// What `network_custom` finds at `rpc` for `chain_id`, every read made now within one
+    /// budget (`network::BUDGET`): the chain id first, refused unless it is the one typed; then
+    /// the height and the network file. A lower height on the chain in use is a reset: what was
+    /// read before is dropped here (`after_reset`), whether or not the person switches.
+    fn network_found(&mut self, rpc: &str, chain_id: &str, file_url: &str, apply: bool) -> Result<Value, String> {
+        let rpc = rpc.trim();
+        if !is_http_url(rpc) {
+            return Err("that RPC address isn't one the wallet can use: https://…, or http:// on this computer only. Nothing was changed.".to_owned());
+        }
+        let wanted = network::chain_id(chain_id)?;
+        if apply {
+            if let Some(job) = self.wallet_busy() {
+                return Err(format!("your wallet is busy ({}); switch networks when it is done", job["kind"].as_str().unwrap_or("a change")));
+            }
+        }
+        let deadline = registry::Deadline::after(network::BUDGET);
+        let read = registry::channel_id_within(rpc, CHANNEL_WAIT.min(deadline.left()))
+            .map_err(|why| format!("that RPC didn't say which chain it serves, so it can't be checked. Nothing was changed. ({})", why.trim().trim_end_matches('.')))?;
+        if read != wanted {
+            return Err(format!(
+                "that RPC serves chain {}, not the chain id you entered ({}). Nothing was changed.",
+                network::short(&read),
+                network::short(&wanted)
+            ));
+        }
+        let height = network::height(rpc, deadline)?;
+        let file_url = match file_url.trim() {
+            "" => network::default_file_url(&wanted),
+            given => given.to_owned(),
+        };
+        let builtin = wanted == LEZ04_CHANNEL;
+        let file = match network::fetch(&file_url, deadline) {
+            Ok(text) => Some(network::parse(&text, &wanted).map_err(|why| format!("{why}. Nothing was changed."))?),
+            // Our own LEZ 0.4 needs no file: the built-in ids stand.
+            Err(problem) if problem.missing && builtin => None,
+            Err(problem) => return Err(format!("{}. Nothing was changed.", problem.why)),
+        };
+        // The highest block this wallet saw on this chain: a lower one now is a reset that kept the id.
+        let mut before = (self.custom["chain_id"] == wanted.as_str()).then(|| self.custom["height"].as_u64()).flatten();
+        if let Some(dir) = config_dir() {
+            if let (Some(channel), Some(seen)) = bridge_net::last_seen(&dir) {
+                if channel == wanted {
+                    before = before.max(Some(seen));
+                }
+            }
+        }
+        let reset = before.filter(|before| height < *before);
+        let in_use = self.net == Net::Lez04 && (self.expected_chain().as_deref() == Some(wanted.as_str()) || self.zones.home().channel.as_deref() == Some(wanted.as_str()));
+        let (registry_id, bridges) = match &file {
+            Some(file) => (registry::account_text(&file.registry), file.bridge_programs.iter().map(registry::account_text).collect::<Vec<_>>()),
+            None => (LEZ04_REGISTRY.to_owned(), bridge_net::DEFAULT_BRIDGE_PROGRAMS.iter().map(|id| id.to_string()).collect()),
+        };
+        let now_registry = self.program.as_ref().map(registry::account_text).unwrap_or_default();
+        let now_bridges: Vec<String> = self.bridge_programs_now().iter().map(registry::account_text).collect();
+        let differs = in_use && (registry_id != now_registry || bridges != now_bridges);
+        if reset.is_some() && in_use {
+            self.after_reset(&wanted, height);
+        }
+        Ok(json!({
+            "chain_id": wanted,
+            "rpc": rpc,
+            "height": height,
+            "file_url": file_url,
+            "file": file.as_ref().map(network::NetworkFile::shown),
+            "file_missing": file.is_none(),
+            "name": file.as_ref().map_or("Bridge test network", |file| file.name.as_str()),
+            "registry": registry_id,
+            "bridge_programs": bridges,
+            "builtin": builtin,
+            "in_use": in_use,
+            "differs": differs,
+            "reset": reset.map(|before| json!({ "before": before, "now": height })),
+        }))
+    }
+
+    /// A reset of the chain in use that kept its id (the height went down): everything read
+    /// before is dropped, and the reset is told for a day as a balance read tells one (which
+    /// also stops an approval made before it from being signed again, `reset_refusal`).
+    fn after_reset(&mut self, chain: &str, height: u64) {
+        self.forget_all_reads();
+        self.token_info.clear();
+        self.forget_tokens();
+        bridge_net::forget_configs(&self.lez04_rpc());
+        if let Some(dir) = config_dir() {
+            bridge_net::mark_reset(&dir, chain, height, now());
+        }
+        if self.custom["chain_id"] == chain {
+            self.custom["height"] = json!(height);
+        }
+        self.reset_handled = config_dir().and_then(|dir| bridge_net::reset_seen(&dir, now()));
+        self.save();
+    }
+
+    /// Puts the wallet on the network `found` (`network_found`, checked just now): LEZ 0.4, its
+    /// RPC and chain, the file's registry and bridges (the built-in ones for our own chain with no
+    /// file), its NFT programs added to the list. The CLI and the wallet folder stay LEZ 0.4's.
+    fn use_custom(&mut self, found: &Value) -> Result<(), String> {
+        let rpc = found["rpc"].as_str().ok_or("no RPC was checked")?.to_owned();
+        let chain = found["chain_id"].as_str().ok_or("no chain was checked")?.to_owned();
+        let height = found["height"].as_u64().unwrap_or(0);
+        if self.net != Net::Lez04 {
+            self.switch_network(Net::Lez04)?;
+        }
+        // Every bridge token program seen on the chain left stays refused as a relayed call's root.
+        self.keep_bridge_tokens_before_change();
+        let left_rpc = self.lez04_rpc();
+        self.sequencer = rpc.clone();
+        let mut zones = self.zones_now();
+        if let Some(home) = zones.at_mut(0) {
+            home.sequencer = rpc.clone();
+            home.channel = Some(chain.clone());
+        }
+        self.zones = zones;
+        self.program = found["registry"].as_str().and_then(|id| registry::parse_account(id).ok()).or(self.program);
+        let bridges: Vec<AccountId> = found["bridge_programs"].as_array().into_iter().flatten().filter_map(|id| id.as_str().and_then(bridge_id)).collect();
+        let defaults: Vec<String> = bridge_net::DEFAULT_BRIDGE_PROGRAMS.iter().map(|id| id.to_string()).collect();
+        self.bridge_programs = if found["bridge_programs"] == json!(defaults) { Vec::new() } else { bridges };
+        self.rejected.remove("sequencer");
+        self.rejected.remove("registry");
+        self.custom = json!({
+            "chain_id": chain,
+            "rpc": rpc,
+            "file_url": found["file_url"],
+            "name": found["name"],
+            "height": height,
+            "faucet": found["file"]["faucet"],
+            "set_at": now(),
+        });
+        for entry in found["file"]["nft_programs"].as_array().into_iter().flatten() {
+            if let Some(program) = entry["program"].as_str() {
+                // A list already full keeps what the person listed; the rest can be added by hand.
+                let _ = self.nft_program_change(program, entry["label"].as_str().unwrap_or_default(), true);
+            }
+        }
+        self.forget_all_reads();
+        self.token_info.clear();
+        self.forget_tokens();
+        bridge_net::forget_configs(&left_rpc);
+        bridge_net::forget_configs(&rpc);
+        if let Some(dir) = config_dir() {
+            if found["reset"].is_object() {
+                bridge_net::mark_reset(&dir, &chain, height, now());
+            } else {
+                bridge_net::reseed(&dir, &chain, height);
+            }
+        }
+        self.reset_handled = config_dir().and_then(|dir| bridge_net::reset_seen(&dir, now()));
+        self.save();
+        Ok(())
+    }
+
+    /// Leaves the custom network for our own LEZ 0.4: the built-in RPC, registry and bridges;
+    /// the CLI and the wallet folder stay. The custom one is kept as `custom_last`.
+    fn leave_custom(&mut self) -> Result<(), String> {
+        if let Some(job) = self.wallet_busy() {
+            return Err(format!("your wallet is busy ({}); switch networks when it is done", job["kind"].as_str().unwrap_or("a change")));
+        }
+        self.keep_bridge_tokens_before_change();
+        let left_rpc = self.lez04_rpc();
+        self.custom_last = self.custom.take();
+        self.sequencer = LEZ04_SEQUENCER.to_owned();
+        self.zones = self.zones_now();
+        self.program = registry::parse_account(LEZ04_REGISTRY).ok();
+        self.bridge_programs = Vec::new();
+        self.forget_all_reads();
+        self.token_info.clear();
+        self.forget_tokens();
+        bridge_net::forget_configs(&left_rpc);
+        if let Some(dir) = config_dir() {
+            bridge_net::forget_state(&dir);
+        }
+        self.reset_handled = None;
+        self.save();
+        Ok(())
+    }
+
+    /// Where LEZ 0.4's test-LEZ faucet answers (`bridge_faucet`): the custom network's file may
+    /// name one; otherwise the chain's own RPC.
+    fn lez04_faucet(&self) -> String {
+        let custom = if self.net == Net::Lez04 { &self.custom } else { &self.parked["custom"] };
+        custom["faucet"].as_str().filter(|url| is_http_url(url)).map_or_else(|| self.lez04_rpc(), str::to_owned)
+    }
+
     /// Applies a saved configuration. A registry that this version can't read
     /// is ignored, so the default stands.
     fn apply_saved(&mut self, saved: &Value) {
@@ -2746,6 +2979,23 @@ impl Names {
         config["bridge_program"] = json!(registry::account_text(&bridges[0]));
         config["bridge_programs"] = json!(bridges.iter().map(registry::account_text).collect::<Vec<_>>());
         config["names_networks"] = json!([Net::Lez03.shown(), Net::Lez04.shown()]);
+        // Settings, Network: which of the three is in use (`lez-0.3`, `lez-0.4` our own, or
+        // `custom`), the custom network's record, and the chain our own LEZ 0.4 is.
+        let (custom, last) = match self.net {
+            Net::Lez04 => (self.custom.clone(), self.custom_last.clone()),
+            Net::Lez03 => (Value::Null, if self.parked["custom"].is_object() { self.parked["custom"].clone() } else { self.parked["custom_last"].clone() }),
+        };
+        config["network_choice"] = json!(match self.net {
+            Net::Lez03 => "lez-0.3",
+            Net::Lez04 if custom.is_object() => "custom",
+            Net::Lez04 => "lez-0.4",
+        });
+        config["custom_network"] = custom;
+        config["custom_network_last"] = last;
+        config["lez04_chain"] = json!(LEZ04_CHANNEL);
+        config["lez04_default_rpc"] = json!(LEZ04_SEQUENCER);
+        // When a read last saw LEZ 0.4 reset (seconds), for a day: a file read, no network.
+        config["network_reset_at"] = json!(config_dir().and_then(|dir| bridge_net::reset_seen(&dir, now())));
         // What the CLI said its version is, if it was asked already (cli_status asks): get_config
         // never runs the CLI, whoever calls it.
         config["cli_line"] = json!(cli::find_program(self.cli.as_deref()).and_then(|path| self.cli_lines.lock().ok()?.get(&path).map(|(_, line)| line.clone())));
@@ -3108,10 +3358,27 @@ impl Names {
         Some(channel)
     }
 
+    /// The chain LEZ 0.4's home must be, when it is known: the custom network's chain id, or
+    /// `LEZ04_CHANNEL` while home uses the built-in RPC. None on LEZ 0.3, and on LEZ 0.4 with
+    /// another RPC set by hand (a test chain on this computer), where home's channel is learned
+    /// as on LEZ 0.3.
+    fn expected_chain(&self) -> Option<String> {
+        if self.net != Net::Lez04 {
+            return None;
+        }
+        if let Some(chain) = self.custom["chain_id"].as_str() {
+            return Some(chain.to_owned());
+        }
+        let bare = |url: &str| url.trim().trim_end_matches('/').to_owned();
+        (bare(&self.zones.home().sequencer) == bare(LEZ04_SEQUENCER)).then(|| LEZ04_CHANNEL.to_owned())
+    }
+
     /// Has zone `index` use the sequencer at `url`, and returns the zone's channel. The
     /// zone stays the same zone: its wallet, accounts and history are untouched, so the new
     /// sequencer must name the zone's own channel (`zones::sequencer_change`). Home may
-    /// take another chain when the person said so (`other_chain_ok`) or has no wallet yet.
+    /// take another chain only when the person said so (`other_chain_ok`), never because it
+    /// has no wallet yet; and on LEZ 0.4 with a known chain (`expected_chain`) never: another
+    /// chain there is a custom network (`network_custom`), checked by its chain id.
     fn change_sequencer(&mut self, index: usize, url: &str, other_chain_ok: bool) -> Result<Option<String>, zones::Refused> {
         let refused = |why: &str| zones::Refused { why: why.to_owned(), other_chain: None };
         let url = url.trim();
@@ -3129,8 +3396,29 @@ impl Names {
         }
         let read = registry::channel_id_within(url, CHANNEL_WAIT)
             .and_then(|read| zones::channel(&read).ok_or_else(|| "its channel isn't 64 hex characters".to_owned()));
+        if index == 0 {
+            if let Some(expected) = self.expected_chain() {
+                match &read {
+                    Ok(channel) if *channel == expected => {}
+                    Ok(channel) => {
+                        return Err(refused(&format!(
+                            "that sequencer serves chain {}, not this network's ({}). Nothing was changed. To use another chain, enter it under Settings, Network, Custom network.",
+                            network::short(channel),
+                            network::short(&expected)
+                        )))
+                    }
+                    Err(why) => {
+                        return Err(refused(&format!(
+                            "that sequencer didn't say which chain it serves, so it can't be checked against this network's ({}). Nothing was changed. ({})",
+                            network::short(&expected),
+                            why.trim().trim_end_matches('.')
+                        )))
+                    }
+                }
+            }
+        }
         let holder = read.as_ref().ok().and_then(|channel| zones.holder(channel, Some(index))).and_then(|at| zones.at(at)).map(|zone| zone.name.clone());
-        let take_other = index == 0 && (other_chain_ok || !self.home_has_wallet());
+        let take_other = index == 0 && other_chain_ok;
         let channel = zones::sequencer_change(&zone.name, zone.channel.as_deref(), read.as_deref().map_err(String::as_str), holder.as_deref(), take_other)?;
         let in_use = index == zones.current();
         if let Some(changed) = zones.at_mut(index) {
@@ -3195,7 +3483,7 @@ impl Names {
     /// chain the zone no longer is: the same account ID is another account there.
     fn asked_here(&self, request: &Value) -> Result<(), String> {
         // A request from before there were two networks was asked on LEZ 0.3.
-        let network = request["network"].as_str().and_then(Net::parse).unwrap_or_default();
+        let network = request["network"].as_str().and_then(Net::parse).unwrap_or(Net::Lez03);
         if network != self.net {
             return Err(format!(
                 "this was asked for {}, and the wallet is on {} now. Switch back to approve it, or reject it.",
@@ -3872,6 +4160,11 @@ impl Names {
                     block.insert(key.to_owned(), out[key].take());
                     out[key] = self.parked[key].clone();
                 }
+                for (key, value) in [("custom", &self.custom), ("custom_last", &self.custom_last)] {
+                    if !value.is_null() {
+                        block.insert(key.to_owned(), value.clone());
+                    }
+                }
                 out["lez04"] = Value::Object(block);
             }
         }
@@ -3884,6 +4177,7 @@ impl Names {
             out["lez04"]["bridge_program"] = json!(registry::account_text(first));
         }
         out["names_network"] = json!(self.net.id());
+        out[NET_DEFAULT_MARK] = json!(NET_DEFAULT_SEEN);
         out
     }
 
@@ -5404,7 +5698,25 @@ impl NamesModule for Names {
         reply((|| {
             let net = Net::parse(&network).ok_or("the networks are lez-0.3 and lez-0.4")?;
             self.switch_network(net)?;
+            // `lez-0.4` is our own LEZ 0.4, also when a custom network was in use.
+            if net == Net::Lez04 && !self.custom.is_null() {
+                self.leave_custom()?;
+            }
             Ok(self.shown_config())
+        })())
+    }
+
+    fn network_custom(&mut self, rpc: String, chain_id: String, file_url: String, apply: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let found = self.network_found(&rpc, &chain_id, &file_url, apply)?;
+            if !apply {
+                return Ok(found);
+            }
+            self.use_custom(&found)?;
+            Ok(merged(self.shown_config(), &json!({ "network_set": found })))
         })())
     }
 
@@ -5451,7 +5763,7 @@ impl NamesModule for Names {
         }
         // Read on a thread of its own (at most every minute): the call answers with the last. A
         // faucet that says it is rate limited keeps the last answer shown.
-        let url = self.lez04_rpc();
+        let url = self.lez04_faucet();
         let snap = self.served.read(&format!("faucet_info:{url}"), FAUCET_INFO_EVERY, served::Lane::Host(url.clone()), move || {
             let value = bridge_net::faucet_call(&url, "bridge_faucetInfo", json!([]), bridge_net::FAUCET_INFO_WAIT)?;
             if value["code"] == "rate_limited" {
@@ -5483,7 +5795,7 @@ impl NamesModule for Names {
                 }
                 setup => setup?,
             };
-            let url = self.lez04_rpc();
+            let url = self.lez04_faucet();
             // The faucet answers once its transfer is in a block (up to 2 min): asked on a thread of
             // its own, one ask per account at a time. A call while it is under way answers that it
             // is (`pending`, asked again by the app); the first call after it ended takes its answer.
@@ -6132,6 +6444,16 @@ impl NamesModule for Names {
                 }
                 Ok(read)
             });
+            // A reset seen by this read (the chain id changed, or its height went down): what was
+            // read before about names, tokens and NFTs is dropped once, and read again.
+            if let Some(reset_at) = read["value"]["reset_at"].as_u64() {
+                if self.reset_handled != Some(reset_at) {
+                    self.reset_handled = Some(reset_at);
+                    self.forget_all_reads();
+                    self.token_info.clear();
+                    self.forget_tokens();
+                }
+            }
             // Each read's balances go to the History once.
             if let Some(at) = read["value"]["read_at"].as_u64() {
                 if bridge_net::LAST_NOTED.fetch_max(at, std::sync::atomic::Ordering::SeqCst) < at {
@@ -10950,6 +11272,9 @@ mod tests {
             parked: Value::Null,
             rejected: HashMap::new(),
             bridge_programs: Vec::new(),
+            custom: Value::Null,
+            custom_last: Value::Null,
+            reset_handled: None,
             cli_lines: Default::default(),
             tool_status: Default::default(),
             sheet_reads: SheetReads::default(),
@@ -16179,10 +16504,11 @@ mod tests {
         zone_test_end(dir);
     }
 
-    /// A home with no wallet yet has nothing read from a chain: its sequencer is set
-    /// freely, as it was before there were zones.
+    /// A home with no wallet yet still never takes another chain unasked (wallet-1121; before,
+    /// it took any sequencer): `set_sequencer` refuses it, `zone_sequencer` says it is another
+    /// chain and takes it once the person said so.
     #[test]
-    fn a_home_without_a_wallet_takes_any_sequencer() {
+    fn a_home_without_a_wallet_takes_another_chain_only_when_asked() {
         let mut names = fresh();
         let empty = std::env::temp_dir().join(format!("logos-names-module-zones-empty-{}-{}", std::process::id(), now()));
         cli::private_dir(&empty).unwrap();
@@ -16190,7 +16516,12 @@ mod tests {
         sequencer_says(DEFAULT_SEQUENCER, Ok(&"01".repeat(32)));
         sequencer_says("https://other.example", Ok(&"03".repeat(32)));
         sequencer_says("https://quiet.example", Err("no answer"));
-        assert!(names.set_sequencer("https://other.example".into()));
+        assert!(!names.set_sequencer("https://other.example".into()), "another chain is never taken unasked");
+        assert_eq!(names.sequencer, DEFAULT_SEQUENCER);
+        let asked = parsed(&names.zone_sequencer("home".into(), "https://other.example".into(), false));
+        assert_eq!((asked["value"]["changed"].as_bool(), asked["value"]["other_chain"].as_bool()), (Some(false), Some(true)), "{asked}");
+        let taken = parsed(&names.zone_sequencer("home".into(), "https://other.example".into(), true));
+        assert_eq!(taken["value"]["changed"], true, "{taken}");
         assert_eq!(parsed(&names.zone_list())["value"]["zones"][0]["channel"], "03".repeat(32));
         // One that doesn't say is still refused once home's chain is known.
         assert!(!names.set_sequencer("https://quiet.example".into()));
@@ -16383,6 +16714,184 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(config_dir().unwrap().join("config.json")).unwrap()).unwrap()
     }
 
+    /// wallet-1121 (Jef: "next update goes to 0.4"): a fresh install is on our LEZ 0.4; a file an
+    /// earlier build saved opens on LEZ 0.4 once, its LEZ 0.3 settings kept as they were; from
+    /// then on a choice of LEZ 0.3 stands across restarts.
+    #[test]
+    fn every_install_starts_on_lez04_and_a_later_choice_of_03_stands() {
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let fresh_install = Names::default();
+        assert_eq!((fresh_install.net, fresh_install.sequencer.as_str()), (Net::Lez04, LEZ04_SEQUENCER));
+        assert_eq!(fresh_install.program.map(|p| registry::account_text(&p)).as_deref(), Some(LEZ04_REGISTRY));
+        assert_eq!(fresh_install.zones.current_id(), LEZ04_HOME_ID);
+        assert!(!config.join("config.json").exists(), "a fresh start writes nothing");
+
+        let wallet03 = config.join("w03");
+        cli::private_dir(&wallet03).unwrap();
+        let cli03 = versioned_cli(&config.join("bin03"), "names 0.1.0");
+        let earlier = json!({ "sequencer": DEFAULT_SEQUENCER, "registry": DEFAULT_REGISTRY, "cli": cli03, "cli_wallet": wallet03, "main_name": "jefdiesel", "names_network": "lez-0.3",
+                              "lez04": { "sequencer": "http://127.0.0.1:3290" } });
+        std::fs::write(config.join("config.json"), earlier.to_string()).unwrap();
+        let mut names = Names::default();
+        assert_eq!(names.net, Net::Lez04, "an earlier build's lez-0.3 was its default, not a choice");
+        assert_eq!(names.sequencer, "http://127.0.0.1:3290", "LEZ 0.4's own settings are used");
+        let file = saved_file();
+        assert_eq!((file["names_network"].as_str(), file[NET_DEFAULT_MARK].as_str()), (Some("lez-0.4"), Some(NET_DEFAULT_SEEN)), "saved at once: {file}");
+        assert_eq!((file["registry"].as_str(), file["cli"].clone(), file["main_name"].as_str()), (Some(DEFAULT_REGISTRY), json!(cli03), Some("jefdiesel")), "LEZ 0.3's settings kept: {file}");
+        // Opening again changes nothing more.
+        assert_eq!(Names::default().net, Net::Lez04);
+        // The person picks LEZ 0.3 in Settings: it stands across a restart, with its own settings.
+        let back = parsed(&names.set_names_network("lez-0.3".into()));
+        assert_eq!((back["value"]["registry"].as_str(), back["value"]["network_choice"].as_str()), (Some(DEFAULT_REGISTRY), Some("lez-0.3")), "{back}");
+        let again = Names::default();
+        assert_eq!((again.net, again.cli.clone()), (Net::Lez03, Some(cli03.to_string_lossy().into_owned())));
+        // A request another app made before there were two networks was made on LEZ 0.3.
+        assert!(again.asked_here(&json!({ "zone": "home" })).is_ok());
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// A stand-in LEZ 0.4 network for `network_custom`: the chain id `channel` (said through the
+    /// test's `CHANNELS`), a height a test sets, and the network file answered to a GET.
+    fn custom_network(channel: &str, height: &'static std::sync::atomic::AtomicU64, file: Value) -> String {
+        let served = file.to_string();
+        let url = registry::stub_rpc(move |request| {
+            if request.is_null() {
+                return (200, served.clone());
+            }
+            match request["method"].as_str() {
+                Some("getLastBlockId") => registry::rpc_ok(json!(height.load(std::sync::atomic::Ordering::SeqCst))),
+                _ => (403, json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "not served here" } }).to_string()),
+            }
+        });
+        sequencer_says(&url, Ok(channel));
+        url
+    }
+
+    fn network_file(channel: &str, registry_id: &str, bridges: &[String], name: &str) -> Value {
+        json!({ "format": network::FORMAT, "name": name, "lez": "0.4", "chain_id": channel, "registry": registry_id, "bridge_programs": bridges,
+                "nft_programs": [{ "program": registry::account_text(&[9; 32]), "label": "Name cards" }], "faucet": null })
+    }
+
+    /// Settings, Network, Custom network: the RPC's chain id must be the one typed, or nothing
+    /// changes; a match puts the wallet on that network with the file's ids, kept across a
+    /// restart, and "Our LEZ 0.4" goes back to the built-in ones (the CLI and wallet folder stay).
+    #[test]
+    fn a_custom_network_is_checked_by_its_chain_id_before_the_switch() {
+        static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(500);
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let chain = "c7".repeat(32);
+        let (reg, bridge) = (registry::account_text(&[7; 32]), registry::account_text(&[8; 32]));
+        let url = custom_network(&chain, &HEIGHT, network_file(&chain, &reg, std::slice::from_ref(&bridge), "Reset test chain\u{202e}"));
+        let mut names = Names::default();
+        let wallet_before = names.cli_wallet.clone();
+
+        // Typed wrong: refused, plainly, nothing changed.
+        let wrong = parsed(&names.network_custom(url.clone(), "d8".repeat(32), url.clone(), true));
+        assert_eq!(wrong["error"].as_str(), Some("that RPC serves chain c7c7c7c7…c7c7, not the chain id you entered (d8d8d8d8…d8d8). Nothing was changed."), "{wrong}");
+        assert!(parsed(&names.network_custom(url.clone(), "c7c7".into(), url.clone(), false))["error"].as_str().unwrap().contains("64 hex characters"));
+        assert!(parsed(&names.network_custom("http://example.org/".into(), chain.clone(), url.clone(), false))["error"].as_str().unwrap().contains("isn't one the wallet can use"));
+        assert_eq!((names.sequencer.as_str(), names.custom.is_null()), (LEZ04_SEQUENCER, true));
+        // A file for another chain is refused too.
+        let other_file = custom_network(&chain, &HEIGHT, network_file(&"e9".repeat(32), &reg, &[], "x"));
+        assert!(parsed(&names.network_custom(url.clone(), chain.clone(), other_file, false))["error"].as_str().unwrap().contains("for another chain (e9e9e9e9…e9e9)"));
+
+        // Checked: what was found, nothing changed yet.
+        let found = parsed(&names.network_custom(url.clone(), format!("0x{}", chain.to_uppercase()), url.clone(), false));
+        let value = &found["value"];
+        assert_eq!((value["chain_id"].as_str(), value["height"].as_u64(), value["registry"].as_str(), value["in_use"].as_bool()), (Some(chain.as_str()), Some(500), Some(reg.as_str()), Some(false)), "{found}");
+        assert_eq!(value["name"], "Reset test chain", "the file's text is cleaned");
+        assert!(value["reset"].is_null());
+        assert_eq!(names.sequencer, LEZ04_SEQUENCER, "a check changes nothing");
+
+        // Switched: the RPC typed (never the file's), the file's registry and bridges, its NFT programs.
+        let set = parsed(&names.network_custom(url.clone(), chain.clone(), url.clone(), true));
+        assert_eq!(set["value"]["network_choice"], "custom", "{set}");
+        assert_eq!((set["value"]["sequencer"].as_str(), set["value"]["registry"].as_str()), (Some(url.as_str()), Some(reg.as_str())));
+        assert_eq!(set["value"]["bridge_programs"], json!([bridge]));
+        assert_eq!(set["value"]["custom_network"]["chain_id"], chain.as_str());
+        assert_eq!(names.zones.home().channel.as_deref(), Some(chain.as_str()));
+        assert_eq!(names.cli_wallet, wallet_before, "the wallet folder stays LEZ 0.4's");
+        assert!(parsed(&names.nft_programs())["value"].as_array().unwrap().iter().any(|p| p["program"] == registry::account_text(&[9; 32])));
+        // The chain was chosen: the next balance read there is no reset.
+        assert_eq!(bridge_net::last_seen(&config), (Some(chain.clone()), Some(500)));
+        assert_eq!(bridge_net::reset_seen(&config, now()), None);
+        // Kept across a restart.
+        let again = Names::default();
+        assert_eq!((again.sequencer.as_str(), again.custom["chain_id"].as_str()), (url.as_str(), Some(chain.as_str())));
+        // Home never takes a sequencer of another chain while on it, even when asked.
+        sequencer_says("https://elsewhere.example", Ok(&"0f".repeat(32)));
+        assert!(!names.set_sequencer("https://elsewhere.example".into()));
+        let asked = parsed(&names.zone_sequencer(LEZ04_HOME_ID.into(), "https://elsewhere.example".into(), true));
+        assert!(asked["error"].as_str().unwrap_or_default().contains("Custom network"), "{asked}");
+        sequencer_says("https://quiet.example", Err("no answer"));
+        assert!(!names.set_sequencer("https://quiet.example".into()));
+        assert_eq!(names.sequencer, url);
+
+        // Our own LEZ 0.4 again: the built-in RPC, registry and bridges; the custom one is offered again.
+        let ours = parsed(&names.set_names_network("lez-0.4".into()));
+        assert_eq!((ours["value"]["network_choice"].as_str(), ours["value"]["sequencer"].as_str(), ours["value"]["registry"].as_str()), (Some("lez-0.4"), Some(LEZ04_SEQUENCER), Some(LEZ04_REGISTRY)), "{ours}");
+        assert_eq!(ours["value"]["bridge_programs"], json!(bridge_net::DEFAULT_BRIDGE_PROGRAMS));
+        assert_eq!(ours["value"]["custom_network_last"]["chain_id"], chain.as_str());
+        assert_eq!(names.cli_wallet, wallet_before);
+        assert_eq!(Names::default().custom, Value::Null);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// A reset that keeps the chain id (its height went down) is noticed by a check: told, and
+    /// everything read before is dropped; a switch to that chain is then a reset too.
+    #[test]
+    fn a_reset_that_keeps_the_chain_id_is_noticed_by_its_height() {
+        static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(900);
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let chain = "a1".repeat(32);
+        let reg = registry::account_text(&[7; 32]);
+        let url = custom_network(&chain, &HEIGHT, network_file(&chain, &reg, &[], "Resets"));
+        let mut names = Names::default();
+        assert_eq!(parsed(&names.network_custom(url.clone(), chain.clone(), url.clone(), true))["success"], true);
+        HEIGHT.store(1200, std::sync::atomic::Ordering::SeqCst);
+        assert!(parsed(&names.network_custom(url.clone(), chain.clone(), url.clone(), false))["value"]["reset"].is_null(), "higher is no reset");
+        // The chain is started again with the same id.
+        HEIGHT.store(12, std::sync::atomic::Ordering::SeqCst);
+        names.read_cache.insert(("record".into(), "jef".into()), ("cached".into(), std::time::Instant::now()));
+        let checked = parsed(&names.network_custom(url.clone(), chain.clone(), url.clone(), false));
+        assert_eq!(checked["value"]["reset"], json!({ "before": 900, "now": 12 }), "{checked}");
+        assert_eq!(checked["value"]["in_use"], true);
+        assert!(names.read_cache.is_empty(), "what was read before is dropped");
+        assert!(bridge_net::reset_seen(&config, now()).is_some(), "told as a balance read tells one");
+        assert_eq!(parsed(&names.get_config())["network_reset_at"].as_u64(), bridge_net::reset_seen(&config, now()));
+        assert_eq!(names.custom["height"], 12);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// Our own LEZ 0.4's chain id with no published file (404): the built-in ids stand. Another
+    /// chain needs its file.
+    #[test]
+    fn our_own_chain_needs_no_file_and_another_does() {
+        static HEIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(33727);
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let rpc = registry::stub_rpc(|request| match request["method"].as_str() {
+            Some("getLastBlockId") => registry::rpc_ok(json!(HEIGHT.load(std::sync::atomic::Ordering::SeqCst))),
+            _ => (404, String::new()),
+        });
+        sequencer_says(&rpc, Ok(LEZ04_CHANNEL));
+        let mut names = Names::default();
+        let found = parsed(&names.network_custom(rpc.clone(), LEZ04_CHANNEL.into(), rpc.clone(), false));
+        assert_eq!((found["value"]["file_missing"].as_bool(), found["value"]["builtin"].as_bool(), found["value"]["registry"].as_str()), (Some(true), Some(true), Some(LEZ04_REGISTRY)), "{found}");
+        assert_eq!(found["value"]["bridge_programs"], json!(bridge_net::DEFAULT_BRIDGE_PROGRAMS));
+        sequencer_says(&rpc, Ok(&"b2".repeat(32)));
+        let other = parsed(&names.network_custom(rpc.clone(), "b2".repeat(32), rpc.clone(), false));
+        assert!(other["error"].as_str().unwrap_or_default().contains("HTTP 404). Nothing was changed."), "{other}");
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
     /// SF-5: a LEZ 0.3 setting that fails its check when read (the CLI or the wallet folder on a
     /// drive not mounted) isn't used, but it is written back as it was across a switch to LEZ 0.4
     /// and back, never as null. Setting it again replaces it.
@@ -16395,7 +16904,7 @@ mod tests {
         let gone_wallet = "/Volumes/not-mounted/user-test/wallet";
         std::fs::write(
             config.join("config.json"),
-            json!({ "sequencer": DEFAULT_SEQUENCER, "registry": DEFAULT_REGISTRY, "cli": gone_cli, "cli_wallet": gone_wallet, "main_name": "jefdiesel" }).to_string(),
+            json!({ "sequencer": DEFAULT_SEQUENCER, "registry": DEFAULT_REGISTRY, "cli": gone_cli, "cli_wallet": gone_wallet, "main_name": "jefdiesel", "names_network": "lez-0.3", NET_DEFAULT_MARK: NET_DEFAULT_SEEN }).to_string(),
         )
         .unwrap();
         let mut names = Names::default();
@@ -16434,7 +16943,7 @@ mod tests {
         let cli03 = versioned_cli(&config.join("bin03"), "names 0.1.0");
         std::fs::write(
             config.join("config.json"),
-            json!({ "sequencer": DEFAULT_SEQUENCER, "registry": DEFAULT_REGISTRY, "cli": cli03, "cli_wallet": wallet03, "main_name": "jefdiesel" }).to_string(),
+            json!({ "sequencer": DEFAULT_SEQUENCER, "registry": DEFAULT_REGISTRY, "cli": cli03, "cli_wallet": wallet03, "main_name": "jefdiesel", "names_network": "lez-0.3", NET_DEFAULT_MARK: NET_DEFAULT_SEEN }).to_string(),
         )
         .unwrap();
         let mut names = Names::default();
@@ -16522,7 +17031,7 @@ mod tests {
         let redeployed = registry::account_text(&[5; 32]);
         assert!(names.set_bridge_program(format!("Public/{redeployed}")));
         assert_eq!(saved_file()["lez04"]["bridge_program"], redeployed.as_str());
-        assert_eq!(saved_file()["registry"], DEFAULT_REGISTRY, "LEZ 0.3's flat fields stay as they were");
+        assert_ne!(saved_file()["registry"], LEZ04_REGISTRY, "LEZ 0.4's registry never goes into LEZ 0.3's flat fields");
         assert!(!names.set_bridge_program("not a program".into()));
         assert!(!names.set_bridge_program(registry::account_text(&registry::NATIVE_TOKEN)));
         assert_eq!(parsed(&names.set_names_network("lez-0.4".into()))["value"]["bridge_program"], redeployed.as_str());
@@ -16549,7 +17058,7 @@ mod tests {
         assert!(names.set_bridge_programs(json!([format!("Public/{a}"), b]).to_string()));
         assert_eq!(saved_file()["lez04"]["bridge_programs"], json!([a, b]));
         assert_eq!(saved_file()["lez04"]["bridge_program"], a.as_str(), "the first, for an earlier 0.17 build");
-        assert_eq!(saved_file()["registry"], DEFAULT_REGISTRY, "LEZ 0.3's flat fields stay as they were");
+        assert_ne!(saved_file()["registry"], LEZ04_REGISTRY, "LEZ 0.4's registry never goes into LEZ 0.3's flat fields");
         assert_eq!(parsed(&names.get_config())["bridge_programs"], json!([a, b]));
         assert_eq!(Names::default().bridge_programs_now().iter().map(registry::account_text).collect::<Vec<_>>(), vec![a.clone(), b.clone()], "after a restart");
         // Refused, and nothing changed: a repeat, the native token, not a program, more than
@@ -16864,7 +17373,8 @@ mod tests {
         as_caller(app("lez_bridge"));
         let refused = parsed(&names.request_access("to claim".into()));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
-        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("has no wallet on LEZ 0.3 yet"), "{refused}");
+        // A fresh install is on our LEZ 0.4 (wallet-1121).
+        assert!(refused["error"].as_str().unwrap_or_else(|| panic!("{refused}")).contains("has no wallet on LEZ 0.4 yet"), "{refused}");
         assert!(names.store().requests.is_empty(), "nothing left waiting");
     }
 

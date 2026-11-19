@@ -820,6 +820,29 @@ fn save_state(dir: &Path, state: &Value) {
     let _ = crate::cli::write_private(&dir.join(STATE_FILE), state.to_string().as_bytes());
 }
 
+/// The chain and height the last read saw (the state file in `dir`), if any.
+pub fn last_seen(dir: &Path) -> (Option<String>, Option<u64>) {
+    let state = load_state(dir);
+    (state["channel"].as_str().map(str::to_owned), state["height"].as_u64())
+}
+
+/// Starts the state file again on the chain `channel` at `height`, nothing kept and no reset
+/// told: the person chose that chain (Settings, Network), so a read there next is no reset.
+pub fn reseed(dir: &Path, channel: &str, height: u64) {
+    save_state(dir, &json!({ "channel": channel, "height": height, "reset_at": null, "bridges": [] }));
+}
+
+/// Forgets what the state file kept (our LEZ 0.4 chosen again): the next read starts it.
+pub fn forget_state(dir: &Path) {
+    save_state(dir, &json!({}));
+}
+
+/// Records a reset seen outside a balance read (a network check found the height lower on the
+/// same chain): told for a day as a read's would be, and nothing kept from before is used.
+pub fn mark_reset(dir: &Path, channel: &str, height: u64, now: u64) {
+    save_state(dir, &json!({ "channel": channel, "height": height, "reset_at": now, "bridges": [] }));
+}
+
 /// Whether the chain read now (`channel`, `height`) is not the one `saved` last saw: another
 /// channel, or a lower height on the same one.
 pub fn was_reset(saved: &Value, channel: &str, height: u64) -> bool {
