@@ -394,3 +394,28 @@ names host's debug lines do not reach it. Read it from the `Module loaded: names
    `backup_status`, `pending_requests`, `pending_inscriptions` or `the shipped lez_bridge.lgx
    can't be checked` line should say "No answer".
 
+
+### What a kept read never does (names-stall-3 review, 2026-11-19)
+
+- **No failure kept long:** a node read that failed, or a transaction the node hasn't stored
+  yet (null), is asked again after 5 s (`node::KEEP`). Only a real block or transaction is kept
+  for the hour.
+- **Nothing decided from a read still on its way:** a Logos send stays "sending" until the node
+  has answered (never "unknown" from a busy read). A cut-off deposit stays "sending" until its walk
+  down the chain has found it (or walked all 600 blocks); the walk goes on by itself between
+  polls (`node::deposit_walk`), so it settles with its hash and fee.
+- **No read from before a change comes back after it:** the CLI's 15 s balance cache and its slow
+  reads (`BALANCE_GEN`), the background reads (`BoardRead::reading`), the node's kept answers and
+  the deposit walks (`node::forget`'s generation) drop an answer started before the change.
+- **After a claim, a burn or a faucet grant:** the bridge network's balances are read afresh
+  (`bridge_net_balances` with `{"accounts": […], "fresh": true}`, and on every approval). "Now
+  holds" is said only from a read made after the claim; the card asks again every 3 s for up to
+  2 min until there is one.
+- **The short first ask (1 s):** it bounds the host acquiring the node's object. Running out says
+  nothing about the node: it neither holds the module nor is kept as "didn't answer", and the next
+  ask waits the full 15 s.
+- **Bridge to Ethereum submits the amount it shows:** before planning, it reads the bridge's
+  amounts again and sends the index that list gives the shown amount. If that list no longer has
+  it, nothing is done and the person chooses again. A change of bridge drops the amounts held,
+  and a new send-back reads them afresh. "Change" shows whenever there is another amount or
+  another account (public or private) to choose.
