@@ -182,3 +182,24 @@ print."
   from any future `nft_proof` request, which will need no account access.
 - The token-gating mini-app, Logos Storage media, collection creation in the app (the CLI has
   `names nft create` for tests), adoption, and anything on Logos testnet 0.4 (not live).
+
+## 10. Status on branch `names-nft` (2026-11-19)
+
+| Piece | Where | State |
+|---|---|---|
+| Wire format, readiness, refusals, what each send reveals | `basecamp-module/rust-lib/src/nft_wire.rs` (shared with the CLI) | tested: messages against Job A's real transactions, states against that chain |
+| Program list, holdings, collections, sheets, actions, image consent and fetch | `basecamp-module/rust-lib/src/nft.rs`, trait methods `nft_*` in `lib.rs` | tested with a fake CLI (module unit tests) |
+| Provider SDK: NFT list grant, membership answer, transfer requests | `basecamp-module/rust-lib/src/provider_nft.rs`, [PROVIDER-SDK.md](PROVIDER-SDK.md#nfts-lp-0001) | tested with a fake CLI |
+| `names nft …`, `names module nft …` on the stock wallet crate | `cli/src/nft.rs` | written; not yet compiled (RUN-AFTER-3AM.txt step 2) |
+| Collectibles page, the one sheet, apps' NFT requests | `basecamp/qml/Main.qml` (two marked blocks), `basecamp/qml/nft.mjs` | `node basecamp/nft.test.mjs`; 13 offscreen renders (`render.py collectibles-*`) |
+| End-to-end on the throwaway chain | `RUN-AFTER-3AM.txt` steps 4-5 | not run |
+
+Known limits, on purpose for this step:
+
+- An app's NFT request shows on the Collectibles page while it is open; the app-wide request
+  sheet is left to merge with the provider work on other branches.
+- The image fetch checks the host's name or address as written; a name that resolves to a
+  private address is not caught (no DNS check). Off by default, per collection.
+- `nft_membership` is a plain answer about accounts the app was given, not a private proof.
+- One NFT per account per program means a wallet makes a new account per NFT received. The
+  Receive form offers a new account first.

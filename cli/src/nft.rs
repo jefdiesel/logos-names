@@ -777,3 +777,30 @@ impl Client {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOB: &str = "HLEwXNBDYx6GS9H5CsawDrMTptD6R4XsJywFEMr6eim2";
+
+    #[test]
+    fn a_destination_is_a_name_an_account_or_keys_never_a_bare_id() {
+        assert_eq!(parse_to("alice"), Ok(To::Name("alice".to_owned())));
+        assert!(matches!(parse_to(&format!("Public/{BOB}")), Ok(To::Public(_))));
+        assert!(matches!(parse_to(&format!("Private/{BOB}")), Ok(To::Private(_))));
+        assert!(matches!(parse_to(&format!("{}:{}", "ab".repeat(32), "cd".repeat(8))), Ok(To::Keys { .. })));
+        assert!(parse_to(BOB).unwrap_err().contains("Public/"));
+        assert!(parse_to("ab:cd").is_err());
+        assert!(parse_to("two words").is_err());
+    }
+
+    #[test]
+    fn no_program_is_built_in_and_the_ids_round_trip() {
+        assert!(program(None).unwrap_err().to_string().contains("--nft-program"));
+        let bob: AccountId = BOB.parse().unwrap();
+        assert_eq!(account(id(bob)), bob);
+        // The shared encoding speaks the CLI's account IDs: Transfer's 32 bytes are the ID's.
+        assert_eq!(&Message::Transfer { to: id(bob) }.encode()[1..], bob.value().as_slice());
+    }
+}
