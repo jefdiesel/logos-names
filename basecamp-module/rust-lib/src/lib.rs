@@ -3158,12 +3158,13 @@ impl Names {
                 Ok(line) if line.contains(LEZ04_CLI_MARK) => {
                     return Ok(json!({ "installed": true, "path": set, "version": line, "prover": false, "job": null }));
                 }
-                // Its version is still being read: busy (nothing done), never a download meanwhile.
+                // Its version is still being read: said so (nothing done), never a download meanwhile.
                 Err(why) if is_busy(&why) => return Err(why),
                 _ => {}
             }
         }
-        if let Some(line) = self.adopt_lez04_tool(&ours) {
+        // The file installed here earlier, checked on a thread of its own (its hash, its version).
+        if let Some(line) = self.adopt_lez04_tool_checked(&ours)? {
             return Ok(json!({ "installed": true, "path": ours, "version": line, "prover": false, "job": null }));
         }
         if !(cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")) {
@@ -3281,22 +3282,39 @@ impl Names {
     /// Puts the LEZ 0.4 names tool at `path` to use, when its SHA-256 is the expected one and it
     /// says it is a LEZ 0.4 tool, and only while LEZ 0.4 is the network in use: its version line.
     fn adopt_lez04_tool(&mut self, path: &std::path::Path) -> Option<String> {
+        self.adopt_lez04_tool_checked(path).ok().flatten()
+    }
+
+    /// `adopt_lez04_tool`, with the file's check (its SHA-256 and `--version`) made on a thread of
+    /// its own and kept per file as it is: `Err` (the busy mark) until it is done.
+    fn adopt_lez04_tool_checked(&mut self, path: &std::path::Path) -> Result<Option<String>, String> {
         use sha2::{Digest, Sha256};
         if self.net != Net::Lez04 || !path.is_file() {
-            return None;
+            return Ok(None);
         }
-        let bytes = std::fs::read(path).ok()?;
-        let sha: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-        drop(bytes);
-        if sha != lez04_tool_sha() {
-            return None;
-        }
-        let line = cli::version(path).ok().filter(|line| line.contains(LEZ04_CLI_MARK))?;
+        let Ok(meta) = std::fs::metadata(path) else { return Ok(None) };
+        let key = format!("lez04-tool:{}:{}:{:?}", path.display(), meta.len(), meta.modified().ok());
+        let checked = path.to_path_buf();
+        let snap = self.served.read(&key, std::time::Duration::from_secs(3600), served::Lane::Free, move || {
+            let bytes = std::fs::read(&checked).map_err(|why| why.to_string())?;
+            let sha: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+            drop(bytes);
+            if sha != lez04_tool_sha() {
+                return Ok(Value::Null);
+            }
+            Ok(cli::version(&checked).ok().filter(|line| line.contains(LEZ04_CLI_MARK)).map_or(Value::Null, Value::from))
+        });
+        let line = match snap.value_or("the LEZ 0.4 names tool") {
+            Ok(line) => line.as_str().map(str::to_owned),
+            Err(Ok(busy)) => return Err(BUSY_MARK.to_owned() + &busy),
+            Err(Err(_)) => None,
+        };
+        let Some(line) = line else { return Ok(None) };
         self.cli = Some(path.to_string_lossy().into_owned());
         self.rejected.remove("cli");
         self.save();
         self.forget_mine();
-        Some(line)
+        Ok(Some(line))
     }
 
     fn install_dirs(&self) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
@@ -3388,10 +3406,15 @@ impl Names {
         match state["kind"].as_str() {
             Some("install") if !running => {
                 let path = self.install_dirs().ok().map(|(bin, _)| bin.join("names"));
+                // Its version, read on a thread of its own: the job says running until it is known.
                 let version = match (&path, done) {
-                    (Some(path), true) => cli::version(path),
+                    (Some(path), true) => self.cli_line(path),
                     _ => Err(String::new()),
                 };
+                if version.as_ref().is_err_and(|why| is_busy(why)) {
+                    state["state"] = Value::from("running");
+                    return;
+                }
                 match (path, version) {
                     (Some(path), Ok(version)) => {
                         self.adopt_cli(&path);
@@ -3414,7 +3437,16 @@ impl Names {
             }
             Some("install04") if !running => {
                 let path = self.install_dirs().ok().map(|(bin, _)| bin.join(LEZ04_TOOL_FILE));
-                match path.as_ref().filter(|_| done).and_then(|p| self.adopt_lez04_tool(p)) {
+                // Checked on a thread of its own (its hash, its version): running until it is.
+                let adopted = match path.as_ref().filter(|_| done) {
+                    Some(path) => self.adopt_lez04_tool_checked(path),
+                    None => Ok(None),
+                };
+                if adopted.is_err() {
+                    state["state"] = Value::from("running");
+                    return;
+                }
+                match adopted.ok().flatten() {
                     Some(line) => {
                         state["path"] = json!(path);
                         state["version"] = Value::from(line);
@@ -3596,31 +3628,77 @@ impl Names {
     /// Where a Logos Blockchain send to `to` goes: `{key, name, forwarded_from}`, a key
     /// as given, or the `blockchain` entry of a name (one `forward` hop, SPEC.md §7).
     fn chain_target(&mut self, to: &str) -> Result<Value, String> {
+        self.chain_target_for(to, false)
+    }
+
+    /// `chain_target`; for a plan (`plan`, the Names app in a module build) a name is read on a
+    /// thread of its own (its derivation and the registry's answer), busy until it is back. A send
+    /// reads it afresh on the spot, as before.
+    fn chain_target_for(&mut self, to: &str, plan: bool) -> Result<Value, String> {
         if let Some(key) = chain::parse_key(to) {
             return Ok(json!({ "key": key, "name": null, "forwarded_from": null }));
         }
         let name = registry::parse_name(to).map_err(|_| "enter a Logos Blockchain key (64 hex characters) or a name".to_owned())?;
         let registry = self.registry()?;
+        if plan && !self.served.inline {
+            let (sequencer, program) = (registry.sequencer.clone(), registry.program);
+            let known = self.derived.get(&name).cloned();
+            let key = format!("chain-target:{name}:{sequencer}:{}", registry::account_text(&program));
+            let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
+            let snap = self.served.read(&key, READ_FRESH, lane, move || {
+                let derived = known.unwrap_or_else(|| derived_kept(&name));
+                chain_target_read(&Registry::new(&sequencer, program), &name, &derived, derived_kept)
+            });
+            return match snap.value_or("the name's Logos Blockchain key") {
+                Ok(target) => Ok(target.clone()),
+                Err(Ok(busy)) => Err(BUSY_MARK.to_owned() + &busy),
+                Err(Err(why)) => Err(why),
+            };
+        }
         let derived = self.derived(&name);
-        let resolved = registry.resolve(&name, &derived)?.ok_or_else(|| format!("{name} isn't registered"))?;
-        let (resolved, shown, forwarded_from) = match resolved.forward_target() {
-            Some(target) => {
-                let derived = self.derived(&target);
-                let forwarded = registry
-                    .resolve(&target, &derived)?
-                    .ok_or_else(|| format!("{name} points to {target}, which isn't registered"))?;
-                (forwarded, target, Some(name))
+        chain_target_read(&registry, &name, &derived, |target| self.derived(target))
+    }
+
+    /// What a bridge deposit to `account` needs from LEZ and the wallet: which LEZ answers at the
+    /// sequencer, the account's public key (LEZ 0.4, from the wallet's CLI when not given) and the
+    /// deposit channel. For a plan (a module build) read on a thread of its own and kept 30 s,
+    /// busy until it is back; for a send, on the spot, as before.
+    fn bridge_inputs(&self, account: &AccountId, given: Option<[u8; 32]>, plan: bool) -> Result<(deposit::Lez, Option<[u8; 32]>, String), String> {
+        let sequencer = self.sequencer.clone();
+        let setup = self.cli_setup();
+        if let Err(why) = &setup {
+            if is_busy(why) {
+                return Err(why.clone());
             }
-            None => (resolved, name, None),
+        }
+        let account_id = *account;
+        let read = move || -> Result<Value, String> {
+            let lez = registry::lez_version(&sequencer)?;
+            let key = match (lez, given) {
+                (deposit::Lez::V04, None) => wallet::public_key(&setup.clone()?, &account_id)?,
+                (_, key) => key,
+            };
+            let channel = registry::channel_id(&sequencer)?;
+            Ok(json!({ "v04": lez == deposit::Lez::V04, "key": key.map(|key| registry::hex(&key)), "channel": channel }))
         };
-        let key = resolved
-            .profile
-            .texts
-            .iter()
-            .find(|(key, _)| key == chain::BLOCKCHAIN_KEY)
-            .and_then(|(_, value)| chain::parse_key(value))
-            .ok_or_else(|| format!("{shown} hasn't published a Logos Blockchain key"))?;
-        Ok(json!({ "key": key, "name": shown, "forwarded_from": forwarded_from }))
+        let value = if plan && !self.served.inline {
+            let key = format!("bridge-inputs:{}:{}:{}", registry::account_text(account), self.sequencer, given.map(|key| registry::hex(&key)).unwrap_or_default());
+            let snap = self.served.read(&key, std::time::Duration::from_secs(30), served::Lane::Host(self.sequencer.clone()), read);
+            match snap.value_or("what LEZ needs for the deposit") {
+                Ok(value) => value.clone(),
+                Err(Ok(busy)) => return Err(BUSY_MARK.to_owned() + &busy),
+                Err(Err(why)) => return Err(why),
+            }
+        } else {
+            read()?
+        };
+        let lez = if value["v04"] == true { deposit::Lez::V04 } else { deposit::Lez::V03 };
+        let key = match value["key"].as_str() {
+            Some(text) => Some(<[u8; 32]>::try_from(registry::unhex(text)?).map_err(|_| "the account's key isn't 32 bytes".to_owned())?),
+            None => None,
+        };
+        let channel = value["channel"].as_str().ok_or("LEZ didn't say where deposits go")?.to_owned();
+        Ok((lez, key, channel))
     }
 
     /// Answers a question about the name a person typed.
@@ -4424,6 +4502,47 @@ fn resolve_answer(registry: &Registry, name: &str, derived: &Derived) -> Result<
     Ok(value)
 }
 
+/// `recipient`'s read: where a payment to `name` goes, one forward followed (SPEC.md §7).
+fn recipient_answer(registry: &Registry, name: &str, derived: &Derived) -> Result<Value, String> {
+    let Some(resolved) = registry.resolve(name, derived)? else {
+        return Ok(Value::Null);
+    };
+    let Some(target) = resolved.forward_target() else {
+        return Ok(resolved.recipient_json());
+    };
+    let forwarded = registry.resolve(&target, &derived_kept(&target))?.ok_or_else(|| format!("{name} points to {target}, which isn't registered"))?;
+    let mut value = forwarded.recipient_json();
+    value["forwarded_from"] = Value::from(name);
+    Ok(value)
+}
+
+/// `reverse`'s read: the name `account` set as its own, if any.
+fn reverse_answer(registry: &Registry, account: &AccountId) -> Result<Value, String> {
+    let name = registry.reverse(account)?;
+    Ok(name.map_or(Value::Null, |name| json!({ "name": name, "display": format!("{name}{}", registry::NAME_SUFFIX) })))
+}
+
+/// The Logos Blockchain key `name` publishes (one forward followed): `{key, name, forwarded_from}`.
+fn chain_target_read(registry: &Registry, name: &str, derived: &Derived, mut derive: impl FnMut(&str) -> Derived) -> Result<Value, String> {
+    let resolved = registry.resolve(name, derived)?.ok_or_else(|| format!("{name} isn't registered"))?;
+    let (resolved, shown, forwarded_from) = match resolved.forward_target() {
+        Some(target) => {
+            let derived = derive(&target);
+            let forwarded = registry.resolve(&target, &derived)?.ok_or_else(|| format!("{name} points to {target}, which isn't registered"))?;
+            (forwarded, target, Some(name.to_owned()))
+        }
+        None => (resolved, name.to_owned(), None),
+    };
+    let key = resolved
+        .profile
+        .texts
+        .iter()
+        .find(|(key, _)| key == chain::BLOCKCHAIN_KEY)
+        .and_then(|(_, value)| chain::parse_key(value))
+        .ok_or_else(|| format!("{shown} hasn't published a Logos Blockchain key"))?;
+    Ok(json!({ "key": key, "name": shown, "forwarded_from": forwarded_from }))
+}
+
 /// `page`'s read.
 fn page_answer(registry: &Registry, name: &str, derived: &Derived) -> Result<Value, String> {
     Ok(registry.page(name, derived)?.unwrap_or(Value::Null))
@@ -4551,6 +4670,10 @@ fn rejected_settings(saved: &Value) -> HashMap<String, Value> {
 
 impl NamesModule for Names {
     fn recipient(&mut self, name: String) -> String {
+        // The Names app (payName): read on a thread of its own, as `resolve` is.
+        if let Some(answer) = self.name_read("recipient", &name, recipient_answer) {
+            return answer;
+        }
         reply((|| {
             let name = registry::parse_name(&name)?;
             let registry = self.registry()?;
@@ -4606,6 +4729,22 @@ impl NamesModule for Names {
     }
 
     fn reverse(&mut self, account: String) -> String {
+        // The Names app (find): read on a thread of its own, busy until the first is back.
+        if !self.served.inline && only_the_names_app().is_ok() {
+            let read = (|| {
+                let account = registry::parse_account(&account)?;
+                let registry = self.registry()?;
+                Ok::<_, String>((account, registry.sequencer.clone(), registry.program))
+            })();
+            let (account, sequencer, program) = match read {
+                Ok(read) => read,
+                Err(why) => return reply(Err(why)),
+            };
+            let key = format!("reverse:{}:{sequencer}:{}", registry::account_text(&account), registry::account_text(&program));
+            let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
+            let snap = self.served.read(&key, READ_FRESH, lane, move || reverse_answer(&Registry::new(&sequencer, program), &account));
+            return served::reply_of(&snap, "This account's name", |_| Value::Null);
+        }
         reply((|| {
             let account = registry::parse_account(&account)?;
             let name = self.registry()?.reverse(&account)?;
@@ -6627,8 +6766,10 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
-            let target = self.chain_target(&to)?;
+        // The plan (`send` false, the Check button) never waits: the name's key and the node's
+        // answers are read without waiting (busy until they are back, and the app asks again).
+        let mut body = || {
+            let target = self.chain_target_for(&to, !send)?;
             let (from, to_key, amount) = chain::send_input(&from_key, target["key"].as_str().unwrap_or_default(), &amount)?;
             let balance = chain::balance_of(&node::call("wallet_get_balance", json!([from]), node::QUICK)?);
             if balance < u128::from(amount) {
@@ -6665,14 +6806,16 @@ impl NamesModule for Names {
                 plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
             }
             Ok(plan)
-        })())
+        };
+        if send { reply(body()) } else { busy_or_reply(node::polled(body)) }
     }
 
     fn chain_split(&mut self, from_key: String, amount: String, send: bool) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        // The plan (`send` false) never waits on the node: busy until its answers are back.
+        let body = || {
             let from = chain::parse_key(&from_key).ok_or("choose the key to send from")?;
             let amount = chain::whole_amount(&amount)?;
             let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
@@ -6724,14 +6867,17 @@ impl NamesModule for Names {
                 plan["fee"] = fee.map_or(Value::Null, |f| Value::from(f.to_string()));
             }
             Ok(plan)
-        })())
+        };
+        if send { reply(body()) } else { busy_or_reply(node::polled(body)) }
     }
 
     fn chain_bridge(&mut self, from_key: String, to: String, amount: String, send: bool) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        // The plan (`send` false) never waits: the node's answers, LEZ's version and channel and
+        // the account's key are read without waiting (busy until they are back).
+        let mut body = || {
             let from = chain::parse_key(&from_key).ok_or("choose the key to send from")?;
             let amount = chain::whole_amount(&amount)?;
             let to = match cli::bridge_to(&to)? {
@@ -6745,16 +6891,13 @@ impl NamesModule for Names {
             // The node first: it is on this computer and answers at once, so a node that
             // isn't running is said before the sequencer is waited for (a bridge plan with
             // the node stopped and the sequencer unreachable took 10 s to blame the sequencer).
-            let notes = chain::notes_of(&node::call("wallet_get_notes", json!([from, ""]), node::QUICK)?);
+            let notes = still_or(node::call("wallet_get_notes", json!([from, ""]), node::QUICK))?;
             // What the deposit carries: the metadata the sequencer's LEZ decodes, or the
             // deposit is never credited (real-bridges-to-lez-0.4-never-mint). LEZ 0.4 needs the
             // account's public key: given as the destination, or this wallet's own. Refused
             // here, before anything is recorded or sent, when it can't be made.
-            let lez = registry::lez_version(&self.sequencer)?;
-            let key = match (lez, given_key) {
-                (deposit::Lez::V04, None) => wallet::public_key(&self.cli_setup()?, &account)?,
-                (_, key) => key,
-            };
+            let (lez, key, channel) = self.bridge_inputs(&account, given_key, !send)?;
+            let notes = chain::notes_of(&notes?);
             let metadata = deposit::metadata(lez, &account, key.map(deposit::Evidence::Key).as_ref()).map_err(|refusal| refusal.words(&registry::account_text))?;
             // A note a send from here still spends (not in a block yet) is not this one's:
             // two deposits of one note both got a hash and only one could land.
@@ -6779,7 +6922,6 @@ impl NamesModule for Names {
             let needs_split = note.is_none() && !exact_busy;
             let others = if needs_split { others.saturating_sub(u128::from(amount)).saturating_sub(u128::from(SPLIT_FEE_ALLOWANCE)) } else { others };
             let fee_short = others < u128::from(BRIDGE_MAX_FEE);
-            let channel = registry::channel_id(&self.sequencer)?;
             // The deposit is for the zone in use, and a zone is its channel: a sequencer
             // that now names another one isn't that zone's, and a deposit can't be undone.
             let zones = self.zones_now();
@@ -6904,7 +7046,8 @@ impl NamesModule for Names {
                 plan["hash"] = hash.map_or(Value::Null, Value::from);
             }
             Ok(plan)
-        })())
+        };
+        if send { reply(body()) } else { busy_or_reply(node::polled(body)) }
     }
 
     fn chain_tx(&mut self, hash: String) -> String {
@@ -7522,7 +7665,12 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply(chain_inscribe::run(&from_key, &text, send))
+        // The plan (`send` false, the sheet's 3 s poll) never waits on the node.
+        if send {
+            reply(chain_inscribe::run(&from_key, &text, true))
+        } else {
+            busy_or_reply(node::polled(|| chain_inscribe::run(&from_key, &text, false)))
+        }
     }
 
     fn propose_inscription(&mut self, text: String) -> String {
@@ -9564,11 +9712,30 @@ fn chain_sent_add(hash: &str, sent: Value) {
 /// `Err` when the node refuses it as it would refuse the send (a recipient that isn't a key).
 fn chain_fee_about(plan: &mut Value, field: &str, shape: &chain_fee::Shape, from: &str, skip: Option<&str>) -> Result<(), String> {
     plan[field] = Value::Null;
-    let Ok(notes) = node::call("wallet_get_notes", json!([from, ""]), node::QUICK).map(|reply| chain::notes_of(&reply)) else { return Ok(()) };
+    // In a plan (`node::polled`) a read of the node still on its way makes the plan wait (busy),
+    // never a plan shown without its fee.
+    let notes = match node::call("wallet_get_notes", json!([from, ""]), node::QUICK) {
+        Ok(reply) => chain::notes_of(&reply),
+        Err(why) if is_busy(&why) => return Err(why),
+        Err(_) => return Ok(()),
+    };
     let busy = chain_notes_in_use(from);
     let (held_busy, free): (Vec<_>, Vec<_>) = notes.iter().filter(|(id, _)| skip != Some(id.as_str())).partition(|(id, _)| busy.contains(*id));
     let values = |notes: Vec<(&String, &Value)>| notes.into_iter().map(|(_, value)| chain::amount(value)).collect::<Vec<u128>>();
-    match chain_fee::with_busy(shape, from, &values(free), &values(held_busy), |request| node::call("wallet_fund_tx", json!([request]), node::QUICK))? {
+    let mut reading = None;
+    let estimate = chain_fee::with_busy(shape, from, &values(free), &values(held_busy), |request| {
+        let funded = node::call("wallet_fund_tx", json!([request]), node::QUICK);
+        if let Err(why) = &funded {
+            if is_busy(why) {
+                reading = Some(why.clone());
+            }
+        }
+        funded
+    });
+    if let Some(busy) = reading {
+        return Err(busy);
+    }
+    match estimate? {
         chain_fee::Estimate::Fee(fee) => plan[field] = Value::from(fee.to_string()),
         chain_fee::Estimate::Short => plan["cannot_pay_fee"] = Value::Bool(true),
         chain_fee::Estimate::InFlight => plan["in_flight"] = Value::Bool(true),
@@ -15743,6 +15910,243 @@ mod tests {
         peer::stand_in::set_silent(chain::MODULE, false);
         BRIDGE_HTTP.with(|on| on.set(false));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+
+    /// Every call the module exposes (NamesModule), with arguments a person or an app would give,
+    /// as the Names app (`app: false`) or as another app (`app: true`). `press`: a change the
+    /// person asked for, which may wait by design (the node proving a send, the CLI planning a
+    /// call); every other call is a read and must never wait on the call's thread.
+    fn every_call(dir: &std::path::Path) -> Vec<(&'static str, bool, bool, Box<dyn Fn(&mut Names) -> String>)> {
+        let account = format!("Public/{PUBLIC}");
+        let a = account.clone();
+        let b = account.clone();
+        let c = account.clone();
+        let d = account.clone();
+        let e = account.clone();
+        let f = account.clone();
+        let g = account.clone();
+        let h = account.clone();
+        let i = account.clone();
+        let backup = dir.join("backup.lnsbak").to_string_lossy().into_owned();
+        let (b1, b2, b3) = (backup.clone(), backup.clone(), backup.clone());
+        let hash = "ab".repeat(32);
+        let (h1, h2) = (hash.clone(), hash.clone());
+        let bridge = bridge_net::DEFAULT_BRIDGE_PROGRAM.to_owned();
+        let (p1, p2, p3, p4) = (bridge.clone(), bridge.clone(), bridge.clone(), bridge.clone());
+        let lgx = dir.join("lez_bridge.lgx").to_string_lossy().into_owned();
+        let l2 = lgx.clone();
+        // (name, as another app, press, call). cli_bridge and cli_bridge_to count as presses: the
+        // Names app no longer calls them (it bridges through `chain_bridge`); tools do.
+        let mut out: Vec<(&'static str, bool, bool, Box<dyn Fn(&mut Names) -> String>)> = vec![
+            ("recipient", false, false, Box::new(|n: &mut Names| n.recipient("alice".into()))),
+            ("resolve", false, false, Box::new(|n: &mut Names| n.resolve("alice".into()))),
+            ("page", false, false, Box::new(|n: &mut Names| n.page("alice".into()))),
+            ("page_view", false, false, Box::new(|n: &mut Names| n.page_view("alice".into()))),
+            ("page_preview", false, false, Box::new(|n: &mut Names| n.page_preview("hello".into()))),
+            ("avatar", false, false, Box::new(|n: &mut Names| n.avatar("alice".into()))),
+            ("reverse", false, false, Box::new(move |n: &mut Names| n.reverse(PUBLIC.into()))),
+            ("normalize", false, false, Box::new(|n: &mut Names| n.normalize("Alice".into()))),
+            ("wallet", false, false, Box::new(|n: &mut Names| n.wallet())),
+            ("mine", false, false, Box::new(|n: &mut Names| n.mine())),
+            ("keep", false, false, Box::new(|n: &mut Names| n.keep("alice".into()))),
+            ("deposit", false, false, Box::new(|n: &mut Names| n.deposit("bobby".into()))),
+            ("settings", false, false, Box::new(|n: &mut Names| n.settings())),
+            ("register_name", false, true, Box::new(move |n: &mut Names| n.register_name("zzqqxx".into(), a.clone(), String::new()))),
+            ("reveal_name", false, true, Box::new(move |n: &mut Names| n.reveal_name("zzqqxx".into(), b.clone(), String::new()))),
+            ("receive_privately", false, true, Box::new(|n: &mut Names| n.receive_privately("alice".into(), format!("Private/{PRIVATE}")))),
+            ("set_account", false, true, Box::new(move |n: &mut Names| n.set_account("alice".into(), c.clone()))),
+            ("clear_addresses", false, true, Box::new(|n: &mut Names| n.clear_addresses("alice".into()))),
+            ("set_text", false, true, Box::new(|n: &mut Names| n.set_text("alice".into(), "bio".into(), "hi".into()))),
+            ("set_profile", false, true, Box::new(|n: &mut Names| n.set_profile("alice".into(), "{}".into(), false))),
+            ("set_page", false, true, Box::new(|n: &mut Names| n.set_page("alice".into(), "text/plain".into(), "hi".into()))),
+            ("transfer", false, true, Box::new(move |n: &mut Names| n.transfer("alice".into(), d.clone()))),
+            ("release", false, true, Box::new(|n: &mut Names| n.release("alice".into()))),
+            ("set_primary", false, true, Box::new(move |n: &mut Names| n.set_primary(e.clone(), "alice".into()))),
+            ("get_config", false, false, Box::new(|n: &mut Names| n.get_config())),
+            ("zone_list", false, false, Box::new(|n: &mut Names| n.zone_list())),
+            ("zone_add", false, true, Box::new(|n: &mut Names| n.zone_add("other".into(), "http://127.0.0.1:9".into()))),
+            ("zone_use", false, true, Box::new(|n: &mut Names| n.zone_use("home".into()))),
+            ("zone_rename", false, true, Box::new(|n: &mut Names| n.zone_rename("nope".into(), "x".into()))),
+            ("zone_sequencer", false, true, Box::new(|n: &mut Names| n.zone_sequencer("nope".into(), "http://127.0.0.1:9".into(), false))),
+            ("zone_remove", false, true, Box::new(|n: &mut Names| n.zone_remove("nope".into()))),
+            ("backup_status", false, false, Box::new(|n: &mut Names| n.backup_status())),
+            ("backup_make", false, true, Box::new(move |n: &mut Names| n.backup_make("[\"lez-0.4\"]".into(), "correct horse battery".into(), b1.clone()))),
+            ("backup_check", false, true, Box::new(move |n: &mut Names| n.backup_check(b2.clone(), "correct horse battery".into()))),
+            ("backup_open", false, true, Box::new(move |n: &mut Names| n.backup_open(b3.clone(), "correct horse battery".into()))),
+            ("cli_mine", false, false, Box::new(|n: &mut Names| n.cli_mine())),
+            ("cli_add_name", false, true, Box::new(|n: &mut Names| n.cli_add_name("alice".into()))),
+            ("board_feed", false, false, Box::new(|n: &mut Names| n.board_feed(false))),
+            ("board_posts_of", false, false, Box::new(|n: &mut Names| n.board_posts_of("alice".into(), 0))),
+            ("board_thread", false, false, Box::new(move |n: &mut Names| n.board_thread(h1.clone()))),
+            ("board_follows", false, false, Box::new(|n: &mut Names| n.board_follows())),
+            ("main_name", false, false, Box::new(|n: &mut Names| n.main_name())),
+            ("anon_name", false, false, Box::new(|n: &mut Names| n.anon_name())),
+            ("running_jobs", false, false, Box::new(|n: &mut Names| n.running_jobs())),
+            ("board_likes", false, false, Box::new(|n: &mut Names| n.board_likes())),
+            ("dm_names", false, false, Box::new(|n: &mut Names| n.dm_names())),
+            ("chat_names", false, false, Box::new(|n: &mut Names| n.chat_names())),
+            ("spell_check", false, false, Box::new(|n: &mut Names| n.spell_check("helo wrld".into()))),
+            ("cli_balance", false, false, Box::new(|n: &mut Names| n.cli_balance())),
+            ("cli_status", false, false, Box::new(|n: &mut Names| n.cli_status())),
+            ("bridge_net_balances", false, false, Box::new(move |n: &mut Names| n.bridge_net_balances(json!([f.clone()]).to_string()))),
+            ("activity", false, false, Box::new(|n: &mut Names| n.activity(String::new()))),
+            ("job", false, false, Box::new(|n: &mut Names| n.job("0123456789abcdef".into()))),
+            ("cli_token_holdings", false, false, Box::new(|n: &mut Names| n.cli_token_holdings(String::new()))),
+            ("cli_token_pending", false, false, Box::new(|n: &mut Names| n.cli_token_pending())),
+            ("cli_token_info", false, false, Box::new(move |n: &mut Names| n.cli_token_info(PUBLIC.into()))),
+            ("watched_tokens", false, false, Box::new(|n: &mut Names| n.watched_tokens())),
+            ("cli_accounts", false, false, Box::new(|n: &mut Names| n.cli_accounts())),
+            ("cli_fee", false, false, Box::new(|n: &mut Names| n.cli_fee())),
+            ("chain_status", false, false, Box::new(|n: &mut Names| n.chain_status())),
+            ("chain_accounts", false, false, Box::new(|n: &mut Names| n.chain_accounts())),
+            ("chain_stake", false, false, Box::new(|n: &mut Names| n.chain_stake())),
+            ("chain_claim plan", false, false, Box::new(|n: &mut Names| n.chain_claim(false))),
+            ("chain_tx", false, false, Box::new(move |n: &mut Names| n.chain_tx(h2.clone()))),
+            ("chain_recipient", false, false, Box::new(|n: &mut Names| n.chain_recipient(NODE_KEY.into()))),
+            ("chain_send plan", false, false, Box::new(|n: &mut Names| n.chain_send(NODE_KEY.into(), NODE_KEY.into(), "1".into(), false))),
+            ("chain_split plan", false, false, Box::new(|n: &mut Names| n.chain_split(NODE_KEY.into(), "1".into(), false))),
+            ("chain_bridge plan", false, false, Box::new(move |n: &mut Names| n.chain_bridge(NODE_KEY.into(), g.clone(), "1".into(), false))),
+            ("chain_inscribe plan", false, false, Box::new(|n: &mut Names| n.chain_inscribe(NODE_KEY.into(), "hello".into(), false))),
+            ("file_sha256", false, false, Box::new(move |n: &mut Names| n.file_sha256(lgx.clone()))),
+            ("faucet_info", false, false, Box::new(|n: &mut Names| n.faucet_info())),
+            ("pending_requests", false, false, Box::new(|n: &mut Names| n.pending_requests())),
+            ("app_grants", false, false, Box::new(|n: &mut Names| n.app_grants())),
+            ("token_sources", false, false, Box::new(|n: &mut Names| n.token_sources())),
+            ("secret_grants", false, false, Box::new(|n: &mut Names| n.secret_grants())),
+            ("token_source_holdings", false, false, Box::new(|n: &mut Names| n.token_source_holdings())),
+            ("pending_inscriptions", false, false, Box::new(|n: &mut Names| n.pending_inscriptions())),
+            ("cli_install_bundled", false, true, Box::new(move |n: &mut Names| n.cli_install_bundled(l2.clone(), "00".repeat(32)))),
+            ("watch_token", false, true, Box::new(move |n: &mut Names| n.watch_token(PUBLIC.into(), true))),
+            ("bridge_net_watch", false, true, Box::new(move |n: &mut Names| n.bridge_net_watch(h.clone(), true))),
+            ("set_main_name", false, true, Box::new(|n: &mut Names| n.set_main_name("alice".into()))),
+            ("set_dm_name", false, true, Box::new(|n: &mut Names| n.set_dm_name("c1".into(), "alice".into()))),
+            ("set_chat_name", false, true, Box::new(|n: &mut Names| n.set_chat_name("addr".into(), "alice".into()))),
+            ("board_follow", false, true, Box::new(|n: &mut Names| n.board_follow("alice".into(), false))),
+            ("app_note", false, true, Box::new(|n: &mut Names| n.app_note("k".into(), "v".into()))),
+            ("cli_account_label", false, true, Box::new(move |n: &mut Names| n.cli_account_label(i.clone(), "main".into()))),
+            ("chain_account_label", false, true, Box::new(|n: &mut Names| n.chain_account_label(NODE_KEY.into(), "x".into()))),
+            ("set_bridge_programs", false, true, Box::new(move |n: &mut Names| json!(n.set_bridge_programs(json!([p1.clone()]).to_string())).to_string())),
+            ("set_token_program", false, true, Box::new(move |n: &mut Names| json!(n.set_token_program(p2.clone())).to_string())),
+            // Another app's calls (Wallet Provider SDK).
+            ("granted_accounts", true, false, Box::new(|n: &mut Names| n.granted_accounts())),
+            ("account_balances", true, false, Box::new(|n: &mut Names| n.account_balances())),
+            ("request_status", true, false, Box::new(|n: &mut Names| n.request_status("0123".into()))),
+            ("token_sources (app)", true, false, Box::new(|n: &mut Names| n.token_sources())),
+            ("propose_transfer", true, true, Box::new(|n: &mut Names| n.propose_transfer("LEZ".into(), "5".into(), "alice".into()))),
+            ("propose_call", true, true, Box::new(move |n: &mut Names| n.propose_call(p3.clone(), "[]".into(), "00".into(), "x".into()))),
+            ("declare_programs", true, true, Box::new(move |n: &mut Names| n.declare_programs(json!([p4.clone()]).to_string(), "x".into()))),
+            ("propose_inscription", true, true, Box::new(|n: &mut Names| n.propose_inscription("hello".into()))),
+            ("app_secret", true, false, Box::new(move |n: &mut Names| n.app_secret(format!("Public/{PUBLIC}"), "bridge".into(), "00".into(), "t".into(), 0, 1))),
+        ];
+        let acct = account.clone();
+        let (k1, k2, k3, k4, k5, k6, k7) = (acct.clone(), acct.clone(), acct.clone(), acct.clone(), acct.clone(), acct.clone(), acct.clone());
+        let restore = dir.join("nothing.lnsbak").to_string_lossy().into_owned();
+        let call_json = json!({ "program": bridge_net::DEFAULT_BRIDGE_PROGRAM, "accounts": [], "instruction": "00" }).to_string();
+        let (c1, c2) = (call_json.clone(), call_json.clone());
+        let (q1, q2) = (bridge_net::DEFAULT_BRIDGE_PROGRAM.to_owned(), bridge_net::DEFAULT_BRIDGE_PROGRAM.to_owned());
+        let more: Vec<(&'static str, bool, bool, Box<dyn Fn(&mut Names) -> String>)> = vec![
+            ("cli_register", false, true, Box::new(|n: &mut Names| n.cli_register("zzqqxx".into(), true))),
+            ("cli_claim", false, true, Box::new(|n: &mut Names| n.cli_claim("zzqqxx".into(), String::new()))),
+            ("cli_profile", false, true, Box::new(|n: &mut Names| n.cli_profile("alice".into(), "{}".into(), false))),
+            ("cli_set_page", false, true, Box::new(|n: &mut Names| n.cli_set_page("alice".into(), "text/plain".into(), "hi".into()))),
+            ("cli_set_text", false, true, Box::new(|n: &mut Names| n.cli_set_text("alice".into(), "bio".into(), "hi".into()))),
+            ("cli_transfer", false, true, Box::new(move |n: &mut Names| n.cli_transfer("alice".into(), k1.clone()))),
+            ("cli_receive_privately", false, true, Box::new(|n: &mut Names| n.cli_receive_privately("alice".into()))),
+            ("cli_pay", false, true, Box::new(|n: &mut Names| n.cli_pay("alice".into(), "1".into()))),
+            ("cli_pay_public", false, true, Box::new(|n: &mut Names| n.cli_pay_public("alice".into(), "1".into()))),
+            ("cli_pay_account", false, true, Box::new(move |n: &mut Names| n.cli_pay_account(k2.clone(), "1".into(), false))),
+            ("cli_shield", false, true, Box::new(|n: &mut Names| n.cli_shield("1".into()))),
+            ("cli_receive", false, true, Box::new(|n: &mut Names| n.cli_receive())),
+            ("cli_receive_all", false, true, Box::new(|n: &mut Names| n.cli_receive_all())),
+            ("cli_bridge plan", false, true, Box::new(|n: &mut Names| n.cli_bridge("1".into(), NODE_KEY.into(), String::new(), false))),
+            ("cli_bridge_to plan", false, true, Box::new(move |n: &mut Names| n.cli_bridge_to("1".into(), NODE_KEY.into(), k3.clone(), String::new(), false))),
+            ("cli_token_send", false, true, Box::new(move |n: &mut Names| n.cli_token_send(PUBLIC.into(), "1".into(), k4.clone(), false, true))),
+            ("cli_token_send_source", false, true, Box::new(move |n: &mut Names| n.cli_token_send_source(q1.clone(), PUBLIC.into(), "1".into(), k5.clone(), false, true))),
+            ("cli_token_receive", false, true, Box::new(|n: &mut Names| n.cli_token_receive())),
+            ("cli_account_new", false, true, Box::new(|n: &mut Names| n.cli_account_new("public".into(), "x".into()))),
+            ("cli_account_use", false, true, Box::new(move |n: &mut Names| n.cli_account_use(k6.clone()))),
+            ("chain_account_new", false, true, Box::new(|n: &mut Names| n.chain_account_new("x".into()))),
+            ("chain_account_remove", false, true, Box::new(|n: &mut Names| n.chain_account_remove(NODE_KEY.into()))),
+            ("make_anon", false, true, Box::new(|n: &mut Names| n.make_anon(true))),
+            ("make_public", false, true, Box::new(|n: &mut Names| n.make_public("alice".into()))),
+            ("board_post", false, true, Box::new(|n: &mut Names| n.board_post("alice".into(), "hi".into(), "[]".into(), String::new()))),
+            ("board_like", false, true, Box::new(|n: &mut Names| n.board_like("alice".into(), "ab".repeat(32), false))),
+            ("board_toggle_like", false, true, Box::new(|n: &mut Names| n.board_toggle_like("alice".into(), "ab".repeat(32)))),
+            ("board_hide", false, true, Box::new(|n: &mut Names| n.board_hide("ab".repeat(32)))),
+            ("faucet_claim", false, true, Box::new(move |n: &mut Names| n.faucet_claim(k7.clone()))),
+            ("approve_request", false, true, Box::new(|n: &mut Names| n.approve_request("0123".into(), format!("Public/{PUBLIC}")))),
+            ("reject_request", false, true, Box::new(|n: &mut Names| n.reject_request("0123".into()))),
+            ("approve_inscription", false, true, Box::new(|n: &mut Names| n.approve_inscription("0123".into(), NODE_KEY.into()))),
+            ("private_call_control", false, true, Box::new(|n: &mut Names| n.private_call_control("0123".into(), "cancel".into()))),
+            ("revoke_app", false, true, Box::new(|n: &mut Names| n.revoke_app("nobody_ui".into()))),
+            ("revoke_secret", false, true, Box::new(|n: &mut Names| n.revoke_secret("nobody_ui".into(), format!("Public/{PUBLIC}"), "x".into()))),
+            ("remove_token_source", false, true, Box::new(move |n: &mut Names| n.remove_token_source(q2.clone()))),
+            ("backup_restore", false, true, Box::new(move |n: &mut Names| n.backup_restore(restore.clone(), "correct horse battery".into(), "lez-0.4".into()))),
+            ("cli_create_wallet", false, true, Box::new(|n: &mut Names| n.cli_create_wallet())),
+            ("cli_restore_wallet", false, true, Box::new(|n: &mut Names| n.cli_restore_wallet("abandon ".repeat(11) + "about"))),
+            ("set_private_keys", false, true, Box::new(|n: &mut Names| n.set_private_keys("alice".into(), "00".repeat(32), "00".repeat(33)))),
+            // Another app's presses.
+            ("request_access", true, true, Box::new(|n: &mut Names| n.request_access("x".into()))),
+            ("request_access_with", true, true, Box::new(|n: &mut Names| n.request_access_with("x".into(), "{}".into()))),
+            ("propose_private_call", true, true, Box::new(move |n: &mut Names| n.propose_private_call(format!("Public/{PUBLIC}"), c1.clone(), "x".into()))),
+            ("propose_relayed_call", true, true, Box::new(move |n: &mut Names| n.propose_relayed_call(format!("Public/{PUBLIC}"), c2.clone(), "x".into()))),
+            ("resign_relayed_call", true, true, Box::new(|n: &mut Names| n.resign_relayed_call("0123".into()))),
+            ("propose_token_source", true, true, Box::new(|n: &mut Names| n.propose_token_source(bridge_net::DEFAULT_BRIDGE_PROGRAM.into(), "[]".into()))),
+            ("cancel_request", true, true, Box::new(|n: &mut Names| n.cancel_request("0123".into()))),
+            ("drop_access", true, true, Box::new(|n: &mut Names| n.drop_access())),
+            // Settings last (they change what the calls above read).
+            ("set_cli_wallet", false, true, Box::new(|n: &mut Names| json!(n.set_cli_wallet(String::new())).to_string())),
+            ("set_cli", false, true, Box::new(|n: &mut Names| json!(n.set_cli(String::new())).to_string())),
+            ("set_wallet_files", false, true, Box::new(|n: &mut Names| json!(n.set_wallet_files(String::new(), String::new())).to_string())),
+            ("set_bridge_program", false, true, Box::new(|n: &mut Names| json!(n.set_bridge_program(bridge_net::DEFAULT_BRIDGE_PROGRAM.into())).to_string())),
+            ("set_registry", false, true, Box::new(|n: &mut Names| json!(n.set_registry(String::new())).to_string())),
+            ("set_sequencer", false, true, Box::new(|n: &mut Names| json!(n.set_sequencer("http://127.0.0.1:9".into())).to_string())),
+            ("set_names_network", false, true, Box::new(|n: &mut Names| n.set_names_network("lez-0.3".into()))),
+        ];
+        out.extend(more);
+        out
+    }
+
+    /// Every call the module exposes, made once as the host dispatches it, against everything
+    /// slow at once: the node answers after 3 s (a call waits for it), the names CLI takes 3 s for
+    /// anything, the endpoint 4 s. Reads answer within a second and never wait on their own
+    /// thread; presses are timed and their waits listed (the table in docs/wallet/BUSY-0.17.md).
+    #[test]
+    fn every_call_the_module_exposes_holds_the_thread_how_long() {
+        let (url, _) = bridge_endpoint(std::time::Duration::from_secs(4), Default::default(), 10);
+        let (mut names, dir) = as_the_host("sweep", &url, 3);
+        peer::stand_in::set_slow(chain::MODULE, Some(std::time::Duration::from_secs(3)));
+        node_answers("wallet_get_known_addresses", json!([NODE_KEY]));
+        node_answers("wallet_get_balance", json!("1000"));
+        node_answers("wallet_get_notes", json!({ "notes": [{ "id": "b271", "value": "1000" }] }));
+        std::fs::write(dir.join("lez_bridge.lgx"), vec![7u8; 1 << 20]).unwrap();
+        // The CLI's version is known (asked at the first call, read on its own thread).
+        let _ = names.cli_status();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let calls = every_call(&dir);
+        let mut table = Vec::new();
+        let mut slow_reads = Vec::new();
+        for (what, other_app, press, call) in &calls {
+            as_caller(if *other_app { app("lez_bridge") } else { logos_rust_sdk::LogosCaller::HostAnchor });
+            let at = std::time::Instant::now();
+            let (answer, blocking) = served::on_dispatch(|| call(&mut names));
+            let took = at.elapsed();
+            let answer: Value = serde_json::from_str(&answer).unwrap_or(Value::String(answer));
+            eprintln!("SWEEP {what:<24} {:>8.0} ms  press={press}  waits={blocking:?}  busy={}", took.as_secs_f64() * 1000.0, answer["busy"] == true);
+            // Waits by design, outside the app's reads: another app's app_secret runs the CLI (the
+            // bridge module waits 20 s for it and reads a busy answer as a failure).
+            let by_design = ["app_secret"].contains(what);
+            if !press && !by_design && (took >= std::time::Duration::from_secs(1) || !blocking.is_empty()) {
+                slow_reads.push((*what, took, blocking.clone()));
+            }
+            table.push((*what, took, blocking));
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        peer::stand_in::set_slow(chain::MODULE, None);
+        BRIDGE_HTTP.with(|on| on.set(false));
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(slow_reads.is_empty(), "reads that held the module or waited on their own thread: {slow_reads:?}");
     }
 
     /// A 429 on a background read is waited out (its Retry-After) and asked once more, so the read
