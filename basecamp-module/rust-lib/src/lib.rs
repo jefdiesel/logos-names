@@ -2722,9 +2722,12 @@ impl Names {
         }
         let reset = before.filter(|before| height < *before);
         let in_use = self.net == Net::Lez04 && (self.expected_chain().as_deref() == Some(wanted.as_str()) || self.zones.home().channel.as_deref() == Some(wanted.as_str()));
+        // No bridge listed is the built-in list, as an empty `bridge_programs` setting is.
+        let builtin_bridges = || bridge_net::DEFAULT_BRIDGE_PROGRAMS.iter().map(|id| id.to_string()).collect::<Vec<_>>();
         let (registry_id, bridges) = match &file {
-            Some(file) => (registry::account_text(&file.registry), file.bridge_programs.iter().map(registry::account_text).collect::<Vec<_>>()),
-            None => (LEZ04_REGISTRY.to_owned(), bridge_net::DEFAULT_BRIDGE_PROGRAMS.iter().map(|id| id.to_string()).collect()),
+            Some(file) if !file.bridge_programs.is_empty() => (registry::account_text(&file.registry), file.bridge_programs.iter().map(registry::account_text).collect::<Vec<_>>()),
+            Some(file) => (registry::account_text(&file.registry), builtin_bridges()),
+            None => (LEZ04_REGISTRY.to_owned(), builtin_bridges()),
         };
         let now_registry = self.program.as_ref().map(registry::account_text).unwrap_or_default();
         let now_bridges: Vec<String> = self.bridge_programs_now().iter().map(registry::account_text).collect();
