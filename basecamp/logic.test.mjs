@@ -548,6 +548,52 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const sheet = relayedSheet({ lines: ["lez_bridge asks\u202E", "Network: LEZ 0.4 · bridge test network"], warnings: [], privacy: "A public claim publishes the claim secret and links the Sepolia deposit to this account.", after: "x", app_says: "Claim\nnow\u200B", refused: false, hash: "ab" });
   check("relayedSheet cleans every line", [sheet.lines[0], sheet.says, sheet.refused], ["lez_bridge asks", "Claim⏎now", false]);
   check("relayedSheet of nothing", relayedSheet(null).lines, []);
+
+  // A burn the wallet decoded (sheet.burn), toward each bridge it signs burns for (v4 to v7).
+  // Only the burn this app's own Bridge to Ethereum screen shows, for the send-back on it (whose
+  // address and words were read back and ticked at step 2), goes without a tick; any other app's
+  // burn, or the LEZ Bridge's away from that screen, needs the tick, and shows where it goes.
+  const { requestRisky, burnIsOwnSendBack, burnDestination, burnTickText } = await import("./qml/logic.mjs");
+  const E = "0xe2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5";
+  const bridges = [["bridge v4", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"], ["bridge v5", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"],
+                   ["bridge v6", "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed"], ["bridge v7", "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"]];
+  const burnOf = (app, label, program) => ({ id: "r9", kind: "relayed_call", app, account: "Public/5DNyon1w3jf4Ai2ANzLz1bYnrkeFwuoNRmTL48FTGGb7",
+    sheet: { warnings: ["This destroys the wrapped tokens on Logos and can't be undone; the ETH is released on Ethereum after the bridge's steps."], refused: false,
+             burn: { bridge: program, bridge_label: label, amount_text: "0.01", symbol: "wETH", exit: E } } });
+  const own = { inline: true, view: "sendback", focus: "sb-e2ba7765d0fbf247" };
+  for (const [label, program] of bridges) {
+    const theirs = burnOf("other_app", label, program), bridgeAway = burnOf("lez_bridge", label, program), ours = burnOf("lez_bridge", label, program);
+    check(`burn to ${label}: another app's needs the tick`, requestRisky(theirs, false, burnIsOwnSendBack(theirs, own)), true);
+    check(`burn to ${label}: the LEZ Bridge's, away from Bridge to Ethereum, needs the tick`, requestRisky(bridgeAway, false, burnIsOwnSendBack(bridgeAway, { inline: false, view: "home", focus: "" })), true);
+    check(`burn to ${label}: the one on this app's own Bridge to Ethereum screen goes without`, requestRisky(ours, false, burnIsOwnSendBack(ours, own)), false);
+    check(`burn to ${label}: its destination is shown`, burnDestination(theirs), [
+      "Asked by other_app.",
+      `Bridge: ${label} (${program}).`,
+      "Amount: 0.01 wETH, out of your account 5DNyon…GGb7.",
+      "Ethereum address: not in the call. It is sealed in the exit commitment 0xe2ba7765…dfd5, which the wallet can't open, so the wallet can't show or check it."]);
+  }
+  const ours = burnOf("lez_bridge", "bridge v7", bridges[3][1]);
+  check("own screen, another send-back on it: the tick", requestRisky(ours, false, burnIsOwnSendBack(ours, { inline: true, view: "sendback", focus: "sb-0000000000000000" })), true);
+  check("own screen, not drawn there (a sheet over it): the tick", burnIsOwnSendBack(ours, { inline: false, view: "sendback", focus: "sb-e2ba7765d0fbf247" }), false);
+  check("own screen, another app with the same exit: the tick", burnIsOwnSendBack(burnOf("other_app", "bridge v7", bridges[3][1]), own), false);
+  check("an exit that isn't 32 bytes of hex matches no send-back", burnIsOwnSendBack({ ...ours, sheet: { ...ours.sheet, burn: { ...ours.sheet.burn, exit: "0xe2ba7765d0fbf247" } } }, own), false);
+  check("a refused burn is no burn: its warnings decide", requestRisky({ ...ours, sheet: { ...ours.sheet, refused: true } }, false, true), true);
+  check("a publisher check that failed always ticks", requestRisky(ours, true, true), true);
+  check("the rest as before: an undecoded relayed call with a warning / a call without / a token with one / a payment",
+    [requestRisky({ kind: "relayed_call", sheet: { warnings: ["can't decode"] } }, false, false), requestRisky({ kind: "call", warnings: [] }, false, false),
+     requestRisky({ kind: "transfer", asset_kind: "token", warnings: ["no name"] }, false, false), requestRisky({ kind: "transfer", warnings: ["x"] }, false, false), requestRisky(null, false, false)],
+    [true, false, true, false, false]);
+  check("the tick names the app and says it can't be undone", burnTickText(burnOf("other_app", "bridge v6", bridges[2][1])),
+    "The wallet can't check the Ethereum address. Tick only if you started this send-back in other_app and checked the address there; the burn can't be undone.");
+  check("the bridge's own words for the tick", burnTickText(bridgeAwayOf()), "The wallet can't check the Ethereum address. Tick only if you started this send-back in the LEZ Bridge and checked the address there; the burn can't be undone.");
+  function bridgeAwayOf() { return burnOf("lez_bridge", "bridge v4", bridges[0][1]) }
+  check("destination text from the module is cleaned", burnDestination(burnOf("evil‮app", "bridge v4​", "BKXe\nx")).slice(0, 2), ["Asked by evilapp.", "Bridge: bridge v4 (BKXe⏎x)."]);
+  check("no burn, no destination", [burnDestination(null), burnDestination({ kind: "relayed_call", sheet: {} })], [[], []]);
+  // The sheet uses these rules, not a copy of its own.
+  const sheetQml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("Main.qml: appRequestRisky is Logic.requestRisky", /function appRequestRisky\(request\) \{\s*return Logic\.requestRisky\(/.test(sheetQml), true);
+  check("Main.qml: the short sheet shows Logic.burnDestination", sheetQml.includes("Logic.burnDestination(sheetBody.request)"), true);
+
   check("activityLine for a re-sign",
     ((l) => [l.title, l.sub])(activityLine({ kind: "resign", chain: "lez", zone: "bridge-0.4", app: "lez_bridge", payer_nonce: "42", resigns: 1, state: "done", at: 1 }, 2000)),
     ["Signed again for lez_bridge", "on LEZ 0.4, without asking: only the payer's nonce had moved (payer nonce 42, re-sign 1 of 3)"]);
