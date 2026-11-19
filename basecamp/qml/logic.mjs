@@ -1222,9 +1222,11 @@ export function burnDestination(request, bridgeRecord) {
         "Asked by " + clean(request.app) + ".",
         "Bridge: " + clean(burn.bridge_label || idShort(burn.bridge)) + " (" + clean(burn.bridge) + ").",
         "Amount: " + clean(burn.amount_text) + " " + clean(burn.symbol) + ", out of your account " + idShort(clean(request.account)) + ".",
-        bridgeRecord === true
+        // F (names-roadmap-2, burn_opening.rs): the address the names module CHECKED against the exit
+        // commitment, when the LEZ Bridge sent the burn's opening; else names-safety-b's sealed line.
+        burnAddressLine(request) || (bridgeRecord === true
             ? "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + "; the address above is the LEZ Bridge's record of it, not checked by this wallet."
-            : "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + ", which the wallet can't open, so the wallet can't show or check it.",
+            : "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + ", which the wallet can't open, so the wallet can't show or check it."),
     ]
 }
 

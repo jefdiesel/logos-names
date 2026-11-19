@@ -1702,6 +1702,15 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("burn address: halves only when checked", [L.burnAddressHalves(checked), L.burnAddressHalves({ burn_opening: { checked: false } }), L.burnAddressHalves({})], [["0xb0275f9e94b2a437c834", "bf7dea5699f0b8707ec2"], [], []]);
   check("burn address: unchecked says so, the module's why cleaned", L.burnAddressLine({ burn_opening: { v: 1, checked: false, why: "No opening.\u202e" } }), "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. No opening.");
   check("burn address: an older request keeps the sheet's own line", [L.burnAddressLine({}), L.burnAddressLine(null)], ["", ""]);
+  // Merge wallet-1119 (docs/wallet/burn-opening-sheet.patch on names-safety-b's burnDestination):
+  // the sheet's last line is the checked one when there is one, else safety-b's two sealed lines.
+  const burnReq = (extra) => Object.assign({ kind: "relayed_call", app: "other_app", account: "Public/5DNyon1w3jf4Ai2ANzLz1bYnrkeFwuoNRmTL48FTGGb7",
+    sheet: { refused: false, warnings: ["w"], burn: { bridge: "B", bridge_label: "bridge v7", amount_text: "0.01", symbol: "wETH", exit: "0xe2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5" } } }, extra);
+  check("burn sheet: a checked opening is the address line, with or without the bridge's record above",
+    [L.burnDestination(burnReq(checked))[3], L.burnDestination(burnReq(checked), true)[3]], [L.burnAddressLine(checked), L.burnAddressLine(checked)]);
+  check("burn sheet: no opening keeps safety-b's sealed lines",
+    [L.burnDestination(burnReq({}))[3].endsWith("so the wallet can't show or check it."), L.burnDestination(burnReq({}), true)[3].endsWith("the LEZ Bridge's record of it, not checked by this wallet.")], [true, true]);
+  check("burn sheet: an unchecked opening says the module's why", L.burnDestination(burnReq({ burn_opening: { v: 1, checked: false, why: "No grant." } }))[3], "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. No grant.");
 }
 
 // D: Import account.
