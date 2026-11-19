@@ -77,5 +77,18 @@ check("its tick checks the claim time", /if \(walletView === "pclaim"\) \{\s*\n\
 check("a due claim starts exactly as pressing Claim does", /ClaimDelay\.claimDelayAutoStart\([\s\S]{0,400}?root\.pcStart\(\)/.test(qml), true);
 check("the Claim button waits while the plan holds it", /visible: \(pclaimScreen\.stage === "start" \|\| pclaimScreen\.stage === "checking" \|\| pclaimScreen\.stage === "asking"\) && !\(pclaimScreen\.stage === "start" && root\.pcDelayView\.hold\)/.test(qml), true);
 
+
+// The home card's line (claimDelayCardLine): from receive_status's claim_delay; never a claim.
+const cardStatus = (claimAtMs) => ({ stage: "claimable", claim_delay: plan(claimAtMs) });
+check("card: planned", D.claimDelayCardLine({ features, row: priv, status: cardStatus(now + 2 * H + 30 * 60000), nowMs: now, offsetMin: 0 }), "Planned claim at about 11:30, to hide which deposit is yours. Open it then to claim.");
+check("card: far off says the day", D.claimDelayCardLine({ features, row: priv, status: cardStatus(now + 22 * H), nowMs: now, offsetMin: 0 }), "Planned claim tomorrow at about 07:00, to hide which deposit is yours. Open it then to claim.");
+check("card: due", D.claimDelayCardLine({ features, row: priv, status: cardStatus(now - 1000), nowMs: now, offsetMin: 0 }), D.CLAIM_DELAY_CARD_DUE);
+check("card: no plan in the status", D.claimDelayCardLine({ features, row: priv, status: { stage: "claimable" }, nowMs: now }), "");
+check("card: public receive", D.claimDelayCardLine({ features, row: pub, status: cardStatus(now + H), nowMs: now }), "");
+check("card: chose now", D.claimDelayCardLine({ features, row: priv, status: { claim_delay: { delay: "off", why: "chose_now" } }, nowMs: now }), "");
+check("card: old bridge", D.claimDelayCardLine({ features: ["receive"], row: priv, status: cardStatus(now + H), nowMs: now }), "");
+check("card: no status yet", D.claimDelayCardLine({ features, row: priv, status: undefined, nowMs: now }), "");
+check("card words: no forbidden words", /official|lookup/i.test(D.CLAIM_DELAY_CARD_DUE), false);
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

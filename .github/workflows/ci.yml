@@ -38,6 +38,7 @@ jobs:
       - run: node basecamp/logic.test.mjs
       - run: node basecamp/claimdelay.test.mjs
       - run: node basecamp/relayline.test.mjs
+      - run: node basecamp/releasefee.test.mjs
       - run: node --test gateway/app-settings.test.mjs
 
   guest:

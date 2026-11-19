@@ -107,3 +107,21 @@ export function claimDelayAutoStart(s) {
     var last = Number(st.lastAt) || 0
     return last === 0 || Number(st.nowMs) - last >= CLAIM_DELAY_CHECK_MS
 }
+
+/// The home card's line for a receive whose claim time is planned (rfp-022 docs/PRIVACY-M5.md §1):
+/// "" when there is none. The card never starts a claim; it only says when the "Claim privately"
+/// page will. `s`: {features, row (a card row: id, account, account_kind), status (its
+/// receive_status answer, which carries `claim_delay`), nowMs, offsetMin}. The card's Claim button
+/// stays as it is: pressing it opens the page, which waits or offers "Claim now instead".
+export function claimDelayCardLine(s) {
+    var st = s || {}
+    var plan = st.status && typeof st.status === "object" ? st.status.claim_delay : undefined
+    if (plan === undefined || plan === null) return ""
+    var v = claimDelayState({ features: st.features, row: st.row, plan: plan, nowMs: st.nowMs, offsetMin: st.offsetMin })
+    if (!v.on) return ""
+    if (v.due) return CLAIM_DELAY_CARD_DUE
+    var p = claimTimeParts(v.atMs, Number(st.nowMs) || 0, st.offsetMin)
+    var when = p.day === "" ? "" : p.day === "today" || p.day === "tomorrow" ? p.day + " " : "on " + p.day + " "
+    return "Planned claim " + when + "at about " + p.clock + ", to hide which deposit is yours. Open it then to claim."
+}
+export const CLAIM_DELAY_CARD_DUE = "Its planned claim time has come: open it to claim privately."
