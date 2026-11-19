@@ -204,7 +204,7 @@ mod tests {
             "rpc": crate::LEZ04_SEQUENCER,
             "registry": crate::LEZ04_REGISTRY,
             "bridge_programs": crate::bridge_net::DEFAULT_BRIDGE_PROGRAMS,
-            "nft_programs": [],
+            "nft_programs": [{ "program": crate::registry::DEED_NFT_PROGRAM, "label": "Logos NFT program (LNS name cards)" }],
             "faucet": crate::LEZ04_SEQUENCER,
         })
         .to_string()
@@ -215,12 +215,14 @@ mod tests {
         let file = parse(&ours(), CHAIN).expect("our file checks");
         assert_eq!(file.chain_id, crate::LEZ04_CHANNEL);
         assert_eq!(file.rpc.as_deref(), Some(crate::bridge_net::RPC));
+        assert_eq!(registry::account_text(&file.registry), crate::LEZ04_REGISTRY);
+        // Logos's NFT program, which LNS name deeds are minted on (deployed 2026-11-19).
+        assert_eq!(file.nft_programs.iter().map(|(program, _)| registry::account_text(program)).collect::<Vec<_>>(), vec![crate::registry::DEED_NFT_PROGRAM]);
         // The published copy (docs/wallet/networks/), only in the repository: a build from
         // basecamp-module alone can't see it.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/wallet/networks").join(format!("{CHAIN}.json"));
         if let Ok(text) = std::fs::read_to_string(&path) {
             assert_eq!(parse(&text, CHAIN).expect("the published file checks"), file, "docs/wallet/networks/{CHAIN}.json no longer names the built-in network");
-            assert!(file.nft_programs.is_empty());
         }
     }
 

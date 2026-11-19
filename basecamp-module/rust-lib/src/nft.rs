@@ -692,9 +692,32 @@ impl Names {
         format!("{}#{}", self.zones.current_id(), self.net.id())
     }
 
-    pub(crate) fn nft_programs_listed(&self) -> Result<Vec<Value>, String> {
+    /// The NFT programs built into the network in use: on our own LEZ 0.4, Logos's NFT program
+    /// that LNS name deeds are minted on (`registry::DEED_NFT_PROGRAM`, deployed 2026-11-19). A
+    /// custom network's come from its network file instead (added to the list).
+    pub(crate) fn nft_built_in(&self) -> Vec<Value> {
+        if self.net == crate::Net::Lez04 && self.custom.is_null() {
+            vec![json!({ "program": crate::registry::DEED_NFT_PROGRAM, "label": "Logos NFT program (LNS name cards)", "added": 0, "built_in": true })]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The NFT programs of the network in use: the built-in ones, then the person's.
+    pub(crate) fn nft_list(&self) -> Result<Vec<Value>, String> {
         let path = list_path().ok_or("no home folder to keep the NFT programs in")?;
-        Ok(programs_in(&path, &self.nft_network())
+        let mut list = self.nft_built_in();
+        for entry in programs_in(&path, &self.nft_network()) {
+            if !list.iter().any(|known| known["program"] == entry["program"]) {
+                list.push(entry);
+            }
+        }
+        Ok(list)
+    }
+
+    pub(crate) fn nft_programs_listed(&self) -> Result<Vec<Value>, String> {
+        Ok(self
+            .nft_list()?
             .into_iter()
             .map(|mut entry| {
                 let label = entry["program"].as_str().and_then(crate::program_registry::label);
@@ -707,6 +730,9 @@ impl Names {
     pub(crate) fn nft_program_change(&mut self, program: &str, label: &str, add: bool) -> Result<Vec<Value>, String> {
         let path = list_path().ok_or("no home folder to keep the NFT programs in")?;
         let network = self.nft_network();
+        if !add && self.nft_built_in().iter().any(|entry| program_id(program).is_ok_and(|id| entry["program"] == registry::account_text(&id).as_str())) {
+            return Err("that NFT program is built into this network, so it stays listed".to_owned());
+        }
         if add {
             add_program(&path, &network, program, label, provider::now_ms())?;
         } else {
@@ -720,8 +746,7 @@ impl Names {
     pub(crate) fn nft_listed(&self, program: &str) -> Result<registry::AccountId, String> {
         let id = program_id(program)?;
         let text = registry::account_text(&id);
-        let path = list_path().ok_or("no home folder to keep the NFT programs in")?;
-        if !programs_in(&path, &self.nft_network()).iter().any(|entry| entry["program"] == text.as_str()) {
+        if !self.nft_list()?.iter().any(|entry| entry["program"] == text.as_str()) {
             return Err("that NFT program isn't in this network's list: add it under Collectibles, Programs".to_owned());
         }
         Ok(id)

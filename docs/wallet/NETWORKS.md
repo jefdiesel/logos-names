@@ -86,7 +86,7 @@ Unknown fields are ignored, so later versions can add some without breaking this
 
 `docs/wallet/networks/2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374.json`, written
 from the module's constants (`LEZ04_CHANNEL`, `LEZ04_SEQUENCER`, `LEZ04_REGISTRY`,
-`bridge_net::DEFAULT_BRIDGE_PROGRAMS`; no NFT program is deployed there yet). The module test
+`bridge_net::DEFAULT_BRIDGE_PROGRAMS`, and `registry::DEED_NFT_PROGRAM`, Logos's NFT program that LNS name deeds are minted on). The module test
 `network::tests::our_network_file_is_the_built_in_network` fails if they drift apart. Publish it at
 `https://nameswallet.app/networks/<chain-id>.json` (the conductor does this). After a reset of our
 chain, update the file (new registry, bridges, and a new chain id if it changed) and publish it: a

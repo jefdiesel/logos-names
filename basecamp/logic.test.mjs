@@ -1514,7 +1514,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("wallet-next: the bridge's new calls only through the adapter", (qml.match(/bridgeCall\("(address_book_list|address_book_save|address_book_remove|receive_remove|send_back_remove|send_back_check|send_back_plan)"/g) || []).length, 0);
   // 44 Timers in Main.qml at 0520887: none added (the box is checked once per change, never repeated).
   // +1 on names-nft: Collectibles' read, only while that page is open and in front, every 30 s (nft.test.mjs).
-  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 45);
+  // +1 on wallet-1121: deedRetry, one-shot, restarted only while the module answers a name NFT read as busy.
+  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 46);
   check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
   check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
   check("address step: the plan refuses an unticked or other value, and says so", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\) \{\s*\n\s*sbError = /.test(qml), true);
@@ -2024,6 +2025,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
      "The network file's address starts with https:// (http:// only for this computer).", "", "", "The RPC URL starts with https:// (http:// only for this computer)."]);
   check("network name", [L.networkName("lez-0.4", null), L.networkName("custom", { name: "Reset chain" }), L.networkName("custom", null), L.networkName("lez-0.3", null)],
     ["the bridge test network", "Reset chain", "the bridge test network", "the Logos testnet"]);
+  check("a claimed name NFT in the history", [L.activityLine({ kind: "deed_claim", name: "turing", state: "done", at: 1 }).title], ["Claimed the NFT of turing"]);
   check("runs on, LEZ 0.4", [L.net04Html("lez-0.4", null), L.net04Html("custom", { name: "<b>x</b> & y" })], ["<b>LEZ 0.4</b> · bridge test network", "<b>LEZ 0.4</b> · &lt;b&gt;x&lt;/b&gt; &amp; y"]);
   check("reset line", [L.networkResetLine(0, "x", (t) => "t" + t), L.networkResetLine(90, "", (t) => "t" + t)], ["", "The bridge test network was reset at t90. What was held there before is gone; everything shown was read again."]);
   const found = { chain_id: CHAIN, rpc: "https://lez.nameswallet.app/", height: 33727, file_url: "https://nameswallet.app/networks/" + CHAIN + ".json", file_missing: false,
@@ -2043,6 +2045,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("our LEZ 0.4 is the app's default too", /property string namesNet: "0\.4"/.test(qml), true);
   check("a cold start reads LEZ 0.4 only once the module said its network", /readonly property bool bridgeNetOnView: configKnown && walletNet === "0\.4"/.test(qml), true);
   check("a reset seen by the balance read checks the network file too", /rereadAfterReset\(resetAt\)\n(\s*\/\/[^\n]*\n)*\s*checkNetworkNow\(\)/.test(qml), true);
+  check("the claim button says Claiming… at once and only for a name that can have one",
+    [/label: root\.deedClaiming\(myName\.modelData\.name\) \? "Claiming…" : "Claim NFT \(free\)"/.test(qml), /deedInfo\.deed === null && deedInfo\.normal === true/.test(qml), /FontLoader \{ id: gloockFont; source: "fonts\/Gloock-Regular\.ttf" \}/.test(qml)],
+    [true, true, true]);
   check("every network button says what it is doing at once",
     [/label: root\.customChecking \? "Checking…" : "Check"/.test(qml), /root\.customSwitching \? "Switching…"/.test(qml), /label: root\.netChecking \? "Checking…" : "Check the network now"/.test(qml),
      /askLater\("network_custom", \[rpc, chain, file, false\]/.test(qml), /askLater\("network_custom", \[found\.rpc, found\.chain_id, found\.file_url, true\]/.test(qml)],

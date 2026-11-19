@@ -114,6 +114,9 @@ BRIDGE = r"""
                         private_accounts: [{ account: "%(carol)s", balance: "2999000", funded: true }] })
                 return JSON.stringify({ success: false, value: null, error: "the LEZ wallet is not running; install LEZ Wallet and open it" })
             }
+            // LNS name NFTs (deeds): which names can have one (5+ characters here), and a claim's job.
+            if (method === "deed_tiers") { var dt = {}; JSON.parse(args[0]).forEach(function(n) { dt[n] = n.length >= 5 }); return ok(dt) }
+            if (method === "deed_claim") return ok({ id: args[0] + "-1792000000020", name: args[0], kind: "deed_claim", state: "running", started: Date.now() })
             // Settings, Network, Custom network (the mock's `network_custom`: `check` and `apply`
             // answers, or `{error}`).
             if (method === "network_custom") {
@@ -291,7 +294,7 @@ BRIDGE = r"""
                     return ok({ name: name, display: name + ".lez", owner_tag: rich.owner_tag || ("c0ffee" + names[i].owner.substr(0, 10)),
                         expires: null, never: true, lapsed: false, deposit: rich.deposit !== undefined ? rich.deposit : "100000000",
                         account: rich.account !== undefined ? rich.account : names[i].owner, npk: rich.npk || null, vpk: rich.vpk || null,
-                        texts: rich.texts || {} })
+                        texts: rich.texts || {}, deed: ((%(mock)s).deeds || {})[name] || null })
                 }
                 return ok(null)
             }
@@ -1573,6 +1576,23 @@ for _name, _js, _mock in [
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
     HEIGHTS[_name] = 1700 if _name.startswith("net-welcome") else 1500
+
+
+# ── LNS name NFTs (deeds, SPEC.md §8.6): the claim in My names, the card in Collectibles ──
+_DEED = {"definition": "9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro", "nonce": "227820f30ec501b9f7151601e763f5fe9b684ba54a45144823773c0c7c0ede75", "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G"}
+_ON04 = 'root.cliNames = []; root.cliPending = []; Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { %s }) })'
+_LONG = 'root.myNames = root.myNames.concat([{ name: "thirtytwocharacterlongname-lns32", owner: "%s" }]); var nd = Object.assign({}, root.nameDeeds); nd["thirtytwocharacterlongname-lns32"] = { deed: %s, normal: true }; root.nameDeeds = nd' % (ALICE, json.dumps(_DEED))
+for _name, _js, _mock in [
+    ("deed-claim", _ON04 % 'root.openWallet("names")', {"names_network": "lez-0.4"}),
+    ("deed-claiming", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.claimDeed("turing") })', {"names_network": "lez-0.4"}),
+    ("deed-claimed", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.deedLineName = "grace"; root.deedLine = "grace\'s NFT is yours: its card is in Collectibles. It moves with the name when you transfer it." })', {"names_network": "lez-0.4", "deeds": {"grace": _DEED}}),
+    ("deed-collectibles", _ON04 % ('root.openCollectibles(); root.againAfter(150, function() { ' + _LONG + ' })'), {"names_network": "lez-0.4", "deeds": {"turing": _DEED, "grace": _DEED}}),
+    ("deed-collectibles-none", _ON04 % 'root.openCollectibles()', {"names_network": "lez-0.4"}),
+    ("deed-transfer", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.openTransfer("grace"); transferToField.text = "Public/%s"; root.transferConfirm = true })' % BOB, {"names_network": "lez-0.4", "deeds": {"grace": _DEED}}),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+    HEIGHTS[_name] = 1700
 
 
 def main():

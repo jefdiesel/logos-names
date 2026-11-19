@@ -391,8 +391,7 @@ impl Names {
             return Err("ask to propose NFT transfers first (request_nft_transfers); seeing NFTs doesn't allow it".to_owned());
         }
         // The program must be one the person listed for this network.
-        let path = crate::config_dir().map(|dir| dir.join("nft-programs.json")).ok_or("no home folder")?;
-        if !nft::programs_in(&path, &self.nft_network()).iter().any(|entry| entry["program"] == request["program"]) {
+        if !self.nft_list()?.iter().any(|entry| entry["program"] == request["program"]) {
             return Err("that NFT program isn't in the person's list for this network".to_owned());
         }
         store.add(request, now)

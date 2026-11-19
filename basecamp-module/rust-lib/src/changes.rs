@@ -77,6 +77,20 @@ fn registry_balance(program: &AccountId, seed: [u8; 32]) -> Mention {
     Mention { account: pda(program, &seed), program: NATIVE_TOKEN, seed: Some(seed), signs: false }
 }
 
+/// What a change to a name's deed reaches (SPEC.md §8.6), as the CLI's `deed_mentions` lists it:
+/// the deed's definition and the deed accounts of `holders`, each the NFT program's actor on a
+/// registry account, with its seed as evidence. A transfer lists the holder and the new holder,
+/// a release the holder; the transaction then runs the NFT program too (the CLI adds it).
+pub fn deed_mentions(program: &AccountId, id: &NameId, deed: &crate::registry::Deed, holders: &[OwnerTag]) -> Vec<Mention> {
+    let nft = crate::registry::deed_nft_program();
+    let on = |seed: [u8; 32]| Mention { account: pda(program, &seed), program: nft, seed: Some(seed), signs: false };
+    let mut mentions = vec![on(crate::registry::deed_definition_seed(id, &deed.nonce))];
+    for holder in holders {
+        mentions.push(on(crate::registry::deed_holding_seed(&deed.definition, holder)));
+    }
+    mentions
+}
+
 /// The native balance of the account that signs.
 fn signer_balance(signer: AccountId) -> Mention {
     Mention { account: signer, program: NATIVE_TOKEN, seed: None, signs: true }
@@ -514,15 +528,24 @@ impl Registry {
             return Err(format!("{} already belongs to that account", display(name)));
         }
         let new_tag = owner_tag(&derived.id, new_owner);
-        Ok(self.on_record_and_page(derived, holder, encode_transfer(&derived.id, &new_tag)))
+        let mut change = self.on_record_and_page(derived, holder, encode_transfer(&derived.id, &new_tag));
+        // A deeded name's deed moves with it, in the same transaction.
+        if let Some(deed) = &record.deed {
+            change.mentions.extend(deed_mentions(&self.program, &derived.id, deed, &[record.owner, new_tag]));
+        }
+        Ok(change)
     }
 
     /// Gives the name up, refunding its deposit to the holder: the deposit
     /// account's whole balance, read from the chain.
     pub fn release(&self, name: &str, derived: &Derived, held: &[AccountId]) -> Result<Change, String> {
-        let (_, holder) = self.holder(name, derived, held)?;
+        let (record, holder) = self.holder(name, derived, held)?;
         let refund = self.deposit(&derived.id)?;
         let mut change = self.on_record_and_page(derived, holder, encode_release(&derived.id, refund));
+        // Its deed is burned with it.
+        if let Some(deed) = &record.deed {
+            change.mentions.extend(deed_mentions(&self.program, &derived.id, deed, &[record.owner]));
+        }
         if refund != 0 {
             change.mentions.push(registry_balance(&self.program, deposit_seed(&derived.id)));
             change.mentions.push(signer_balance(holder));
@@ -581,6 +604,39 @@ mod tests {
     fn sha(bytes: &[u8]) -> String {
         use sha2::{Digest, Sha256};
         hex(&Sha256::digest(bytes))
+    }
+
+    /// SPEC.md §8.6: a transfer of a deeded name declares the deed's definition and both deed
+    /// accounts under the NFT program, with their seeds; a name without a deed transfers as before.
+    /// The addresses are the live chain's for `lns-deed-check` (docs/wallet/deploy-our04-deeds.log).
+    #[test]
+    fn a_deeded_name_declares_its_deed_on_transfer() {
+        let program = crate::registry::parse_account("6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA").unwrap();
+        let derived = derive("lns-deed-check");
+        let deed = crate::registry::Deed {
+            definition: crate::registry::parse_account("9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro").unwrap(),
+            nonce: unhex("227820f30ec501b9f7151601e763f5fe9b684ba54a45144823773c0c7c0ede75").unwrap().try_into().unwrap(),
+        };
+        let (holder, other) = ([0x11; 32], [0x22; 32]);
+        let (old_tag, new_tag) = (owner_tag(&derived.id, &holder), owner_tag(&derived.id, &other));
+        let nft = crate::registry::deed_nft_program();
+        let mentions = deed_mentions(&program, &derived.id, &deed, &[old_tag, new_tag]);
+        assert_eq!(mentions.len(), 3);
+        assert_eq!(account_text(&mentions[0].account), "9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro", "the definition");
+        assert!(mentions.iter().all(|m| m.program == nft && m.seed.is_some() && !m.signs && pda(&program, m.seed.as_ref().unwrap()) == m.account));
+        assert_eq!(mentions[1].account, pda(&program, &crate::registry::deed_holding_seed(&deed.definition, &old_tag)));
+        assert_eq!(mentions[2].account, pda(&program, &crate::registry::deed_holding_seed(&deed.definition, &new_tag)));
+
+        let registry = Registry::new("http://127.0.0.1:9", program);
+        let record = |deed| Resolved { owner: old_tag, expires: crate::registry::NEVER, profile: Profile::default(), claimed: false, deed };
+        crate::registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, record(Some(deed)))));
+        let change = registry.transfer("lns-deed-check", &derived, &[holder], &other).expect("a transfer");
+        assert_eq!(change.mentions[change.mentions.len() - 3..].to_vec(), mentions, "the deed moves with the name");
+        crate::registry::RECORDS.with(|records| records.borrow_mut().clear());
+        crate::registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, record(None))));
+        let plain = registry.transfer("lns-deed-check", &derived, &[holder], &other).expect("a transfer");
+        assert!(plain.mentions.iter().all(|m| m.program != nft), "no deed, nothing of the NFT program's");
+        crate::registry::RECORDS.with(|records| records.borrow_mut().clear());
     }
 
     /// Bytes from `names_core`'s own borsh encoding of each instruction, from

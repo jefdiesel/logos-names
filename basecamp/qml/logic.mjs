@@ -581,6 +581,7 @@ export function activityLine(entry, now, account) {
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
+    case "deed_claim": title = "Claimed the NFT of " + (e.name || "a name"); sub = "on LEZ 0.4, free: its LNS name card"; sign = ""; break
     case "arrived":
         title = "Arrived"
         sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : e.chain === "lez-0.4" ? " on LEZ 0.4, the bridge test network" : " on LEZ")

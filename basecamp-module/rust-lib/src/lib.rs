@@ -392,6 +392,20 @@ pub trait NamesModule: Send + 'static {
     /// Names app only.
     fn network_custom(&mut self, rpc: String, chain_id: String, file_url: String, apply: bool) -> String;
 
+    // ── Deeds: a name's optional free NFT (SPEC.md §8.6) ────────────────
+
+    /// Whether each of `names_json` (a JSON list of names) can have a deed: `{<name>: true |
+    /// false | null}`. True for the normal tier (5 to 32 characters, not locked or reserved),
+    /// false for the others, null while it is still being read (on a thread of its own, from the
+    /// names CLI's list; asked again, it answers). A name's deed itself is in `resolve` (`deed`).
+    /// Names app only.
+    fn deed_tiers(&mut self, names_json: String) -> String;
+
+    /// Claims the deed of `name`, held by this wallet: free (gas only), optional, once while it is
+    /// held; a CLI job (`names deed claim`), followed with `job` like a transfer. Refused on LEZ
+    /// 0.3 (deeds are on LEZ 0.4) and for a name that already has one. Names app only.
+    fn deed_claim(&mut self, name: String) -> String;
+
     /// Sets the one bridge program the Wallet reads on LEZ 0.4 (its Config lists the bridged
     /// tokens): a program ID, or empty for the built-in default. It replaces the whole list
     /// (`set_bridge_programs`). Kept in config.json under `lez04.bridge_programs` (and
@@ -5707,6 +5721,47 @@ impl NamesModule for Names {
             }
             Ok(self.shown_config())
         })())
+    }
+
+    fn deed_tiers(&mut self, names_json: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let asked: Vec<String> = serde_json::from_str(&names_json).map_err(|_| "give the names as a JSON list".to_owned())?;
+            let mut out = Map::new();
+            for typed in asked.into_iter().take(64) {
+                let Ok(name) = registry::parse_name(&typed) else { continue };
+                if !(5..=32).contains(&name.chars().count()) {
+                    out.insert(name, Value::Bool(false));
+                    continue;
+                }
+                // The tier never changes: read once a day at most, on a thread of its own.
+                let asked_name = name.clone();
+                let snap = self.served.read(&format!("deed-tier:{name}"), std::time::Duration::from_secs(24 * 3600), served::Lane::Cli, move || {
+                    let id = registry::derive(&asked_name).id;
+                    shortlist::length_proof(&id).map(|(_, tier)| Value::Bool(tier == shortlist::TIER_NORMAL))
+                });
+                out.insert(name, snap.value.unwrap_or(Value::Null));
+            }
+            Ok(Value::Object(out))
+        })())
+    }
+
+    fn deed_claim(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        if self.net != Net::Lez04 {
+            return reply(Err("name NFTs are on LEZ 0.4; switch to it in Settings → Network. Nothing was done.".to_owned()));
+        }
+        let typed = registry::normalize_name(&name);
+        let mut start = Start::new(&self.home_sequencer());
+        let out = self.cli_job_by(&name, "deed_claim", &mut start, |_, name, _| Ok((cli::deed_claim_args(name), None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "deed_claim", "chain": "lez", "name": typed }));
+        // The name's record changes (it gains its deed): read it afresh.
+        self.forget_reads(&name);
+        out
     }
 
     fn network_custom(&mut self, rpc: String, chain_id: String, file_url: String, apply: bool) -> String {
@@ -11577,7 +11632,7 @@ mod tests {
         assert!(!dir.join("jobs").exists() || std::fs::read_dir(dir.join("jobs")).unwrap().count() == 0, "nothing ran");
         // A private account is never on the chain to be seen: it goes.
         let derived = registry::derive("xferalpha");
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
         let started = parsed(&names.cli_transfer("xferalpha".into(), format!("Private/{unseen}")));
         let id = started["value"]["id"].as_str().expect("a job").to_owned();
         assert_eq!(job_end(&mut names, &id)["state"], "done");
@@ -11889,7 +11944,7 @@ mod tests {
         let (mut names, dir) = with_fake_cli("startdeadline", "exit 0");
         let seen = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
         let derived = registry::derive("xferslow");
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
         // Each read takes 3.2 s: either alone fits the 6 s a job start has, the two together don't.
         registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(3200)));
         let started = std::time::Instant::now();
@@ -11983,7 +12038,7 @@ mod tests {
         let (mut names, dir) = with_fake_cli("mineoct", &tail);
         let derived = registry::derive("seqoct");
         let owner = registry::owner_tag(&derived.id, &registry::parse_account(holder).unwrap());
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner, expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner, expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
         let mine = parsed(&names.cli_mine());
         assert_eq!(mine["success"], true, "{mine}");
         // goneold has no record (the stand-in sequencer gives none): it really is gone.
@@ -11999,7 +12054,7 @@ mod tests {
     fn a_name_listed_from_its_record_reads_as_the_cli_writes_it() {
         assert_eq!(cli::readable(0), "1970-01-01 00:00:00Z");
         assert_eq!(cli::readable(1_794_243_900_000), "2026-11-09 17:05:00Z");
-        let record = |expires| registry::Resolved { owner: [3; 32], expires, profile: registry::Profile::default(), claimed: false };
+        let record = |expires| registry::Resolved { owner: [3; 32], expires, profile: registry::Profile::default(), claimed: false, deed: None };
         let held = cli::held_entry("jef", &record(1_794_243_900_000), "Private/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_000_000);
         assert_eq!((held["state"].as_str(), held["lapsed"].as_bool(), held["private"].as_bool()), (Some("held until 2026-11-09 17:05:00Z"), Some(false), Some(true)));
         let lapsed = cli::held_entry("jef", &record(1_794_243_900_000), "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_900_000);
@@ -12730,7 +12785,7 @@ mod tests {
         let (mut names, dir) = with_wallet("self-transfer", "exit 0");
         let derived = registry::derive("ovone");
         let holder = registry::parse_account(PRIVATE).unwrap();
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
         let refused = parsed(&names.cli_transfer("ovone".into(), format!("Private/{PRIVATE}")));
         assert_eq!(refused["error"], format!("{PRIVATE} already holds ovone, so nothing was sent"), "{refused}");
         assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");
@@ -12819,7 +12874,7 @@ mod tests {
         let (mut names, dir) = with_wallet("rp-holder", &tail);
         let derived = registry::derive("probealpha");
         let holder = registry::parse_account(PUBLIC).unwrap();
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
         let started = parsed(&names.cli_receive_privately("probealpha".into()));
         assert_eq!(started["success"], true, "{started}");
         let history = activity::all(&config_dir().unwrap());

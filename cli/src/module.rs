@@ -493,7 +493,16 @@ impl Client {
                 _ => None,
             })
             .unwrap_or(65_590);
-        self.transact(mentions, message, vec![(self.program, program)], spent, cycles).await
+        // A change to a deeded name (a transfer moves its deed, a release burns it) reaches the
+        // NFT program's actors too: the transaction runs that program as well (SPEC.md §8.6).
+        let nft = names_core::deed::NFT_PROGRAM.to_string();
+        let deeds = change.mentions.iter().any(|mention| mention.program == nft);
+        let mut programs = vec![(self.program, program)];
+        if deeds {
+            programs.push((names_core::deed::NFT_PROGRAM, self.nft_program().await?));
+        }
+        let cycles = cycles + if deeds { crate::DEED_CYCLES } else { 0 };
+        self.transact(mentions, message, programs, spent, cycles).await
     }
 
     fn mention(&self, mention: &Mention) -> Result<AccountMention> {

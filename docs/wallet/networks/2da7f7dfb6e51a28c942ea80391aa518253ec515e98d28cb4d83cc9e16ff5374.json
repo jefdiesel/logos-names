@@ -13,7 +13,9 @@
     "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed",
     "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"
   ],
-  "nft_programs": [],
+  "nft_programs": [
+    { "program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G", "label": "Logos NFT program (LNS name cards)" }
+  ],
   "faucet": "https://lez.nameswallet.app/",
   "updated": "2026-11-19"
 }

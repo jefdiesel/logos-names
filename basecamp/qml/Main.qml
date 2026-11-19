@@ -860,6 +860,14 @@ Item {
     property string customProblem: ""
     property string customDone: ""
     property bool netChecking: false       // "Check the network now"
+    // ── LNS name NFTs (deeds, SPEC.md §8.6): an optional free card for each name held ──
+    /// By name: `{deed}` from resolve (null: none claimed; undefined: not read yet) and `normal`
+    /// from deed_tiers (true: the normal tier, which can have one).
+    property var nameDeeds: ({})
+    property string deedLine: ""           // the last claim's plain result
+    property string deedLineName: ""
+    readonly property var deededNames: allMine.filter(function(entry) { var d = nameDeeds[entry.name]; return !!(d && d.deed) })
+    FontLoader { id: gloockFont; source: "fonts/Gloock-Regular.ttf" }
     property var netCheckFound: null
     property string netCheckProblem: ""
     /// Which network the Wallet shows: always the names network, so a balance, a name and a
@@ -7549,9 +7557,69 @@ Item {
     readonly property var nftGroups: Nft.accountGroups(nftRead ? nftRead.programs : [])
     readonly property var nftCollections: Nft.collectionCounts(nftRead ? nftRead.programs : [])
 
+    /// Reads, for each name held, whether it has its NFT (resolve's `deed`) and whether it can
+    /// have one (deed_tiers). On LEZ 0.4 only: deeds are there.
+    function loadDeeds() {
+        if (namesNet !== "0.4")
+            return
+        var names = allMine.map(function(entry) { return entry.name })
+        if (names.length === 0)
+            return
+        names.forEach(function(name) {
+            askLater("resolve", [name], onNet(function(value) {
+                var all = Object.assign({}, nameDeeds)
+                all[name] = Object.assign({}, all[name] || {}, { deed: value && value.deed ? value.deed : null })
+                nameDeeds = all
+            }), function(message) {
+                if (waitAgain(message))
+                    deedRetry.restart()
+            })
+        })
+        askLater("deed_tiers", [JSON.stringify(names)], onNet(function(value) {
+            var all = Object.assign({}, nameDeeds), waiting = false
+            for (var name in value) {
+                all[name] = Object.assign({}, all[name] || {}, { normal: value[name] })
+                if (value[name] === null)
+                    waiting = true
+            }
+            nameDeeds = all
+            if (waiting)
+                deedRetry.restart()
+        }), function(message) {
+            if (waitAgain(message))
+                deedRetry.restart()
+        })
+    }
+    Timer { id: deedRetry; interval: 3000; onTriggered: root.loadDeeds() }
+    // Read when My names or Collectibles comes into view, and when the names held change.
+    readonly property bool deedsOnView: configKnown && namesNet === "0.4" && ((section === "wallet" && walletView === "names") || section === "collectibles")
+    readonly property string mineKey: allMine.map(function(entry) { return entry.name }).join(",")
+    onDeedsOnViewChanged: if (deedsOnView) loadDeeds()
+    onMineKeyChanged: if (deedsOnView) loadDeeds()
+
+    /// "Claim NFT (free)": the name's card, claimed by its holder (a job of the names tool).
+    function claimDeed(name) {
+        if (boardJob !== null)
+            return
+        deedLine = ""
+        deedLineName = name
+        boardStart("deed_claim", [name], "Claiming the NFT of " + name, function() {
+            deedLine = name + "'s NFT is yours: its card is in Collectibles. It moves with the name when you transfer it."
+            var all = Object.assign({}, nameDeeds)
+            delete all[name]
+            nameDeeds = all
+            loadDeeds()
+            loadActivity()
+        }, name)
+    }
+    function deedClaiming(name) {
+        return boardJob !== null && boardJob.kind === "deed_claim" && boardJob.name === name
+    }
+
     function openCollectibles() {
         go("collectibles")
         nftResult = ""
+        loadDeeds()
         loadNfts()
         loadNftGrants()
         loadRunningJobs()
@@ -9925,6 +9993,72 @@ Item {
 
     /// Every page below the wallet starts with this: the back button, the title (one size) and,
     /// when given, the network the page runs on.
+    /// An LNS name card (design/lns-name-card, approved 2026-11-19), drawn at `side` pixels with
+    /// the holder's own name: the public NFT image shows no name.
+    component NameCard: Rectangle {
+        id: nameCard
+        property string name: ""
+        property real side: 240
+        readonly property real u: side / 480
+        width: side
+        height: side
+        radius: 28 * u
+        color: "#152521"
+        border.width: Math.max(1, u)
+        border.color: "#2c4039"
+        Accessible.role: Accessible.Graphic
+        Accessible.name: "LNS name card: " + name
+        Text {
+            textFormat: Text.PlainText
+            text: "λ"
+            color: "#ffd328"
+            font.family: gloockFont.name
+            font.pixelSize: Math.max(6, 30 * nameCard.u)
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.rightMargin: 40 * nameCard.u
+            anchors.topMargin: 36 * nameCard.u
+        }
+        Text {
+            textFormat: Text.PlainText
+            text: nameCard.name
+            x: 40 * nameCard.u
+            y: 132 * nameCard.u
+            width: nameCard.width - 80 * nameCard.u
+            color: "#f5f5ef"
+            font.family: gloockFont.name
+            font.pixelSize: Math.max(4, (nameCard.name.length <= 12 ? 60 : 36) * nameCard.u)
+            lineHeight: nameCard.name.length <= 12 ? 1.05 : 1.15
+            wrapMode: Text.WrapAnywhere
+            maximumLineCount: 2
+            elide: Text.ElideRight
+        }
+        Rectangle {
+            x: 40 * nameCard.u
+            width: nameCard.width - 80 * nameCard.u
+            y: nameCard.height - 96 * nameCard.u
+            height: Math.max(1, 2 * nameCard.u)
+            color: "#ffd328"
+        }
+        Row {
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.rightMargin: 40 * nameCard.u
+            anchors.bottomMargin: 36 * nameCard.u
+            spacing: 8 * nameCard.u
+            visible: nameCard.side >= 120
+            Rectangle {
+                width: 18 * nameCard.u
+                height: width
+                radius: width * 58 / 256
+                color: "#f5f5ef"
+                anchors.verticalCenter: parent.verticalCenter
+                Text { anchors.centerIn: parent; textFormat: Text.PlainText; text: "η"; color: "#152521"; font.family: root.sans; font.weight: Font.Bold; font.pixelSize: 15 * nameCard.u }
+            }
+            Text { textFormat: Text.PlainText; text: "nameswallet.app"; color: "#b8bab5"; font.family: root.mono; font.pixelSize: 14 * nameCard.u; anchors.verticalCenter: parent.verticalCenter }
+        }
+    }
+
     component PageHeader: ColumnLayout {
         id: pageHeader
         property string title: ""
@@ -10626,6 +10760,24 @@ Item {
                 spacing: 10
                 PageHeader { title: "Collectibles"; net: root.namesNet; onBack: root.openWallet("home") }
                 StatusLine { visible: root.namesNet !== "0.4"; kind: ""; text: "Collectibles work on LEZ 0.4. Switch to it in Settings → Network to see them." }
+                // LNS name cards: each name held whose NFT was claimed, drawn here with its name.
+                Part { visible: root.namesNet === "0.4"; text: "LNS name cards" }
+                Hint { visible: root.namesNet === "0.4" && root.deededNames.length === 0; text: "None yet. Each name you hold of 5 to 32 characters can have one, free: Names → My names → Claim NFT (free)." }
+                Flow {
+                    visible: root.namesNet === "0.4" && root.deededNames.length > 0
+                    Layout.fillWidth: true
+                    spacing: 16
+                    Repeater {
+                        model: root.deededNames
+                        ColumnLayout {
+                            required property var modelData
+                            spacing: 6
+                            NameCard { name: modelData.name; side: root.px(240) }
+                            Hint { font.pixelSize: root.px(13); text: "1 of 1 · moves with " + modelData.name + " · " + Logic.keyShown(root.nameDeeds[modelData.name].deed.definition) }
+                        }
+                    }
+                }
+                Hint { visible: root.namesNet === "0.4" && root.deededNames.length > 0; font.pixelSize: root.px(14); text: "The card on the chain shows no name; this wallet draws yours on it. Transferring the name sends the card too, and releasing the name burns it." }
                 Hint { visible: root.namesNet === "0.4"; text: "NFTs of the NFT programs listed below. Under each program an account holds one NFT, and takes NFTs of one collection only; a second NFT needs another account." }
 
                 // An app asking about NFTs: shown here, decided here.
@@ -12569,6 +12721,24 @@ Item {
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
                                 Link { text: "Transfer…"; font.pixelSize: root.px(15); onPressed: root.openTransfer(myName.modelData.name) }
                             }
+                                // Its NFT (LNS deeds, LEZ 0.4): the card when it has one; a free claim when
+                                // it is of the normal tier and has none.
+                                RowLayout {
+                                    readonly property var deedInfo: root.nameDeeds[myName.modelData.name] || {}
+                                    visible: root.namesNet === "0.4" && (!!deedInfo.deed || (deedInfo.deed === null && deedInfo.normal === true) || root.deedClaiming(myName.modelData.name))
+                                    spacing: 12
+                                    NameCard { visible: !!parent.deedInfo.deed; name: myName.modelData.name; side: root.px(72) }
+                                    Hint { visible: !!parent.deedInfo.deed; font.pixelSize: root.px(14); text: "Its NFT card. It moves with the name when you transfer it." }
+                                    Link { visible: !!parent.deedInfo.deed; text: "See it in Collectibles"; font.pixelSize: root.px(15); onPressed: root.openCollectibles() }
+                                    Action {
+                                        visible: !parent.deedInfo.deed
+                                        label: root.deedClaiming(myName.modelData.name) ? "Claiming…" : "Claim NFT (free)"
+                                        enabledNow: root.boardJob === null
+                                        onPressed: root.claimDeed(myName.modelData.name)
+                                    }
+                                    Hint { visible: !parent.deedInfo.deed; Layout.fillWidth: true; font.pixelSize: root.px(14); text: root.deedClaiming(myName.modelData.name) ? "Claiming its NFT card on LEZ 0.4: about a minute. Only gas is paid." : "A 1-of-1 card with your name on it, tied to the name. Free: only gas." }
+                                }
+                                StatusLine { visible: root.deedLine !== "" && root.deedLineName === myName.modelData.name; kind: "done"; text: root.deedLine }
                                 // Publishing its account: said under its own row.
                                 StatusLine { visible: root.notice !== "" && root.noticeAt === "publish:" + myName.modelData.name; kind: root.noticeKind; text: root.notice }
                             }
@@ -12666,6 +12836,7 @@ Item {
                             Hint {
                                 color: root.ink
                                 text: "Give " + root.transferTarget + " to " + Logic.keyShown(transferToField.text.trim().replace(/^(Public|Private)\//, "")) + "? It's proven on this computer, usually 5–12 minutes, and then it's theirs."
+                                    + (root.nameDeeds[root.transferTarget] && root.nameDeeds[root.transferTarget].deed ? " Its NFT card goes with it, in the same step." : "")
                             }
                             RowLayout {
                                 spacing: 8

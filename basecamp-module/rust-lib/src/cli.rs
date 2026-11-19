@@ -1575,6 +1575,11 @@ pub fn transfer_args(name: &str, new_owner: &str) -> Result<Vec<String>, String>
     Ok(vec!["transfer".to_owned(), "--".to_owned(), name, format!("{kind}/{}", registry::account_text(&account))])
 }
 
+/// `names deed claim <name>`: the name's free NFT (SPEC.md §8.6), claimed by its holder here.
+pub fn deed_claim_args(name: &str) -> Vec<String> {
+    vec!["deed".to_owned(), "claim".to_owned(), "--".to_owned(), registry::normalize_name(name)]
+}
+
 /// `names receive-privately <name>`: payments to a name this wallet holds (one handed
 /// to it, say) start arriving at new receiving keys of its own.
 pub fn receive_privately_args(name: &str) -> Result<Vec<String>, String> {
@@ -1788,6 +1793,7 @@ pub fn job_problem(kind: &str, log: &str) -> String {
         "receive" => "Claiming didn't finish",
         "shield" => "Moving to private didn't go through",
         "transfer" => "Giving the name away didn't go through",
+        "deed_claim" => "Claiming the name's NFT didn't finish",
         "register" => "Registering the name didn't finish",
         "claim" => "Taking the name back didn't finish",
         "receive_privately" => "Setting up private payments didn't finish",
@@ -3213,6 +3219,7 @@ mod tests {
         assert!(pay_args("ada", "1e9").is_err());
         let to = "9uwkVJuXScDwLKVtQMcHFU9Hvb3uZjiEDVvDv4PYjCfM";
         assert_eq!(transfer_args("Ada", &format!("Public/{to}")).unwrap(), strings(&["transfer", "--", "ada", &format!("Public/{to}")]));
+        assert_eq!(deed_claim_args(" Ada.lez "), strings(&["deed", "claim", "--", "ada"]));
         assert_eq!(transfer_args("ada", &format!("Private/{to}")).unwrap()[3], format!("Private/{to}"));
         assert!(transfer_args("ada", "bob").is_err(), "a name is not a holder");
         // account-prefix-double-strip: a second prefix inside was dropped and the rest sent.

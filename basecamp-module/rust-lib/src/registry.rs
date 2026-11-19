@@ -214,6 +214,40 @@ pub fn pda(program: &AccountId, seed: &[u8; 32]) -> AccountId {
 
 /// The seed of a name's record. A transaction that may create a registry account
 /// lists its seed as evidence, so each account's seed is here beside its address.
+// ── Deeds (SPEC.md §8.6): a name's optional 1-of-1 NFT ──────────────────────
+
+/// The NFT program deeds are minted on (`core/src/deed.rs` `NFT_PROGRAM`): header account
+/// `CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G`, image `4fbb2872…df58`, the same id on every
+/// chain the registry runs on.
+pub const DEED_NFT_PROGRAM: &str = "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G";
+/// The first record version with a deed (`core::DEED_VERSION`).
+pub const DEED_VERSION: u8 = 7;
+const DEED_DEFINITION_SEED_DOMAIN: &[u8] = b"lns-deed/v1/definition/";
+const DEED_HOLDING_SEED_DOMAIN: &[u8] = b"lns-deed/v1/holding/";
+
+/// Which NFT is a name's deed (record version 7): its definition, a registry account derived
+/// from the name and `nonce`; the deed itself sits in the holder's deed account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deed {
+    pub definition: AccountId,
+    pub nonce: [u8; 32],
+}
+
+/// The NFT program's id, as bytes.
+pub fn deed_nft_program() -> AccountId {
+    parse_account(DEED_NFT_PROGRAM).expect("the NFT program id is an account ID")
+}
+
+/// The seed of the deed definition of the name `id` minted with `nonce`.
+pub fn deed_definition_seed(id: &NameId, nonce: &[u8; 32]) -> [u8; 32] {
+    sha256(&[DEED_DEFINITION_SEED_DOMAIN, id, nonce])
+}
+
+/// The seed of the account where the holder tagged `owner` keeps the deed `definition`.
+pub fn deed_holding_seed(definition: &AccountId, owner: &OwnerTag) -> [u8; 32] {
+    sha256(&[DEED_HOLDING_SEED_DOMAIN, definition, owner])
+}
+
 pub fn name_seed(id: &NameId) -> [u8; 32] {
     sha256(&[NAME_SEED_DOMAIN, id])
 }
@@ -585,6 +619,8 @@ pub struct Resolved {
     pub profile: Profile,
     /// Carried over from the earlier chain, so it can't be claimed again.
     pub claimed: bool,
+    /// The name's deed, if its holder claimed one (record version 7, SPEC.md §8.6).
+    pub deed: Option<Deed>,
 }
 
 impl Resolved {
@@ -597,7 +633,18 @@ impl Resolved {
         let sealed = reader.byte_vec()?;
         // Version 5 records (the LEZ 0.3 testnet) end at `sealed`: nothing was claimed there.
         let claimed = version >= 6 && reader.u8()? != 0;
-        Ok(Self { owner, expires, profile: Profile::open(key, sealed, name), claimed })
+        // Version 7 adds the deed (an Option: 0, or 1 then its definition and nonce); a record
+        // with no deed is still written as version 6.
+        let deed = if version >= DEED_VERSION {
+            match reader.u8()? {
+                0 => None,
+                1 => Some(Deed { definition: reader.account()?, nonce: reader.account()? }),
+                _ => return Err("the record's deed is unreadable".to_owned()),
+            }
+        } else {
+            None
+        };
+        Ok(Self { owner, expires, profile: Profile::open(key, sealed, name), claimed, deed })
     }
 
     /// Whether the name is held by a deposit, and so never lapses.
@@ -659,6 +706,11 @@ impl Resolved {
             "vpk": (!profile.vpk.is_empty()).then(|| hex(&profile.vpk)),
             "texts": texts,
             "forward": self.forward_target(),
+            "deed": self.deed.as_ref().map(|deed| json!({
+                "definition": account_text(&deed.definition),
+                "nonce": hex(&deed.nonce),
+                "nft_program": DEED_NFT_PROGRAM,
+            })),
         })
     }
 
@@ -1706,6 +1758,7 @@ mod tests {
             expires: NEVER,
             profile: Profile { name: "nameswallet".into(), texts: vec![("forward".into(), value.into())], ..Profile::default() },
             claimed: false,
+            deed: None,
         };
         assert_eq!(with("names").forward_target().as_deref(), Some("names"));
         assert_eq!(with(" @Names ").forward_target().as_deref(), Some("names"));
@@ -1842,6 +1895,46 @@ mod tests {
         assert_eq!(Profile::open(&key, &sealed, "ada"), Profile::bare("ada"), "another name's profile");
         // A page is sealed for pages only: it does not open as a profile.
         assert_eq!(Profile::open(&key, &unhex(SEALED_PAGE).expect("hex"), "jef"), bare);
+    }
+
+    /// A deeded name on our LEZ 0.4 (record version 7, SPEC.md §8.6): `lns-deed-check`, whose deed
+    /// was claimed when deeds were deployed (docs/wallet/deploy-our04-deeds.log: definition
+    /// 9fPKWRnv…y6ro, nonce 227820f3…de75, deed account B56NfHYK…xFCC). Its record bytes as the
+    /// chain gave them (testdata/deed/lns-deed-check.record.hex, read 2026-11-19).
+    #[test]
+    fn a_version_7_record_has_its_deed_where_the_chain_put_it() {
+        let registry = parse_account("6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA").unwrap();
+        let derived = derive("lns-deed-check");
+        if std::env::var_os("PRINT_DEED").is_some() {
+            println!("record {}", account_text(&pda(&registry, &name_seed(&derived.id))));
+        }
+        let hex_text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/deed/lns-deed-check.record.hex")).expect("the record");
+        let bytes = unhex(hex_text.trim()).expect("hex");
+        assert_eq!(bytes[0], DEED_VERSION);
+        let resolved = Resolved::decode(&bytes, &derived.key, "lns-deed-check").expect("a version 7 record decodes");
+        let deed = resolved.deed.expect("it has its deed");
+        assert_eq!(account_text(&deed.definition), "9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro");
+        assert_eq!(hex(&deed.nonce), "227820f30ec501b9f7151601e763f5fe9b684ba54a45144823773c0c7c0ede75");
+        // The definition and the deed account are where the registry derives them.
+        assert_eq!(pda(&registry, &deed_definition_seed(&derived.id, &deed.nonce)), deed.definition);
+        assert_eq!(account_text(&pda(&registry, &deed_holding_seed(&deed.definition, &resolved.owner))), "B56NfHYKptfSXimHLuVX4S6nNBfhVkWP8GWVCWAWxFCC");
+        assert_eq!(resolved.profile.name, "lns-deed-check");
+        let json = resolved.to_json();
+        assert_eq!((json["deed"]["definition"].as_str(), json["deed"]["nft_program"].as_str()), (Some("9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro"), Some(DEED_NFT_PROGRAM)));
+        assert_eq!(account_text(&deed_nft_program()), DEED_NFT_PROGRAM);
+        // Without its deed (the same record as version 6) it reads as before, no deed.
+        let mut v6 = bytes[..bytes.len() - 65].to_vec();
+        v6[0] = 6;
+        let plain = Resolved::decode(&v6, &derived.key, "lns-deed-check").expect("a version 6 record decodes");
+        assert_eq!((plain.deed, plain.owner, plain.to_json()["deed"].clone()), (None, resolved.owner, Value::Null));
+        // A version 7 record with no deed (tag 0), and one with a bad tag.
+        let mut none = v6.clone();
+        none[0] = 7;
+        none.push(0);
+        assert_eq!(Resolved::decode(&none, &derived.key, "lns-deed-check").expect("decodes").deed, None);
+        none.pop();
+        none.push(2);
+        assert!(Resolved::decode(&none, &derived.key, "lns-deed-check").is_err());
     }
 
     /// A record as `core` encodes `NameRecord { version: 6, owner: [1; 32],
