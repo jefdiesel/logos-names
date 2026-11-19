@@ -603,14 +603,29 @@ pub fn secret_failure(what: &str, account: &str, why: &str) -> String {
         return format!("This wallet can't make {what} for {account}: it isn't one of this wallet's own accounts (a shared or group account, or another wallet's). Nothing was shared.");
     }
     if why.contains("older than this app") || why.contains("unrecognized subcommand") {
-        return format!("The names tool set for this network is older than this app and can't make {what} for {account}. Update it in App settings; nothing was shared.");
+        return older_tool(what, account);
     }
-    format!("This wallet couldn't make {what} for {account}. Nothing was shared; try again, and if it keeps failing, update the names tool in App settings.")
+    format!("This wallet couldn't make {what} for {account}. Nothing was shared; try again, and if it keeps failing, {UPDATE_TOOL}")
+}
+
+/// What to do about a names tool that is too old, step by step: an update through Package Manager
+/// keeps a tool that is already set, so the person puts the bundled one in by hand.
+pub const UPDATE_TOOL: &str = "put in the names tool that comes with this app: open Settings, App settings, clear the names tool's path, press \"Use this CLI\", then press \"Install the LEZ 0.4 names tool\".";
+
+/// A names tool too old to say how it made the values (or what an account is).
+pub fn older_tool(what: &str, account: &str) -> String {
+    format!("The names tool set for this network is older than this app and can't make {what} for {account} safely. Nothing was shared. To fix it, {UPDATE_TOOL}")
 }
 
 /// An imported account and a names tool from before imported accounts' phrase values.
 pub fn older_tool_for_imported(what: &str, account: &str) -> String {
-    format!("{account} was imported, and the names tool set for this network is too old to make {what} for an imported account. Update the names tool in App settings; nothing was shared.")
+    format!("{account} was imported, and the names tool set for this network is too old to make {what} for an imported account. Nothing was shared. To fix it, {UPDATE_TOOL}")
+}
+
+/// The names tool gave values of another kind than this account's earlier ones (an older or
+/// different tool): refused, never handed out.
+pub fn other_scheme(what: &str, account: &str) -> String {
+    format!("The names tool made {what} for {account} another way than this account's earlier ones, so they wouldn't match what was made before. Nothing was shared. To fix it, {UPDATE_TOOL}")
 }
 
 pub fn secret_request(app: &str, account: &str, scope: &str, reason: &str, now: u64) -> Result<Value, String> {
@@ -784,6 +799,22 @@ impl Grants {
         }
         list.push(json!({ "account": account, "scope": scope, "since": now }));
         Ok(())
+    }
+
+    /// The scheme pinned for `account` (`phrase` or `imported`), from any app's grant: recorded at
+    /// the first values the wallet gave for it, then passed to the names tool on every call, so a
+    /// later change in key-tree membership never changes the account's values.
+    pub fn pinned_scheme(&self, account: &str) -> Option<String> {
+        self.secrets.values().filter_map(Value::as_array).flatten().find(|g| g["account"] == account && g["scheme"].is_string()).and_then(|g| g["scheme"].as_str().map(str::to_owned))
+    }
+
+    /// Pins `scheme` on every grant for `account` that has none yet.
+    pub fn pin_scheme(&mut self, account: &str, scheme: &str) {
+        for list in self.secrets.values_mut().filter_map(Value::as_array_mut) {
+            for grant in list.iter_mut().filter(|g| g["account"] == account && !g["scheme"].is_string()) {
+                grant["scheme"] = json!(scheme);
+            }
+        }
     }
 
     pub fn programs_of(&self, app: &str) -> Vec<String> {

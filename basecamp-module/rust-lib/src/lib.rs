@@ -8097,10 +8097,15 @@ impl Names {
         calls.push(now);
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
-        let input = json!({
+        // The scheme pinned for this account at its first values (any app): the tool must use it.
+        let pinned = self.store().private.pinned_scheme(&account);
+        let mut input = json!({
             "app": ask.app, "account": account, "scope": ask.scope, "context": registry::hex(&ask.context),
             "tag": ask.tag, "first": ask.first, "count": ask.count,
         });
+        if let Some(scheme) = &pinned {
+            input["scheme"] = json!(scheme);
+        }
         let what = if ask.scope.starts_with("RFP022/deposit") { "deposit keys" } else { "the values this app asks for" };
         // The tool's words never reach the screen (they named key trees and CLI errors): a plain line.
         let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE)
@@ -8110,14 +8115,28 @@ impl Names {
         if values.len() as u64 != ask.count || answer["account"] != account.as_str() || values.iter().any(|v| v.len() != 64) {
             return Err(provider_private::secret_failure(what, &account, ""));
         }
-        // A tool that doesn't name its scheme predates imported accounts' phrase values: for an
-        // imported account it may give values from the imported key, which the phrase can't make again.
-        let imported = match answer["scheme"].as_str() {
-            Some(app_secret::SCHEME_IMPORTED) => true,
-            Some(app_secret::SCHEME_PHRASE) => false,
-            _ if self.account_imported(&account) == Some(true) => return Err(provider_private::older_tool_for_imported(what, &account)),
-            _ => false,
+        // A tool that doesn't name its scheme predates imported accounts' phrase values: it gives an
+        // imported account values from the imported key, which the phrase can't make again. Its
+        // answer is taken only for an account known to be a phrase account (review 2026-11-18).
+        let scheme = match answer["scheme"].as_str() {
+            Some(scheme @ (app_secret::SCHEME_IMPORTED | app_secret::SCHEME_PHRASE)) => scheme.to_owned(),
+            _ if pinned.as_deref() == Some(app_secret::SCHEME_IMPORTED) => return Err(provider_private::older_tool_for_imported(what, &account)),
+            _ => match self.account_imported(&account) {
+                Some(false) => app_secret::SCHEME_PHRASE.to_owned(),
+                Some(true) => return Err(provider_private::older_tool_for_imported(what, &account)),
+                None => return Err(provider_private::older_tool(what, &account)),
+            },
         };
+        // Pinned once; a tool that answers another way than the pin is refused, never handed out.
+        if pinned.as_ref().is_some_and(|p| *p != scheme) {
+            return Err(provider_private::other_scheme(what, &account));
+        }
+        let store = self.store();
+        if store.private.secrets.values().filter_map(Value::as_array).flatten().any(|g| g["account"] == account.as_str() && !g["scheme"].is_string()) {
+            store.private.pin_scheme(&account, &scheme);
+            store.save();
+        }
+        let imported = scheme == app_secret::SCHEME_IMPORTED;
         Ok(json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values, "imported": imported }))
     }
 
@@ -8143,9 +8162,13 @@ impl Names {
         }
         let dir = self.wallet_dir_of(self.net)?;
         let store = std::fs::read(dir.join(cli::STORAGE_FILE)).ok()?;
-        let entries: Vec<Value> = backup::accounts_of(&store).into_iter().filter(|a| a["account"] == account).collect();
+        let listed = backup::accounts_of(&store);
+        let entries: Vec<&Value> = listed.iter().filter(|a| a["account"] == account).collect();
         if entries.is_empty() {
-            return None;
+            // An imported PRIVATE account is listed without its id: a private account the file
+            // doesn't name, in a wallet holding one, is taken as imported (it fails safe).
+            let unnamed_private = listed.iter().any(|a| a["kind"] == "private" && a["imported"] == true && a["account"].is_null());
+            return (account.starts_with("Private/") && unnamed_private).then_some(true);
         }
         // Listed in a key tree as well: a phrase account (the CLI's rule).
         Some(entries.iter().all(|a| a["imported"] == true))
@@ -12627,7 +12650,7 @@ mod tests {
         let values = format!("[\"{}\",\"{}\"]", "ab".repeat(32), "cd".repeat(32));
         let tail = format!(
             "case \"$*\" in\n\
-             *\"module app-secret\"*) cat > \"$(dirname \"$0\")/secret-in.json\"; echo '{{\"account\":\"Private/{PRIVATE}\",\"values\":{values}}}' ;;\n\
+             *\"module app-secret\"*) cat > \"$(dirname \"$0\")/secret-in.json\"; echo '{{\"account\":\"Private/{PRIVATE}\",\"values\":{values},\"scheme\":\"phrase\"}}' ;;\n\
              esac"
         );
         let (mut names, dir) = with_wallet("provider-secret", &tail);
@@ -12738,10 +12761,90 @@ mod tests {
         assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
         as_caller(app("lez_bridge"));
         let error = ask(&mut names, "RFP022/exit")["error"].as_str().unwrap_or_default().to_owned();
-        assert!(error.contains("too old") && error.contains("Update the names tool"), "{error}");
+        assert!(error.contains("too old") && error.contains("Install the LEZ 0.4 names tool"), "{error}");
+        // The settings button's own label ("Use this CLI") is the one place the word may appear.
+        let shown = error.replace("\"Use this CLI\"", "");
         for raw in ["CLI", "Error", "recovery phrase, so values", "key tree"] {
-            assert!(!error.contains(raw), "{raw:?} in {error}");
+            assert!(!shown.contains(raw), "{raw:?} in {error}");
         }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Review 2026-11-18: a names tool from 14ec746..7096020 (no `scheme` in its answer, no
+    /// `module account-scheme`) is refused for an imported PRIVATE account, which the wallet file
+    /// lists without an id; a phrase private account listed with its id still works with it.
+    #[test]
+    fn an_old_tool_is_refused_for_an_imported_private_account_the_file_cannot_name() {
+        let values = format!("[\"{}\"]", "ab".repeat(32));
+        let account = format!("Private/{PRIVATE}");
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module account-scheme\"*) echo \"error: unrecognized subcommand 'account-scheme'\" >&2; exit 2 ;;\n\
+             *\"module app-secret\"*) echo '{{\"account\":\"{account}\",\"values\":{values}}}' ;;\n\
+             esac"
+        );
+        let store_with = |names: &Names, entries: Value| {
+            let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+            std::fs::write(wallet.join(cli::STORAGE_FILE), json!({ "key_chain": { "accounts": entries } }).to_string()).unwrap();
+        };
+        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1));
+        for (label, entries, granted) in [
+            ("old-tool-imported-private", json!([{ "ImportedPrivate": { "account": {}, "key_chain": {}, "kind": "Regular" } }, { "Public": { "account_id": PUBLIC } }]), false),
+            ("old-tool-phrase-private", json!([{ "Private": { "account_id": PRIVATE } }, { "Public": { "account_id": PUBLIC } }]), true),
+        ] {
+            let (mut names, dir) = with_wallet(label, &tail);
+            store_with(&names, entries);
+            connect(&mut names, "lez_bridge", &account);
+            as_caller(app("lez_bridge"));
+            let id = ask(&mut names)["value"]["request"]["request"].as_str().unwrap().to_owned();
+            assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+            as_caller(app("lez_bridge"));
+            let got = ask(&mut names);
+            if granted {
+                assert_eq!((got["value"]["granted"].as_bool(), got["value"]["imported"].as_bool()), (Some(true), Some(false)), "{got}");
+            } else {
+                let error = got["error"].as_str().unwrap_or_default();
+                assert!(error.contains("too old") && got["value"]["values"].is_null(), "{got}");
+            }
+            as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Review 2026-11-18: the scheme is pinned at the account's first values and sent to the tool
+    /// on every later call; a tool that answers another way than the pin is refused.
+    #[test]
+    fn the_scheme_is_pinned_at_the_first_values_and_a_different_answer_is_refused() {
+        let values = format!("[\"{}\"]", "ab".repeat(32));
+        let account = format!("Public/{PUBLIC}");
+        // The stand-in answers `imported` the first time, `phrase` after (as if a key tree had
+        // reached the account), and keeps what it was sent.
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module account-scheme\"*) echo '{{\"account\":\"{account}\",\"scheme\":\"imported\"}}' ;;\n\
+             *\"module app-secret\"*) d=\"$(dirname \"$0\")\"; n=$(cat \"$d/n\" 2>/dev/null || echo 0); echo $((n+1)) > \"$d/n\"; cat > \"$d/secret-in-$n.json\"; cat \"$d/answer-$n.json\" ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("pinned-scheme", &tail);
+        for (n, scheme) in [(0, "imported"), (1, "phrase")] {
+            std::fs::write(dir.join(format!("answer-{n}.json")), json!({ "account": account, "values": serde_json::from_str::<Value>(&values).unwrap(), "scheme": scheme }).to_string() + "\n").unwrap();
+        }
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1));
+        let id = ask(&mut names)["value"]["request"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let first = ask(&mut names);
+        assert_eq!(first["value"]["imported"], true, "{first}");
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in-0.json")).unwrap()).unwrap();
+        assert!(sent["scheme"].is_null(), "nothing pinned before the first values: {sent}");
+        let second = ask(&mut names);
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in-1.json")).unwrap()).unwrap();
+        assert_eq!(sent["scheme"], "imported", "the pin goes to the tool");
+        assert!(second["error"].as_str().unwrap_or_default().contains("another way"), "{second}");
+        assert!(second["value"]["values"].is_null());
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -12758,7 +12861,8 @@ mod tests {
         ] {
             let text = provider_private::secret_failure("deposit keys", a, why);
             assert!(text.contains(has), "{why} -> {text}");
-            assert!(!text.contains("CLI") && !text.contains("Error") && !text.contains("panicked"), "{text}");
+            let shown = text.replace("\"Use this CLI\"", "");
+            assert!(!shown.contains("CLI") && !shown.contains("Error") && !shown.contains("panicked"), "{text}");
         }
     }
 

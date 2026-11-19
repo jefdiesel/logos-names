@@ -594,7 +594,10 @@ impl Client {
         } else {
             bail!("write the account as Public/<id> or Private/<id>");
         };
-        let (values, scheme) = match account_secret(&self.wallet, private, id).map_err(|why| anyhow!("{written}: {why}"))? {
+        // The scheme the wallet pinned for this account at its first grant, when there is one: a
+        // later change in key-tree membership never changes an account's values.
+        let pinned = request["scheme"].as_str();
+        let (values, scheme) = match account_secret_pinned(&self.wallet, private, id, pinned).map_err(|why| anyhow!("{written}: {why}"))? {
             AccountSecret::Phrase(mut secret) => {
                 let values = crate::app_secret::values(&secret, id.value(), &ask);
                 secret.fill(0);
@@ -652,36 +655,81 @@ impl std::fmt::Debug for AccountSecret {
     }
 }
 
-/// Which scheme `id` follows, by key-tree membership: an id the trees hold is a phrase account
-/// even when it was also imported (the imported entries are listed first, so a first match
-/// would misread it). Another wallet's account, and shared or group accounts, are refused.
+/// How many accounts past each key tree's last one count as this phrase's own when an imported
+/// key is classified: the next ones `New account` would make. A key the phrase gives within them is
+/// a phrase account (values from its own key), so making new accounts later can't flip it.
+pub const LOOK_AHEAD: u32 = 20;
+
+/// [`account_secret_pinned`] with nothing pinned.
 pub fn account_secret<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>, private: bool, id: AccountId) -> Result<AccountSecret, String> {
+    account_secret_pinned(wallet, private, id, None)
+}
+
+/// Which scheme `id` follows. `pinned` (`phrase` or `imported`, what the module recorded at the
+/// account's first grant) always wins: `phrase` = values from the account's own key, wherever the
+/// wallet holds it; `imported` = values from `R` and the id. With nothing pinned: a key-tree
+/// account (an id in both maps counts as one) or a key this phrase gives within [`LOOK_AHEAD`]
+/// more accounts is `phrase`; any other held key is `imported`. Another wallet's account, and
+/// shared or group accounts, are refused.
+pub fn account_secret_pinned<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCore<C>, private: bool, id: AccountId, pinned: Option<&str>) -> Result<AccountSecret, String> {
     let key_chain = wallet.storage().key_chain();
-    if private {
-        let mut held = false;
+    // The account's own key and whether a key tree holds it now.
+    let (own, in_tree, kind) = if private {
+        let mut own: Option<([u8; 32], bool)> = None;
+        let mut kind = None;
         for found in key_chain.private_accounts() {
             if AccountId::for_private_account(&found.key_chain.nullifier_public_key, &found.key_chain.viewing_public_key, found.kind) != id {
                 continue;
             }
-            held = true;
+            kind = Some(found.kind.clone());
             // A tree account: the tree itself has this account's key chain at that index (an imported
             // account keeps the index it had in the wallet it came from).
             let tree = found.chain_index.as_ref().and_then(|index| key_chain.private_account_key_chain_by_index(index));
-            if let Some(tree) = tree {
-                if AccountId::for_private_account(&tree.nullifier_public_key, &tree.viewing_public_key, found.kind) == id {
-                    return Ok(AccountSecret::Phrase(tree.private_key_holder.authorization_secret_key.0));
-                }
+            if let Some(tree) = tree.filter(|tree| AccountId::for_private_account(&tree.nullifier_public_key, &tree.viewing_public_key, found.kind) == id) {
+                own = Some((tree.private_key_holder.authorization_secret_key.0, true));
+                break;
             }
+            own.get_or_insert((found.key_chain.private_key_holder.authorization_secret_key.0, false));
         }
-        if held { Ok(AccountSecret::Imported) } else { Err("this wallet has no such private account".to_owned()) }
+        let (secret, in_tree) = own.ok_or("this wallet has no such private account")?;
+        (secret, in_tree, kind)
     } else {
         let key = key_chain.pub_account_signing_key(id).ok_or("this wallet has no such public account")?;
-        if key_chain.public_account_ids().any(|(found, index)| found == id && index.is_some()) {
-            Ok(AccountSecret::Phrase(*key.value()))
-        } else {
-            Ok(AccountSecret::Imported)
+        (*key.value(), key_chain.public_account_ids().any(|(found, index)| found == id && index.is_some()), None)
+    };
+    match pinned {
+        Some(crate::app_secret::SCHEME_PHRASE) => return Ok(AccountSecret::Phrase(own)),
+        Some(crate::app_secret::SCHEME_IMPORTED) => return Ok(AccountSecret::Imported),
+        Some(other) => return Err(format!("{other:?} is not a scheme this tool knows")),
+        None => {}
+    }
+    if in_tree || phrase_gives(key_chain, private, id, kind.as_ref()) {
+        Ok(AccountSecret::Phrase(own))
+    } else {
+        Ok(AccountSecret::Imported)
+    }
+}
+
+/// Whether the next [`LOOK_AHEAD`] accounts this wallet's trees would make include `id` (worked out
+/// on a copy: nothing is stored).
+fn phrase_gives(key_chain: &wallet::storage::key_chain::UserKeyChain, private: bool, id: AccountId, kind: Option<&lee_core::PrivateAccountKind>) -> bool {
+    let mut copy = key_chain.clone();
+    for _ in 0..LOOK_AHEAD {
+        if private {
+            let (made, index) = copy.generate_new_privacy_preserving_transaction_key_chain(None);
+            if made == id {
+                return true;
+            }
+            if let (Some(kind), Some(tree)) = (kind, copy.private_account_key_chain_by_index(&index)) {
+                if AccountId::for_private_account(&tree.nullifier_public_key, &tree.viewing_public_key, kind) == id {
+                    return true;
+                }
+            }
+        } else if copy.generate_new_public_transaction_private_key(None).0 == id {
+            return true;
         }
     }
+    false
 }
 
 /// `R`: the private key tree root's secret spending key, which only the recovery phrase gives
@@ -775,6 +823,64 @@ mod tests {
         assert!(index.is_some(), "it carries its old wallet's index");
         original.storage_mut().key_chain_mut().add_imported_private_account(chain, index, account);
         assert_eq!(account_secret(&original, true, other_private), Ok(AccountSecret::Imported));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Review 2026-11-18 (imported-secrets): an account's values never change with key-tree
+    /// membership. A key of this phrase imported into a restored wallet whose tree doesn't reach it
+    /// yet is a phrase account (values from its own key, as in the wallet it came from), public and
+    /// private; a pinned scheme holds whatever the tree does later.
+    #[test]
+    fn a_same_phrase_key_stays_a_phrase_account_and_a_pinned_scheme_holds() {
+        use sequencer_service_rpc::SequencerClient;
+        use wallet::WalletCore;
+        let root = std::env::temp_dir().join(format!("names-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let open = |name: &str| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("wallet_config.json"), serde_json::to_vec(&wallet::config::WalletConfig::default()).unwrap()).unwrap();
+            WalletCore::<SequencerClient>::new_init_storage(dir.join("wallet_config.json"), dir.join("storage.json"), None, "").unwrap()
+        };
+        let ask = crate::app_secret::Ask::new("lez_bridge", "RFP022/exit", vec![9, 9], "RFP022/ek", 0, 2).unwrap();
+        let values_of = |w: &WalletCore<SequencerClient>, private: bool, id: AccountId, pinned: Option<&str>| match account_secret_pinned(w, private, id, pinned).unwrap() {
+            AccountSecret::Phrase(secret) => (crate::app_secret::SCHEME_PHRASE, crate::app_secret::values(&secret, id.value(), &ask)),
+            AccountSecret::Imported => (crate::app_secret::SCHEME_IMPORTED, crate::app_secret::imported_values(&imported_root(w).unwrap(), id.value(), &ask)),
+        };
+        let (mut original, phrase) = open("original");
+        let publics: Vec<AccountId> = (0..4).map(|_| original.create_new_account_public(None).0).collect();
+        let privates: Vec<AccountId> = (0..3).map(|_| original.create_new_account_private(None).0).collect();
+        let (far_public, far_private) = (publics[3], privates[2]);
+        let want_public = values_of(&original, false, far_public, None);
+        let want_private = values_of(&original, true, far_private, None);
+        assert_eq!(want_public.0, crate::app_secret::SCHEME_PHRASE);
+
+        // A restore that regenerated fewer accounts, then the far ones brought back by import.
+        let (mut restored, _) = open("restored");
+        restored.restore_storage(&phrase);
+        restored.create_new_account_public(None);
+        let key = original.storage().key_chain().pub_account_signing_key(far_public).unwrap().clone();
+        restored.storage_mut().key_chain_mut().add_imported_public_account(key);
+        let found = original.storage().key_chain().private_account(far_private).unwrap();
+        let (chain, index, account) = (found.key_chain.clone(), found.chain_index.clone(), found.account.clone());
+        restored.storage_mut().key_chain_mut().add_imported_private_account(chain, index, account);
+        assert_eq!(values_of(&restored, false, far_public, None), want_public, "a same-phrase public key imported: still its phrase values");
+        assert_eq!(values_of(&restored, true, far_private, None), want_private, "a same-phrase private key imported: still its phrase values");
+
+        // A foreign key pinned `imported` keeps its values after `New account` reaches any index,
+        // and a pin of `phrase` gives the own-key values.
+        let foreign = lee::PrivateKey::try_new([5u8; 32]).unwrap();
+        let foreign_id = AccountId::from(&lee::PublicKey::new_from_private_key(&foreign));
+        restored.storage_mut().key_chain_mut().add_imported_public_account(foreign.clone());
+        let pinned = values_of(&restored, false, foreign_id, Some(crate::app_secret::SCHEME_IMPORTED));
+        assert_eq!(pinned, values_of(&restored, false, foreign_id, None));
+        for _ in 0..6 {
+            restored.create_new_account_public(None);
+        }
+        assert_eq!(values_of(&restored, false, far_public, Some(crate::app_secret::SCHEME_PHRASE)), want_public);
+        assert_eq!(values_of(&restored, false, foreign_id, Some(crate::app_secret::SCHEME_IMPORTED)), pinned);
+        assert_eq!(values_of(&restored, false, foreign_id, Some(crate::app_secret::SCHEME_PHRASE)).1, crate::app_secret::values(foreign.value(), foreign_id.value(), &ask));
+        assert!(account_secret_pinned(&restored, false, foreign_id, Some("other")).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 
