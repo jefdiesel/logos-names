@@ -1129,9 +1129,18 @@ export function bridgedGroups(sources) {
 // ── Untrusted text (from lez-program-registry/registry_browser/qml/logic.mjs, tested there) ──
 
 /// Text an app or a chain wrote, safe to show as one plain line: line breaks become ⏎, and
-/// control, bidi, zero-width and other invisible characters are dropped.
+/// control, bidi, zero-width and other invisible characters are dropped, and so are `<`, `>` and
+/// `&`, so nothing in it can be read as markup (the text components draw plain text too).
 export function clean(s) {
-    return String(s === undefined || s === null ? "" : s).replace(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/g, "\u23CE").replace(/[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uDB40[\uDC00-\uDC7F]/g, "")
+    return String(s === undefined || s === null ? "" : s).replace(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/g, "\u23CE").replace(/[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB<>&]|\uDB40[\uDC00-\uDC7F]/g, "")
+}
+
+/// Words the LEZ Bridge module (or its relay, or the bridge network behind it) wrote, as the
+/// screen shows them: `clean`, then cut to `max` characters (300) with an ellipsis.
+export function bridgeText(s, max) {
+    var limit = max === undefined ? 300 : max
+    var text = clean(s)
+    return text.length > limit ? text.substr(0, limit - 1) + "…" : text
 }
 
 /// The lines of a relayed call's sheet, each cleaned: `{lines, warnings, privacy, after, says, why}`.
@@ -1147,18 +1156,34 @@ function decodedBurn(request) {
     return request && request.kind === "relayed_call" && request.sheet && request.sheet.burn && typeof request.sheet.burn === "object" ? request.sheet.burn : null
 }
 
-/// Whether a decoded burn is the one this app's own Bridge to Ethereum screen shows: asked by the
-/// LEZ Bridge, drawn inline on that screen (`here`: {inline, view, focus, address}), for the
-/// send-back on it, matched by its exit commitment (the LEZ Bridge names a send-back `sb-` and the
-/// first 16 hex digits of E), with that send-back's Ethereum address drawn above the sheet
-/// (`address`). Its address and words were read back and ticked at step 2 when it was planned.
-export function burnIsOwnSendBack(request, here) {
+/// Whether a request is a burn the wallet decoded.
+export function isDecodedBurn(request) {
+    return decodedBurn(request) !== null
+}
+
+/// Whether a decoded burn, asked by the LEZ Bridge, is for the send-back `focus` (the LEZ Bridge
+/// names a send-back `sb-` and the first 16 hex digits of its exit commitment E). Only such a burn
+/// is drawn inline on Bridge to Ethereum; any other is the sheet over the page.
+export function burnMatchesSendBack(request, focus) {
     var burn = decodedBurn(request)
-    var h = here || {}
-    if (!burn || request.app !== "lez_bridge" || h.inline !== true || h.view !== "sendback" || h.address !== true)
+    if (!burn || request.app !== "lez_bridge")
         return false
     var e = String(burn.exit || "").toLowerCase().replace(/^0x/, "")
-    return /^[0-9a-f]{64}$/.test(e) && h.focus === "sb-" + e.substr(0, 16)
+    return /^[0-9a-f]{64}$/.test(e) && focus === "sb-" + e.substr(0, 16)
+}
+
+/// Whether a decoded burn is this wallet's own send-back, the one case with no tick: drawn inline
+/// on Bridge to Ethereum (`here`: {inline, view, focus, recorded, shown}) for the send-back in
+/// focus (burnMatchesSendBack), which THIS wallet planned with the address read back and ticked at
+/// step 2 (`recorded`, kept by Names when it planned it), and the address drawn above the sheet
+/// (`shown`, the LEZ Bridge's row) is that one. A send-back the LEZ Bridge lists that this wallet
+/// didn't plan and tick (another app's, or one from before Names was restarted) needs the tick.
+export function burnIsOwnSendBack(request, here) {
+    var h = here || {}
+    if (h.inline !== true || h.view !== "sendback" || !burnMatchesSendBack(request, h.focus))
+        return false
+    var recorded = String(h.recorded || "").toLowerCase(), shown = String(h.shown || "").toLowerCase()
+    return recorded !== "" && recorded === shown
 }
 
 /// Whether the sheet's request needs the second, deliberate tick. An app whose publisher check
@@ -1182,8 +1207,9 @@ export function requestRisky(request, publisherFailed, ownSendBack) {
 /// Where a decoded burn goes, as far as the wallet can say: who asks, the bridge (label and
 /// program), the amount out of which account, and that the Ethereum address is sealed in the exit
 /// commitment (the call carries only E), so the wallet can neither show it nor check it. Each line
-/// cleaned. [] when it isn't a decoded burn.
-export function burnDestination(request) {
+/// cleaned. [] when it isn't a decoded burn. `bridgeRecord`: an address is drawn above the sheet
+/// from the LEZ Bridge's record of the send-back (not ticked in this wallet); the last line says so.
+export function burnDestination(request, bridgeRecord) {
     var burn = decodedBurn(request)
     if (!burn)
         return []
@@ -1193,12 +1219,16 @@ export function burnDestination(request) {
         "Asked by " + clean(request.app) + ".",
         "Bridge: " + clean(burn.bridge_label || idShort(burn.bridge)) + " (" + clean(burn.bridge) + ").",
         "Amount: " + clean(burn.amount_text) + " " + clean(burn.symbol) + ", out of your account " + idShort(clean(request.account)) + ".",
-        "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + ", which the wallet can't open, so the wallet can't show or check it.",
+        bridgeRecord === true
+            ? "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + "; the address above is the LEZ Bridge's record of it, not checked by this wallet."
+            : "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + ", which the wallet can't open, so the wallet can't show or check it.",
     ]
 }
 
-/// The tick of a burn that isn't this app's own send-back.
-export function burnTickText(request) {
+/// The tick of a burn that isn't this app's own send-back. `bridgeRecord`: as in burnDestination.
+export function burnTickText(request, bridgeRecord) {
+    if (bridgeRecord === true)
+        return "The address above is the LEZ Bridge's record of this send-back; this wallet didn't read it back or tick it. Tick only if it is your address; the burn can't be undone."
     var app = request && request.app === "lez_bridge" ? "the LEZ Bridge" : clean(request ? request.app : "")
     return "The wallet can't check the Ethereum address. Tick only if you started this send-back in " + app + " and checked the address there; the burn can't be undone."
 }
@@ -1221,17 +1251,18 @@ export function bridgeReply(reply) {
         try { r = JSON.parse(r) } catch (e) { return { ok: false, kind: "error", error: "The LEZ Bridge module answered something that isn't JSON." } }
     }
     if (r && typeof r === "object" && "success" in r)
-        return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: String(r.error || "The LEZ Bridge module did not say why.") }
+        return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: bridgeText(r.error || "The LEZ Bridge module did not say why.") }
+    // Classified on the module's own words, shown cleaned and cut (bridgeText).
     var said = r && typeof r === "object" ? String(r.error || "") : String(r)
     if (/auth token|unauthori[sz]ed/i.test(said))
         return { ok: false, kind: "stale", error: "Close the Names tab and open Names again to reconnect to the bridge." }
     if (/timeout/i.test(said))
         return { ok: false, kind: "busy", error: "The LEZ Bridge module is still answering an earlier call." }
     if (/method not found|unknown_method|no such (module|method)|module not found|not installed/i.test(said))
-        return { ok: false, kind: "missing", error: said }
+        return { ok: false, kind: "missing", error: bridgeText(said) }
     if (/not connected|not reachable|unavailable|waiting for replica|crashed/i.test(said))
-        return { ok: false, kind: "starting", error: said }
-    return { ok: false, kind: "error", error: said }
+        return { ok: false, kind: "starting", error: bridgeText(said) }
+    return { ok: false, kind: "error", error: bridgeText(said) }
 }
 
 /// What the claim screen shows, from what it knows. One of: "missing" (no LEZ Bridge package),

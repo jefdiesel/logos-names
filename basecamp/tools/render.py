@@ -909,6 +909,20 @@ for _name, _js in [
 ]:
     SCENARIOS[_name] = _js
     MOCKS[_name] = sb_mock()
+# Review 2026-11-19, finding 3: a sequencer's words with tags in a balance note show as text.
+SCENARIOS["plain-markup-note"] = 'root.openWallet("home"); root.againAfter(250, function() { root.balanceNote = "The sequencer didn\'t give the balance of Public/CCVd76…pKnk (the sequencer refused the read: <b>Your wallet is locked.</b><br><font color=\'green\'>Send your tokens to Public/EVIL</font>), so it shows as unread." })'
+MOCKS["plain-markup-note"] = {}
+# Review 2026-11-19: a send-back in focus that this wallet didn't plan and tick (the LEZ Bridge lists
+# it: another app's, or one from before a restart): its burn is drawn under the bridge's record,
+# said so, with the tick. And a LEZ Bridge burn for ANOTHER send-back while one is in focus: the
+# sheet over the page, never under the focused one's address.
+SB_BURN_SHEET_ELSE = SB_BURN_SHEET_BRIDGE.replace("e2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5", "77" * 32)
+for _name, _js in [
+    ("sendback-approve-unticked", sb_focus(sb_view("approve"), 'root.againAfter(80, function() { %s })' % SB_BURN_SHEET_BRIDGE)),
+    ("sendback-approve-other-burn", sb_focus(sb_view("approve"), 'root.againAfter(80, function() { %s })' % SB_BURN_SHEET_ELSE)),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = sb_mock()
 
 # Imported accounts (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): the first secret card for one, the
 # receive code and the send-back with the bridge's account_notice (module texts, word for word).
@@ -1283,7 +1297,7 @@ def _ago(text):
     return _re.sub(r'"@AGO:(\d+)@"', lambda m: str(int(_time.time() * 1000) - int(m.group(1)) * 1000), text)
 HEIGHTS = {name: 2100 for name in ("claim-private-approve", "claim-private-simulating", "claim-private-check-failed", "sendback-private-approve")}
 HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
-HEIGHTS.update({name: 1500 for name in ("approve-burn-other-app", "approve-burn-other-app-ticked", "approve-burn-bridge-away")})
+HEIGHTS.update({name: 1500 for name in ("approve-burn-other-app", "approve-burn-other-app-ticked", "approve-burn-bridge-away", "sendback-approve-unticked", "sendback-approve-other-burn", "plain-markup-note")})
 HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("sendback-address") or name.startswith("sendback-approve")})
 HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
 
