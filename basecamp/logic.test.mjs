@@ -1448,7 +1448,26 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("balance line: a label as before", L.receiveBalanceLine(two, acct, "ETH", "bridge v5"), "3J29s1…7CNA now holds 1.01 wETH.");
   check("bridge key", [L.receiveBridgeKey({ id: "bridge-test-network-v5", label: "bridge v5" }), L.receiveBridgeKey({ id: "bridge-test-network", label: "bridge v2" }), L.receiveBridgeKey(null), L.receiveBridgeKey("bridge v12")], ["v5", "v2", "", "v12"]);
   check("card rows keep their deployment", L.receiveRowsShown([{ id: "r1", symbol: "ETH", amount: "1", account: acct, deployment: { id: "bridge-test-network-v5", label: "bridge v5" } }], {}, {}, 0, true).rows[0].deployment, { id: "bridge-test-network-v5", label: "bridge v5" });
-  check("every balance line on screen passes the row's deployment", (qml.match(/Logic\.receiveBalanceLine\(/g) || []).length, (qml.match(/Logic\.receiveBalanceLine\([^)]*\.deployment\)/g) || []).length);
+  check("every balance line on screen passes the row's deployment, the read's time and the claim's", (qml.match(/Logic\.receiveBalanceLine\(/g) || []).length, (qml.match(/Logic\.receiveBalanceLine\([^)]*\.deployment, root\.bridgeNetReadAt, root\.receiveClaimedAt\[[^\]]+\.id\]\)/g) || []).length);
+  // names-stall-3 review (4): "now holds" only from a read made after the claim.
+  const one = [{ account: acct, assets: [{ symbol: "wETH", name: "Wrapped Sepolia ETH", amount: "0" }] }];
+  check("balance line: a read from before the claim says nothing of what it holds now", L.receiveBalanceLine(one, acct, "ETH", { id: "bridge-test-network-v5", label: "bridge v5" }, 1000, 1001000 + 1), "The balance of 3J29s1…7CNA shows on the Wallet card once the network is read again.");
+  check("balance line: a read after the claim does", L.receiveBalanceLine(one, acct, "ETH", { id: "bridge-test-network-v5", label: "bridge v5" }, 1002, 1001000), "3J29s1…7CNA now holds 0 wETH.");
+  check("balance line: no read yet, a claim seen: nothing said", L.receiveBalanceLine(one, acct, "ETH", null, 0, 5000), "The balance of 3J29s1…7CNA shows on the Wallet card once the network is read again.");
+  check("bridge read before a recent claim: asked again", [L.bridgeReadBeforeClaims(1000, { r: 1001000 }, 1002000, 120000), L.bridgeReadBeforeClaims(1002, { r: 1001000 }, 1002000, 120000), L.bridgeReadBeforeClaims(1000, { r: 1001000 }, 1001000 + 200000, 120000), L.bridgeReadBeforeClaims(0, {}, 5, 120000)], [true, false, false, false]);
+  check("the claim's branch asks the bridge network afresh", /loadBridgeNet\(first\)/.test(qml) && /fresh: true/.test(qml), true);
+  // names-stall-3 review (5): Bridge to Ethereum submits the amount it shows.
+  const regA = { tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "10000000000000000" }, { index: 1, value: "100000000000000000" }] }] };
+  const regB = { tokens: [{ symbol: "ETH", denoms: [{ index: 0, value: "50000000000000000" }, { index: 1, value: "10000000000000000" }] }] };
+  const weth = { symbol: "wETH", base: "1000000000000000000" };
+  const shownA = L.sendBackAmounts(regA, weth).filter(function(d) { return d.index === L.smallestDenom(L.sendBackAmounts(regA, weth)) })[0];
+  check("send back: the index sent is the shown amount's on the bridge as read now", [L.sendBackIndexFor(regA, weth, shownA.value), L.sendBackIndexFor(regB, weth, shownA.value), L.sendBackIndexFor(regB, weth, "70000000000000000"), L.sendBackIndexFor(null, weth, shownA.value)], [0, 1, -1, -1]);
+  check("send back: shown == submitted for every amount offered on either bridge", [regA, regB].every(function(reg) { return L.sendBackAmounts(reg, weth).every(function(d) { return L.sendBackAmounts(reg, weth).filter(function(x) { return x.index === L.sendBackIndexFor(reg, weth, d.value) })[0].value === d.value }) }), true);
+  check("send back: sbPlan sends the fresh registry's index, never the held one", [/sendBackIndexFor\(fresh, sbAsset, shown\.value\)/.test(qml), /sendBackPlan, \[Logic\.sendBackSymbol\(sbAsset\.symbol\), String\(sbDenom\)/.test(qml)], [true, false]);
+  check("send back: a bridge change drops the held amounts; a new send-back reads them again", [/function bridgeChosen\(row\) \{\s*\/\/[^\n]*\n\s*receiveRegistry = null/.test(qml), /if \(sbFocus === "" && receiveRegistry === null\)/.test(qml)], [true, false]);
+  // names-stall-3 review (6): Change shows whenever there is anything else to choose.
+  check("send back: Change with one amount but a private account too", [L.sendBackChangeShown([{}], [{}], [{}]), L.sendBackChangeShown([{}], [{}], []), L.sendBackChangeShown([{}, {}], [{}], []), L.sendBackChangeShown([], [{}, {}], [])], [true, false, true, true]);
+  check("send back: the Change link uses it, and the amount isn't picked again after Change", [/Link \{ visible: Logic\.sendBackChangeShown\(root\.sbAmounts, root\.sbSources, root\.sbPrivateSources\)/.test(qml), /!sbChangePressed\)\s*\n\s*sbDenom = Logic\.smallestDenom\(sbAmounts\)/.test(qml)], [true, true]);
 
   // c. Bridge to Ethereum step 1: the private-account note only while no public account is chosen.
   const priv = [{ account: "Private/AAA" }];

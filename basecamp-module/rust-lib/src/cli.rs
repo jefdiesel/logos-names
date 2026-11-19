@@ -1203,6 +1203,9 @@ impl Probe {
 /// A wallet read on its own thread: its result once it ends, and when; and whether a call
 /// asked it to stop (the sequencer doesn't answer, so it can only hang or read wrong).
 struct SlowRead {
+    /// `balance_gen` of its wallet when it started: a run started before the wallet changed is
+    /// never adopted after it (it finishes, and its result is dropped).
+    generation: (u64, u64),
     result: Mutex<Option<(Instant, Result<CliOutput, String>)>>,
     ended: std::sync::Condvar,
     stop: std::sync::atomic::AtomicBool,
@@ -1223,10 +1226,12 @@ fn run_bounded(setup: &Setup, command: Vec<String>, patience: Duration, deadline
     let key = format!("{}\u{0}{}\u{0}{}\u{0}{}", setup.program.display(), setup.wallet.display(), setup.sequencer, command.join("\u{0}"));
     let read = {
         let mut reads = SLOW_READS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = balance_gen(&setup.wallet);
         let unusable = reads.get(&key).is_some_and(|read| {
-            read.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|(at, result)| {
-                at.elapsed() > SLOW_RESULT_FRESH || !matches!(result, Ok((Some(0), _, _)))
-            })
+            read.generation != generation
+                || read.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|(at, result)| {
+                    at.elapsed() > SLOW_RESULT_FRESH || !matches!(result, Ok((Some(0), _, _)))
+                })
         });
         if unusable {
             reads.remove(&key);
@@ -1235,6 +1240,7 @@ fn run_bounded(setup: &Setup, command: Vec<String>, patience: Duration, deadline
             .entry(key.clone())
             .or_insert_with(|| {
                 let read = std::sync::Arc::new(SlowRead {
+                    generation,
                     result: Mutex::new(None),
                     ended: std::sync::Condvar::new(),
                     stop: std::sync::atomic::AtomicBool::new(false),
@@ -2161,6 +2167,17 @@ impl BalanceRead {
 /// of those in a row held every other call (the node's, the app grants) past its timeout.
 static BALANCE_SEEN: Mutex<Option<((PathBuf, PathBuf, String), Instant, BalanceRead)>> = Mutex::new(None);
 
+/// Bumped by `forget_balance_of` (under `BALANCE_SEEN`'s lock), for every wallet (None) or one:
+/// a balance read, or a slow wallet read (`SlowRead`), started before the wallet changed never
+/// fills a cache after it.
+static BALANCE_GENS: Mutex<(u64, std::collections::BTreeMap<PathBuf, u64>)> = Mutex::new((0, std::collections::BTreeMap::new()));
+
+/// The generation of `wallet`'s reads: every wallet's, and its own.
+fn balance_gen(wallet: &Path) -> (u64, u64) {
+    let gens = BALANCE_GENS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    (gens.0, gens.1.get(wallet).copied().unwrap_or(0))
+}
+
 /// How long one `names balance` answers for.
 const BALANCE_FRESH: Duration = Duration::from_secs(15);
 
@@ -2172,11 +2189,15 @@ const BALANCE_FRESH: Duration = Duration::from_secs(15);
 /// read, or the CLI failed for another reason.
 pub fn balance_read(setup: &Setup, deadline: registry::Deadline) -> Result<BalanceRead, String> {
     let key = (setup.program.clone(), setup.wallet.clone(), setup.sequencer.clone());
-    if let Some((seen_key, at, read)) = BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-        if *seen_key == key && at.elapsed() < BALANCE_FRESH {
-            return Ok(read.clone());
+    let generation = {
+        let seen = BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((seen_key, at, read)) = seen.as_ref() {
+            if *seen_key == key && at.elapsed() < BALANCE_FRESH {
+                return Ok(read.clone());
+            }
         }
-    }
+        balance_gen(&setup.wallet)
+    };
     let probe = Probe::start(&setup.sequencer);
     let (code, output, err) = run_bounded(setup, vec!["balance".to_owned()], BALANCE_PATIENCE, deadline, &probe)?;
     let mut rows = parse_all_balances(&output);
@@ -2198,7 +2219,10 @@ pub fn balance_read(setup: &Setup, deadline: registry::Deadline) -> Result<Balan
     }
     let healthy = matches!(probe.answer(deadline.at), Some(Ok(())));
     let read = BalanceRead { output, rows, unread, why, healthy };
-    *BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, Instant::now(), read.clone()));
+    let mut seen = BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if balance_gen(&setup.wallet) == generation {
+        *seen = Some((key, Instant::now(), read.clone()));
+    }
     Ok(read)
 }
 
@@ -2217,6 +2241,21 @@ pub fn balances_by(setup: &Setup, deadline: registry::Deadline) -> Result<Vec<(S
 /// After the CLI changed the wallet, the next balance is read afresh.
 pub fn forget_balance() {
     *BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// The wallet changed (a send, a job's end, an account made, another default, another network):
+/// the next balance is read afresh, and a read of `wallet` (None: of any) already under way
+/// never fills a cache after this, nor is a slow one adopted.
+pub fn forget_balance_of(wallet: Option<&Path>) {
+    let mut seen = BALANCE_SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    {
+        let mut gens = BALANCE_GENS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match wallet {
+            Some(wallet) => *gens.1.entry(wallet.to_path_buf()).or_insert(0) += 1,
+            None => gens.0 += 1,
+        }
+    }
+    *seen = None;
 }
 
 /// Private accounts' npks, as an older CLI's `wallet account get --keys` prints them:
@@ -3325,6 +3364,51 @@ mod tests {
         let none = Setup { program: fake_cli(&dir, "echo 'private total: 0'"), ..setup };
         forget_balance();
         assert_eq!(run_balance(&none).unwrap(), Value::Null);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Puts a new stand-in CLI at `dir`'s `names`, as an update would: a new file renamed over
+    /// the old (a run of the old one keeps reading its own).
+    fn replace_cli(dir: &Path, tail: &str) {
+        let fresh = dir.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let path = fake_cli(&fresh, tail);
+        std::fs::rename(path, dir.join("names")).unwrap();
+    }
+
+    /// Review (3): a balance read under way when the wallet changed (a send, a job's end:
+    /// `forget_balance`) never fills the 15 s balance cache after it, so the next read is the
+    /// new balance, not the one from before the change.
+    #[test]
+    fn review_a_balance_read_from_before_a_change_never_fills_the_cache_after_it() {
+        let dir = scratch_dir("balance-gen");
+        let started = dir.join("started");
+        let setup = setup(&dir, &format!("touch '{}'; sleep 1; echo '  Public/{PUBLIC}  70  (default)'", started.display()));
+        let reader = setup.clone();
+        let before = std::thread::spawn(move || run_balance(&reader));
+        let until = Instant::now() + Duration::from_secs(10);
+        while !started.exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // A send changed the wallet while the read ran.
+        forget_balance_of(Some(&setup.wallet));
+        replace_cli(&dir, &format!("echo '  Public/{PUBLIC}  30  (default)'"));
+        assert_eq!(before.join().unwrap().unwrap()["public"]["balance"], "70", "the read under way ends as it was");
+        assert_eq!(run_balance(&setup).unwrap()["public"]["balance"], "30", "the next read is the new balance");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Review (3): the same for a slow read still running after its call answered (`SLOW_READS`):
+    /// after a change it is never adopted by the next call, which reads afresh.
+    #[test]
+    fn review_a_slow_wallet_read_from_before_a_change_is_never_adopted_after_it() {
+        let dir = scratch_dir("balance-slow-gen");
+        let setup = setup(&dir, &format!("sleep 7; echo '  Public/{PUBLIC}  70  (default)'"));
+        assert_eq!(run_balance(&setup), Err(STILL_READING.to_owned()), "still reading after the call's wait");
+        forget_balance_of(Some(&setup.wallet));
+        replace_cli(&dir, &format!("echo '  Public/{PUBLIC}  30  (default)'"));
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(run_balance(&setup).unwrap()["public"]["balance"], "30", "a read from before the change isn't adopted");
         let _ = std::fs::remove_dir_all(dir);
     }
 

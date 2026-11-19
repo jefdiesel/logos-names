@@ -847,6 +847,8 @@ Item {
     onBridgeNetAccountsChanged: if (walletNet === "0.4") loadBridgeNet()
     readonly property var bridgeNetStatusNow: Logic.bridgeNetStatus(bridgeNet, clockShown)
     // On LEZ 0.4 the rows know which accounts are the 0.4 wallet's own: a LEZ 0.3 one is view only.
+    /// When the bridge network's balances shown were read (seconds; 0 before the first read).
+    readonly property double bridgeNetReadAt: bridgeNet && bridgeNet.read ? Number(bridgeNet.read.read_at || 0) : 0
     readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null, namesNet === "0.4" ? Logic.publicAccounts(cliBalance, cliAccounts) : null)
     property bool bridgeNetShowEmpty: false   // the wallet's accounts with nothing there, shown one by one
     readonly property var bridgeNetView: Logic.bridgeNetShown(bridgeNetBlocks, bridgeNetShowEmpty, receiveKeepAccounts)
@@ -900,18 +902,23 @@ Item {
             }
             faucetSet(account, { busy: false, line: r.line, kind: r.kind })
             if (r.kind === "done") {
-                loadBridgeNet()
+                loadBridgeNet(true)
                 loadFaucetInfo()
             }
         }, function(message) {
             faucetSet(account, { busy: false, line: sentence(message), kind: Logic.noticeKind(message, true) })
         }, 150000)
     }
-    function loadBridgeNet() {
-        askLater("bridge_net_balances", [JSON.stringify(bridgeNetAccounts)], onNet(function(value) {
+    /// `fresh`: a read made now (after a claim or a burn the kept one may be from before it).
+    function loadBridgeNet(fresh) {
+        var asked = fresh === true ? JSON.stringify({ accounts: bridgeNetAccounts, fresh: true }) : JSON.stringify(bridgeNetAccounts)
+        askLater("bridge_net_balances", [asked], onNet(function(value) {
             bridgeNet = value
             bridgeNetProblem = ""
-            if (value && value.updating)
+            // Read before a claim seen in the last 2 min: asked again shortly, so "now holds"
+            // is said only from a read made after it.
+            var readAt = value && value.read ? value.read.read_at : 0
+            if ((value && value.updating) || Logic.bridgeReadBeforeClaims(readAt, receiveClaimedAt, Date.now(), 120000))
                 bridgeNetSoon.restart()
         }), function(message) {
             bridgeNetProblem = sentence(readFailed(message))
@@ -1162,6 +1169,8 @@ Item {
     /// After a choice: the bridge's config again (Receive and Bridge to Ethereum read it), and the
     /// wallet told to read the chosen bridge (its list holds at most 6; v2 and v3 make room first).
     function bridgeChosen(row) {
+        // Another bridge: its amounts are read again before Bridge to Ethereum offers any.
+        receiveRegistry = null
         bridgeNote = row ? "New receives and sends to Ethereum now use " + Logic.bridgeLabelOf(row) + "." : "Chosen."
         bridgeNoteKind = "done"
         bridgeCall("config", [], function(value) { bridgeAnswered(value) }, function() {}, 10000)
@@ -1183,6 +1192,27 @@ Item {
             } else
                 console.log("names_ui: set_bridge_programs refused", JSON.stringify(value))
         }, function(message) { console.log("names_ui: set_bridge_programs:", message) }, 15000)
+    }
+    // A plan or a lookup the module answered busy (it was still reading the node, a name or the
+    // CLI's version on a thread of its own: nothing was done) is asked again by itself every
+    // 1.5 s, up to 20 times, with the "working" state kept meanwhile (names-stall-3).
+    property var busyTries: ({})
+    function againWhileBusy(key, message, fn) {
+        if (message !== moduleBusy)
+            return false
+        var tries = busyTries
+        var n = tries[key] || 0
+        if (n >= 20)
+            return false
+        tries[key] = n + 1
+        busyTries = tries
+        againAfter(1500, fn)
+        return true
+    }
+    function busyDone(key) {
+        var tries = busyTries
+        delete tries[key]
+        busyTries = tries
     }
     function againAfter(ms, fn) {
         var t = Qt.createQmlObject('import QtQuick; Timer { repeat: false }', root, "claimLater")
@@ -1388,9 +1418,9 @@ Item {
         }, 30000)
     }
     /// The denominations: read once per screen (it reads both chains), never polled.
-    function loadReceiveRegistry() {
+    function loadReceiveRegistry(then) {
         receiveHold = true
-        bridgeCall("registry", [], function(value) { receiveRegistry = value; receiveHold = false; receiveCheckSoon() }, function() { receiveHold = false; receiveCheckSoon() }, 60000, false)
+        bridgeCall("registry", [], function(value) { receiveRegistry = value; receiveHold = false; receiveCheckSoon(); if (then) then() }, function() { receiveHold = false; receiveCheckSoon() }, 60000, false)
     }
     /// "Make another code": the choice of amount and account, whatever is on its way.
     function startNewReceive() {
@@ -1644,12 +1674,13 @@ Item {
                 // balance is read again so it shows.
                 if (value && value.stage === "claimed") {
                     var at = receiveClaimedAt
-                    if (!at[id]) {
+                    var first = !at[id]
+                    if (first) {
                         at[id] = Date.now()
                         receiveClaimedAt = at
                         receiveClaimedAtChanged()
                     }
-                    loadBridgeNet()
+                    loadBridgeNet(first)
                 }
                 next(i + 1)
             }, function(message, kind) {
@@ -1775,6 +1806,7 @@ Item {
     property string sbAccount: ""          // the public account the tokens leave
     property var sbAsset: null             // its card asset row (bridgeNetRows)
     property int sbDenom: -1               // the denomination chosen
+    property bool sbChangePressed: false   // the person pressed Change: the amount isn't picked for them again
     property var sbLink: null              // send_back_link()
     property bool sbLinkCopied: false
     property string sbCodeInput: ""
@@ -1987,6 +2019,7 @@ Item {
         sbSaveLine = ""
         sbSaveKind = ""
         sbDenom = -1
+        sbChangePressed = false
         sbFocus = typeof focusId === "string" ? focusId : ""
         if (sbFocus !== "" && sbFocusRow !== null)
             sbAccount = sbFocusRow.account
@@ -2002,14 +2035,19 @@ Item {
                 receiveHold = false
                 // The previous addresses (and, on a send-back's screen, whether its address has a name).
                 loadSbBook()
-                if (sbFocus === "" && receiveRegistry === null)
-                    loadReceiveRegistry()
-                else
+                // A new send-back reads the chosen bridge's amounts afresh (they differ between
+                // bridges); the amount is pre-selected from that read, never from an older one,
+                // and never again once the person pressed Change.
+                if (sbFocus === "") {
+                    loadReceiveRegistry(function() {
+                        sbAskNow = true
+                        if (sbAsset !== null && sbAmounts.length > 0 && !sbChangePressed)
+                            sbDenom = Logic.smallestDenom(sbAmounts)
+                    })
+                } else
                     sbAskNow = true
                 if (sbFocus !== "" && sbFromPrivate && sbJob === null)
                     sbFindJob(sbFocus)
-                if (sbFocus === "" && sbAsset !== null && sbAmounts.length > 0 && sbDenom < 0)
-                    sbDenom = Logic.smallestDenom(sbAmounts)
             }, function(message, kind) {
                 receiveHold = false
                 sbError = kind === "missing" ? "" : sentence(message)
@@ -2101,9 +2139,34 @@ Item {
             sbError = "Check the address in the box and tick \u201c" + Logic.ADDRESS_TICK + "\u201d first. Nothing was done."
             return
         }
+        // What is submitted is the amount shown: the bridge's amounts are read again now and the
+        // index sent is the one that list gives the shown amount; a list that no longer has it
+        // stops here (the bridge was changed since they were read).
+        var shown = sbAmounts.filter(function(d) { return d.index === sbDenom })[0]
+        if (!shown) {
+            sbError = "Choose the amount again. Nothing was done."
+            sbDenom = -1
+            return
+        }
         sbAsking = true
         sbError = ""
-        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], function(value) {
+        bridgeCall("registry", [], function(fresh) {
+            var index = Logic.sendBackIndexFor(fresh, sbAsset, shown.value)
+            if (index < 0) {
+                sbAsking = false
+                receiveRegistry = fresh
+                sbDenom = -1
+                sbError = "This bridge doesn't offer " + shown.text + " " + sbAsset.symbol + " (its amounts changed since they were shown). Choose the amount again. Nothing was done."
+                return
+            }
+            sbPlanIndex(index)
+        }, function(message) {
+            sbAsking = false
+            sbError = sentence(message) + " The amounts couldn't be checked; nothing was done."
+        }, 60000, false)
+    }
+    function sbPlanIndex(index) {
+        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackSymbol(sbAsset.symbol), String(index), sbAccount, sbCheck.code], function(value) {
             sbAsking = false
             if (value && value.needs) {
                 sbNeedsReply(value, "plan")
@@ -2341,7 +2404,7 @@ Item {
                     console.log("names_ui: send back", id + ":", value.stage)
                     // The burn landed: the account's balance is read again.
                     if (value.stage === "burned")
-                        loadBridgeNet()
+                        loadBridgeNet(true)
                 }
                 if (value && value.stage === "released" && !sbReceivedAt[id]) {
                     var at = sbReceivedAt
@@ -3028,7 +3091,7 @@ Item {
             claimPolling = false
             depositClaimJob = value
             if (value && value.state === "done") {
-                loadBridgeNet()
+                loadBridgeNet(true)
                 // A receive claimed from the card: its row reads "Claimed in block N" for a while.
                 if (claimSource.indexOf("deposit:") === 0)
                     receiveClaimed(claimSource.substr(8), value.block)
@@ -3588,10 +3651,14 @@ Item {
         chainProblem = ""
         chainPlan = null
         askLater("chain_send", [asked[0], asked[1], asked[2], false], function(plan) {
+            busyDone("chainCheck")
             chainBusy = false
             chainPlan = plan
             chainPlanFor = asked.join("|")
         }, function(message) {
+            if (againWhileBusy("chainCheck", message, chainCheck))
+                return
+            busyDone("chainCheck")
             chainBusy = false
             chainProblem = sentence(message)
         }, 60000)
@@ -4232,6 +4299,7 @@ Item {
         }
         // Through Basecamp's own node, one note of exactly the amount (chain_bridge).
         askLater("chain_bridge", [asked[1], asked[3], asked[0], send], function(value) {
+            busyDone("bridgePlan")
             bridgeBusy = false
             bridgeConfirm = false
             bridgeKey = asked[1]
@@ -4252,6 +4320,9 @@ Item {
                 bridgeReview = false
             }
         }, function(message) {
+            if (!send && againWhileBusy("bridgePlan", message, function() { bridgeRun(false) }))
+                return
+            busyDone("bridgePlan")
             bridgeBusy = false
             bridgeConfirm = false
             bridgeError = sentence(message)
@@ -5080,7 +5151,14 @@ Item {
                 text = known.name
             }
             show(text)
+            busyDone("find")
         } catch (error) {
+            // The account's name is read on the module's own thread: asked again by itself.
+            if (againWhileBusy("find", error.message, function() { find(typed) })) {
+                say("Reading the account's name…", "working")
+                return
+            }
+            busyDone("find")
             sayRead(error.message)
         }
     }
@@ -6060,7 +6138,14 @@ Item {
             var recipient = ask("recipient", [bare !== "" ? bare : to])
             if (recipient && recipient.forwarded_from)
                 target = recipient.name
+            busyDone("payName")
         } catch (error) {
+            // Where the name is paid is read on the module's own thread: asked again by itself.
+            if (againWhileBusy("payName", error.message, payName)) {
+                say("Reading where " + (bare !== "" ? bare : to) + " is paid…", "working")
+                return
+            }
+            busyDone("payName")
             say(sentence(error.message), true)
             return
         }
@@ -9984,7 +10069,7 @@ Item {
                                             Hint {
                                                 visible: arrivingRow.p.stage === "claimed"
                                                 font.pixelSize: root.px(15)
-                                                text: arrivingRow.p.stage === "claimed" ? Logic.receiveBalanceLine(root.bridgeNetBlocks, arrivingRow.modelData.account, arrivingRow.modelData.symbol, arrivingRow.modelData.deployment) : ""
+                                                text: arrivingRow.p.stage === "claimed" ? Logic.receiveBalanceLine(root.bridgeNetBlocks, arrivingRow.modelData.account, arrivingRow.modelData.symbol, arrivingRow.modelData.deployment, root.bridgeNetReadAt, root.receiveClaimedAt[arrivingRow.modelData.id]) : ""
                                             }
                                         }
                                         Action { visible: arrivingRow.p.claim && root.bridgeSetupClear; label: Logic.receiveIsPrivate(arrivingRow.modelData) && root.privateClaimJobs[arrivingRow.modelData.id] ? "Open" : Logic.receiveIsPrivate(arrivingRow.modelData) ? "Claim privately" : "Claim"; strong: true; onPressed: root.claimArrived(arrivingRow.modelData.id) }
@@ -11525,8 +11610,8 @@ Item {
                         StatusLine {
                             kind: Logic.toneKind(receiveScreen.p.tone)
                             text: receiveScreen.p.stage === "claimed" ? receiveScreen.p.headline.replace(/\.$/, "")
-                                + (root.receiveFocusRow !== null && /now holds/.test(Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment))
-                                   ? " · " + Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment) : ".")
+                                + (root.receiveFocusRow !== null && /now holds/.test(Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment, root.bridgeNetReadAt, root.receiveClaimedAt[root.receiveFocusRow.id]))
+                                   ? " · " + Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment, root.bridgeNetReadAt, root.receiveClaimedAt[root.receiveFocusRow.id]) : ".")
                                 : receiveScreen.p.headline
                         }
                         Hint { visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
@@ -11541,7 +11626,7 @@ Item {
                         Hint {
                             visible: receiveScreen.p.stage === "claimed" && root.receiveFocusRow !== null && !/now holds/.test(text)
                             font.pixelSize: root.px(15)
-                            text: root.receiveFocusRow === null ? "" : Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment)
+                            text: root.receiveFocusRow === null ? "" : Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment, root.bridgeNetReadAt, root.receiveClaimedAt[root.receiveFocusRow.id])
                         }
                         Hint {
                             visible: receiveScreen.p.stage === "waiting" && receiveScreen.result === null
@@ -11715,7 +11800,7 @@ Item {
                         RowLayout {
                             spacing: 14
                             Hint { Layout.fillWidth: false; color: root.ink; text: (root.sbAmounts.filter(function(d) { return d.index === root.sbDenom })[0] || { text: "" }).text + " " + (root.sbAsset !== null ? root.sbAsset.symbol : "") + " from " + Logic.idShort(root.sbAccount) + "." }
-                            Link { visible: root.sbAmounts.length > 1 && !sbAddressStep.a.show; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbDenom = -1 }
+                            Link { visible: Logic.sendBackChangeShown(root.sbAmounts, root.sbSources, root.sbPrivateSources) && !sbAddressStep.a.show; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: { root.sbChangePressed = true; root.sbDenom = -1 } }
                         }
                         Hint { visible: root.sbFromPrivate; font.pixelSize: root.px(15); text: "From your private account: your wallet proves the burn on this computer (" + Logic.PRIVATE_PROOF_TIME + ") and checks the account holds it." }
                         // The box.

@@ -2078,8 +2078,12 @@ export function receiveBridgeKey(deployment) {
 /// THAT bridge only. A v5 claim once said "now holds 0.01 wETH" from v6's row while the account
 /// held 1.01 on v5 (2026-11-18). Without one (an older bridge), as before: a row that holds
 /// something (the first was v2's 0 wETH after a v4 claim on the M2, 15 Nov), else the first.
-export function receiveBalanceLine(blocks, account, symbol, deployment) {
+export function receiveBalanceLine(blocks, account, symbol, deployment, readAt, claimedAtMs) {
     var id = String(account || "").replace(/^Public\//, "")
+    // A read made before the claim (`readAt`, seconds, the bridge network read's `read_at`) can't
+    // say what the account holds now: only a read after it may (names-stall-3 review).
+    if (claimedAtMs && !(Number(readAt) * 1000 >= Number(claimedAtMs)))
+        return "The balance of " + idShort(id) + " shows on the Wallet card once the network is read again."
     var block = (Array.isArray(blocks) ? blocks : []).filter(function(b) { return String(b.account || "").replace(/^Public\//, "") === id })[0]
     // The wrapped token keeps the symbol or puts a "w" before it (ETH arrives as wETH).
     var all = block && Array.isArray(block.assets) ? block.assets.filter(function(a) { return a.symbol === symbol || a.symbol === "w" + symbol }) : []
@@ -2358,6 +2362,38 @@ export function sendBackAmounts(registry, asset) {
         denoms = known.denoms.map(function(v, i) { return { index: i, value: v } })
     return denoms.filter(function(d) { return /^[0-9]+$/.test(d.value) && (asset.anyAmount === true || atLeast(String(asset.base || "0"), d.value)) })
         .map(function(d) { return { index: d.index, value: d.value, text: withDecimals(d.value, known.decimals) } })
+}
+
+/// Whether the bridge network's balances were read before a claim seen less than `withinMs` ago
+/// (`claimedAt`: receive id → ms): then the card asks for a read made now, again shortly.
+export function bridgeReadBeforeClaims(readAt, claimedAt, nowMs, withinMs) {
+    var at = Number(readAt) * 1000
+    var claims = claimedAt && typeof claimedAt === "object" ? Object.keys(claimedAt).map(function(k) { return Number(claimedAt[k]) }) : []
+    return claims.some(function(c) { return c > 0 && nowMs - c < (withinMs || 120000) && !(at >= c) })
+}
+
+/// The denomination index the bridge's registry, as read just now, gives the amount `value` (base
+/// units) of `asset`, or -1 when it no longer lists it: what Bridge to Ethereum submits is then
+/// the amount it shows, or nothing.
+export function sendBackIndexFor(registry, asset, value) {
+    if (!asset || !registry || !Array.isArray(registry.tokens)) return -1
+    var known = SEND_BACK_FALLBACK[asset.symbol]
+    if (!known) return -1
+    var listed = registry.tokens.filter(function(t) { return t && t.symbol === known.symbol && Array.isArray(t.denoms) })[0]
+    if (!listed) return -1
+    var found = -1
+    listed.denoms.forEach(function(d, i) {
+        if (found < 0 && String(d && d.value || "") === String(value))
+            found = d.index !== undefined ? Number(d.index) : i
+    })
+    return found
+}
+
+/// Whether Bridge to Ethereum's "Change" link shows: whenever there is anything else to choose
+/// (another amount, or another account, public or private).
+export function sendBackChangeShown(amounts, sources, privateSources) {
+    var n = function(l) { return Array.isArray(l) ? l.length : 0 }
+    return n(amounts) > 1 || n(sources) + n(privateSources) > 1
 }
 
 /// The bridge module's symbol for a card symbol: wETH → ETH (what `send_back_plan` takes).

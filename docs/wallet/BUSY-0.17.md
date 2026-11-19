@@ -24,6 +24,20 @@ the app asks again: the name lookups (`read`, the board's, `keep`) now do too. A
 wallet (a send logged, a job ended, an account made or renamed) drops the kept reads of it. `faucet_claim` answers `code: "pending"` while the faucet is asked, and
 the app asks again for its answer (never a second ask of the faucet).
 
+Since `names-stall-3` (2026-11-19), also as Names opens on a Basecamp that has the Logos
+Blockchain node loaded: the node reads the app polls (`chain_status`, `chain_accounts`,
+`chain_stake`, `chain_claim` without sending, `chain_tx`, `activity`'s settling,
+`pending_inscriptions`' accounts) are asked without waiting (`node::polled`, an asynchronous
+ask from the call's thread, the answer kept 5 s, shown 30 s at most while a newer one is asked),
+and answer busy before the node's first answer. The module keeps one client per module for the
+life of the host (`peer.rs`, `client`), so the node's object is acquired once, and its first ask
+may wait 1 s until one was sent without acquiring. The CLI's `--version` (asked on LEZ 0.4 before
+any CLI run) and `file_sha256` (the shipped bridge, ~10 MB) are read on a thread of their own:
+the polls answer busy meanwhile, any other call says so in words (busy promises nothing was
+done). A burst of calls waits 400 ms in all for first reads (`served::WAIT_BUDGET`), not 600 ms
+each, and a read already under way is never waited for again. A send, a claim, an account made
+or renamed and an inscription still wait for the node, and drop what the polls kept.
+
 Since `names-hang-fix` (2026-11-18), a module that isn't loaded is never waited for, so it can't
 make the wallet busy (`basecamp-module/rust-lib/src/peer.rs`). The module finds out from its
 endpoint, which takes microseconds and needs no client. A chain method then answers at once with
@@ -165,3 +179,243 @@ do.
 | 4248 | loadInscribePlan | askLater | chain_inscribe | plan cleared, no error shown (the busy module is not the account's problem); read again on the sheet's next 3 s poll |
 | 4289 | answerInscribeRequest | askLater | approve | busy: says busy, stays pending; no answer: "No answer yet: the inscription may still be on its way…" |
 | 5808 | next | askLater | set_dm_name | best effort: ignored; asked again on the next poll or use |
+
+## Every call and how long it can hold the module's thread (names-stall-3, 2026-11-19)
+
+The module answers one call at a time on the host's main thread, and Basecamp gives up on a call
+after about 20 s. A call that waits holds every call behind it, so this lists every call the
+module exposes (`NamesModule`), the longest it can hold that thread, and why. "Measured" is from
+the unit test `every_call_the_module_exposes_holds_the_thread_how_long` (lib.rs), with the node
+answering after 3 s, a names CLI taking 3 s and an endpoint 4 s. A call that fails its checks
+early shows near 0 there, so the worst case comes from the code's own bounds. That test fails if a
+read (not a press) holds the thread a second or waits on the network, the CLI or another module.
+
+- A **read** never waits: what it needs is read on a thread of its own (`served.rs`, or an ask of
+  the node, `node::polled`), and it answers busy until the first answer is back.
+- A **press** (a change the person or an app asked for) may wait, by design and within the bound
+  given. The app shows a working line at once (`say(…, "working")`, `chainBusy`, `bridgeBusy`,
+  `registerChecking`). A wait on the call's thread can't be cancelled: the host delivers no other
+  call until it ends, so a cancel could only arrive after it.
+- Since names-stall-3 the app asks again by itself when a plan or a lookup is answered busy
+  (`againWhileBusy`, every 1.5 s, up to 20 times): Check on the Logos Blockchain send
+  (`chain_send` plan), the bridge plan (`chain_bridge` plan), Find by account (`reverse`) and Pay
+  a name (`recipient`).
+
+| Call | Worst case on the module's thread | Why | Measured |
+|---|---|---|---|
+| `account_balances` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `activity` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `anon_name` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `app_grants` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `app_note` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `app_secret` | 60 s. | Another app's call (the LEZ Bridge): the names CLI derives the values (`SECRET_PATIENCE`), about 1 s; up to 20 s more when it asks whether an imported account (`SCHEME_PATIENCE`). Kept on the call's thread on purpose: the bridge waits 20 s for it and reads a busy answer as a failure. Rate-limited per app and hour. | 3052 ms |
+| `approve_inscription` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  | 0 ms |
+| `approve_request` | 12 s for a relayed call (the CLI's plan, `PUBLIC_PLAN_PATIENCE`) plus 600 ms for a bridge's Config not read within its bound; otherwise local. | A press. | 0 ms |
+| `avatar` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 1 ms |
+| `backup_check` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `backup_make` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `backup_open` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `backup_restore` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `backup_status` | < 50 ms. Local files and memory only. |  | 2 ms |
+| `board_feed` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 0 ms |
+| `board_follow` | < 50 ms. Local files and memory only. |  | 9 ms |
+| `board_follows` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `board_hide` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `board_like` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `board_likes` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `board_post` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `board_posts_of` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 0 ms |
+| `board_thread` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 0 ms |
+| `board_toggle_like` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `bridge_net_balances` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `bridge_net_watch` | < 50 ms. Local files and memory only. |  | 8 ms |
+| `cancel_request` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `chain_account_label` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  | 3016 ms |
+| `chain_account_new` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  | 3006 ms |
+| `chain_account_remove` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  | 0 ms |
+| `chain_accounts` | About 0. The node is asked without waiting (`node::polled`, kept 5 s); busy before its first answer. The first ask after the host starts may hold the thread up to 1 s while the host acquires the node's object (`FIRST_ASK_WAIT`, then held 30 s if it did). |  | 0 ms |
+| `chain_bridge (send false)` | As the node polls, plus a name's key and LEZ's version, channel and the account's key read on a thread of their own (busy until back). The app asks again by itself every 1.5 s (up to 20 times). |  | 0 ms |
+| `chain_bridge (send true)` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. Plus LEZ's version and channel (10 s and 15 s) and the CLI's accounts on LEZ 0.4 (20 s), read afresh. |  |  |
+| `chain_claim (send false)` | As the node polls, plus a name's key and LEZ's version, channel and the account's key read on a thread of their own (busy until back). The app asks again by itself every 1.5 s (up to 20 times). |  | 0 ms |
+| `chain_claim (send true)` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  |  |
+| `chain_inscribe (send false)` | As the node polls, plus a name's key and LEZ's version, channel and the account's key read on a thread of their own (busy until back). The app asks again by itself every 1.5 s (up to 20 times). |  | 0 ms |
+| `chain_inscribe (send true)` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  |  |
+| `chain_recipient` | < 50 ms. Local files and memory only. (a key; a name is read as `chain_send`'s plan reads it on a press) |  | 0 ms |
+| `chain_send (send false)` | As the node polls, plus a name's key and LEZ's version, channel and the account's key read on a thread of their own (busy until back). The app asks again by itself every 1.5 s (up to 20 times). |  | 0 ms |
+| `chain_send (send true)` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  |  |
+| `chain_split (send false)` | As the node polls, plus a name's key and LEZ's version, channel and the account's key read on a thread of their own (busy until back). The app asks again by itself every 1.5 s (up to 20 times). |  | 0 ms |
+| `chain_split (send true)` | 15 s per node read (`node::QUICK`); 180 s while the node proves a send or claim (`node::PROVING`). By design: a press; nothing else is answered meanwhile. |  |  |
+| `chain_stake` | About 0. The node is asked without waiting (`node::polled`, kept 5 s); busy before its first answer. The first ask after the host starts may hold the thread up to 1 s while the host acquires the node's object (`FIRST_ASK_WAIT`, then held 30 s if it did). |  | 0 ms |
+| `chain_status` | About 0. The node is asked without waiting (`node::polled`, kept 5 s); busy before its first answer. The first ask after the host starts may hold the thread up to 1 s while the host acquires the node's object (`FIRST_ASK_WAIT`, then held 30 s if it did). |  | 0 ms |
+| `chain_tx` | About 0. The node is asked without waiting (`node::polled`, kept 5 s); busy before its first answer. The first ask after the host starts may hold the thread up to 1 s while the host acquires the node's object (`FIRST_ASK_WAIT`, then held 30 s if it did). |  | 0 ms |
+| `chat_names` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `clear_addresses` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 4001 ms |
+| `cli_account_label` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `cli_account_new` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_account_use` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_accounts` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 31 ms |
+| `cli_add_name` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 11 ms |
+| `cli_balance` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 129 ms |
+| `cli_bridge` | 120 s. | The CLI's bridge run (`BRIDGE_PATIENCE`). The Names app no longer calls it (it bridges with `chain_bridge`); tools do. | 3080 ms |
+| `cli_bridge_to` | 120 s. | As `cli_bridge`. | 3093 ms |
+| `cli_claim` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_create_wallet` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_faucet` | 30 s. | The Names faucet (LEZ 0.3) is asked on the call's thread; a press. Not measured (a real URL). |  |
+| `cli_fee` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 8 ms |
+| `cli_install` | 20 s on LEZ 0.3 (an existing CLI's `--version`); on LEZ 0.4 busy-free (checked on its own thread). | A press. Not measured (it would download). |  |
+| `cli_install_bundled` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `cli_mine` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 405 ms |
+| `cli_pay` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 22 ms |
+| `cli_pay_account` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_pay_public` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_profile` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_receive` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_receive_all` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_receive_privately` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_register` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 13 ms |
+| `cli_restore_wallet` | 20 s. | The CLI is asked whether a wallet already opens there (it refuses to restore over one); a press. | 3085 ms |
+| `cli_set_page` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_set_text` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_shield` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_status` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `cli_token_holdings` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `cli_token_info` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `cli_token_pending` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `cli_token_receive` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_token_send` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 20 ms |
+| `cli_token_send_source` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `cli_transfer` | 10 s. | Before the job, the registry is asked whether the new owner's account was ever used (`REQUEST_CAP`); a press. | 4001 ms |
+| `declare_programs` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `deposit` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 0 ms |
+| `dm_names` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `drop_access` | < 50 ms. Local files and memory only. |  | 13 ms |
+| `faucet_claim` | 600 ms (first ask), then about 0. | The faucet is asked on a thread of its own; the app asks again for the answer. | 401 ms |
+| `faucet_info` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 1 ms |
+| `file_sha256` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 2 ms |
+| `get_config` | < 50 ms. Local files and memory only. |  | 2 ms |
+| `granted_accounts` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `job` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `keep` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 0 ms |
+| `main_name` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `make_anon` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `make_public` | < 100 ms. Checks, then the names CLI runs as a job; the app polls `job`. |  | 0 ms |
+| `mine` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 5 ms |
+| `normalize` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `on_context_ready` | < 50 ms. Local files and memory only. | Once, as the module starts: nothing is read. |  |
+| `page` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 11 ms |
+| `page_preview` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `page_view` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 3 ms |
+| `pending_inscriptions` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `pending_requests` | < 50 ms. Local files and memory only. |  | 1 ms |
+| `private_call_control` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `propose_call` | < 50 ms. Local files and memory only. |  | 8 ms |
+| `propose_inscription` | < 50 ms. Local files and memory only. |  | 9 ms |
+| `propose_private_call` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `propose_relayed_call` | 12 s (the CLI's plan) plus 600 ms for a Config. | Another app's press; it waits 75 s. | 0 ms |
+| `propose_token_source` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `propose_transfer` | < 50 ms. Local files and memory only. |  | 9 ms |
+| `receive_privately` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `recipient` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 183 ms |
+| `register_name` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 3064 ms |
+| `reject_request` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `release` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 4001 ms |
+| `remove_token_source` | < 50 ms. Local files and memory only. |  | 11 ms |
+| `request_access` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `request_access_with` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `request_status` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `resign_relayed_call` | 12 s (the CLI's plan) + 12 s (its sign). | Another app's press. | 0 ms |
+| `resolve` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 42 ms |
+| `reveal_name` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `reverse` | As `served`; for the Names app only. Another app's call reads on the spot: up to 10 s per registry request (`REQUEST_CAP`) plus about 1 s of Argon2 for a name not seen yet. |  | 0 ms |
+| `revoke_app` | < 50 ms. Local files and memory only. |  | 10 ms |
+| `revoke_secret` | < 50 ms. Local files and memory only. |  | 8 ms |
+| `running_jobs` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `secret_grants` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `set_account` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 4075 ms |
+| `set_bridge_program` | < 50 ms. Local files and memory only. |  | 8 ms |
+| `set_bridge_programs` | < 50 ms. Local files and memory only. |  | 8 ms |
+| `set_chat_name` | < 50 ms. Local files and memory only. |  | 9 ms |
+| `set_cli` | < 50 ms. Local files and memory only. |  | 15 ms |
+| `set_cli_wallet` | < 50 ms. Local files and memory only. |  | 10 ms |
+| `set_dm_name` | < 50 ms. Local files and memory only. |  | 8 ms |
+| `set_main_name` | < 50 ms. Local files and memory only. |  | 7 ms |
+| `set_names_network` | < 50 ms. Local files and memory only. |  | 17 ms |
+| `set_page` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 4001 ms |
+| `set_primary` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 4001 ms |
+| `set_private_keys` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `set_profile` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 3061 ms |
+| `set_registry` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `set_sequencer` | 5 s. | The new sequencer is asked its channel (`CHANNEL_WAIT`); a press, from tools only (the app never calls it). | 24 ms |
+| `set_text` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 4001 ms |
+| `set_token_program` | < 50 ms. Local files and memory only. |  | 8 ms |
+| `set_wallet_files` | < 50 ms. Local files and memory only. |  | 9 ms |
+| `settings` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 0 ms |
+| `spell_check` | About 200 ms. | The word list is checked in memory (the first call loads it). | 200 ms |
+| `token_source_holdings` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `token_sources` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `transfer` | 20 s for the CLI's accounts (`wallet::accounts`) plus 10 s per registry request, then the send. Wallet-files mode only; the app shows "Asking the wallet to sign…" at once. |  | 4001 ms |
+| `wallet` | 600 ms at most, 400 ms for a whole burst (`served::WAIT_BUDGET`). Read on a thread of its own; busy until the first read is back. |  | 0 ms |
+| `watch_token` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `watched_tokens` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `zone_add` | 5 s. | The new zone's sequencer is asked its channel (`CHANNEL_WAIT`); a press. | 0 ms |
+| `zone_list` | < 50 ms. Local files and memory only. |  | 25 ms |
+| `zone_remove` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `zone_rename` | < 50 ms. Local files and memory only. |  | 0 ms |
+| `zone_sequencer` | 10 s. | Home's channel when not known yet, then the new address's (`CHANNEL_WAIT` each); a press. | 0 ms |
+| `zone_use` | < 50 ms. Local files and memory only. |  | 0 ms |
+
+
+### What to watch in the owner's Basecamp log after installing this build
+
+The log has the names host's warnings (`[logos] [names] Warning: …`) and Basecamp's own lines. The
+names host's debug lines do not reach it. Read it from the `Module loaded: names` line on:
+
+1. **The stall is gone if** none of these pairs appear in the first minute: an unprefixed
+   `RemoteLogosObject: async callMethod timed out` followed by `qml: names_ui: <call>: No answer
+   from the wallet yet…`. Each such pair is a call that waited past Basecamp's 20 s. Busy lines
+   are expected and fine: `qml: names_ui: CLI balance: The wallet is busy; still working.`
+2. **The node, when slow or silent:** at most one `[names] Warning: RemoteLogosObject: async
+   callMethod timed out` about 1 s after the Names app opens (the first ask's short wait), then
+   at most one every 30 s or so (each ask may wait 15 s; a module that gave no answer is left
+   alone for 30 s). Many of these in a row would mean the hold isn't working.
+3. **The node's object, acquired once (the client kept per module):** a
+   `[names] Warning: RemoteTransportConnection: Timeout waiting for replica: "blockchain_module"`
+   means acquiring it held the names thread for the ask's wait (1 s for the first ask). It may
+   appear once after the host starts, or after the node is reloaded. Seen every few seconds, it
+   would mean the client isn't being kept. Then report it with the timestamps.
+4. `RemoteTransportConnection: no listener at … Is the module loaded?` must never appear for
+   blockchain_module from names: a node that isn't loaded is known from its endpoint first
+   (`peer.rs`).
+5. `[names] Warning: RemoteLogosObject: callRemoteMethod timed out` (the synchronous form) should
+   now appear only after a press on the node (a send, a claim, an account made or renamed, an
+   inscription), never while Names only opens and polls.
+6. **Timings:** `qml: names_ui: wallet has N funded account(s)` should follow the Names app's
+   opening by about the time one names CLI run takes on that wallet. No `app_grants`,
+   `backup_status`, `pending_requests`, `pending_inscriptions` or `the shipped lez_bridge.lgx
+   can't be checked` line should say "No answer".
+
+
+### What a kept read never does (names-stall-3 review, 2026-11-19)
+
+- **No failure kept long:** a node read that failed, or a transaction the node hasn't stored
+  yet (null), is asked again after 5 s (`node::KEEP`). Only a real block or transaction is kept
+  for the hour.
+- **Nothing decided from a read still on its way:** a Logos send stays "sending" until the node
+  has answered (never "unknown" from a busy read). A cut-off deposit stays "sending" until its walk
+  down the chain has found it (or walked all 600 blocks); the walk goes on by itself between
+  polls (`node::deposit_walk`), so it settles with its hash and fee.
+- **No read from before a change comes back after it:** the CLI's 15 s balance cache and its slow
+  reads (`BALANCE_GEN`), the background reads (`BoardRead::reading`), the node's kept answers and
+  the deposit walks (`node::forget`'s generation) drop an answer started before the change.
+- **After a claim, a burn or a faucet grant:** the bridge network's balances are read afresh
+  (`bridge_net_balances` with `{"accounts": […], "fresh": true}`, and on every approval). "Now
+  holds" is said only from a read made after the claim; the card asks again every 3 s for up to
+  2 min until there is one.
+- **The short first ask (1 s):** it bounds the host acquiring the node's object. Running out says
+  nothing about the node: it neither holds the module nor is kept as "didn't answer", and the next
+  ask waits the full 15 s.
+- **Bridge to Ethereum submits the amount it shows:** before planning, it reads the bridge's
+  amounts again and sends the index that list gives the shown amount. If that list no longer has
+  it, nothing is done and the person chooses again. A change of bridge drops the amounts held,
+  and a new send-back reads them afresh. "Change" shows whenever there is another amount or
+  another account (public or private) to choose.
