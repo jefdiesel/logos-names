@@ -1325,8 +1325,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("address step: not twice while the plan runs", st({ input: A, check: ok(A), ticked: true, asking: true }).canContinue, false);
   check("address step: the words of the design", [L.ADDRESS_CONTINUE, L.ADDRESS_TICK, L.ADDRESS_LAST_CHECK, L.ADDRESS_CHOOSE_TITLE, L.ADDRESS_SAVE_TITLE],
     ["I've checked the address — continue", "This is my address", "Last check before the burn. Withdrawals to a wrong address can't be recovered.", "Choose a previous address", "Save to my addresses"]);
-  check("address step: the words line says what and where", L.ADDRESS_WORDS_LINE, "These four words are a fingerprint of this address. The bridge page shows the same four when the same Ethereum wallet is connected.");
-  check("address step: step 3 says the burn is next", /^Next: the burn\./.test(L.ADDRESS_BURN_NEXT), true);
+  check("address step: the words line says what and where (roadmap 7: where to compare)", L.ADDRESS_WORDS_LINE, "These four words are a fingerprint of this address. Compare them on the bridge page: open nameswallet.app/bridge (Bridge to Ethereum) in your browser with that Ethereum wallet connected; it shows the same four words.");
+  check("address step: the next step is named for what it does (roadmap 7)", L.ADDRESS_BURN_NEXT.indexOf("Next: approve the burn") === 0, true);
+  check("address step: step 3 says the burn is next", /^Next: approve the burn /.test(L.ADDRESS_BURN_NEXT), true);
   check("address step: box key", [L.addressBoxKey(" " + A + " "), L.addressBoxKey("https://nameswallet.app/bridge/#" + CODE), L.addressBoxKey("nope")], [A, CODE, ""]);
 
   // The previous addresses: the book's names and words; an older bridge's recipients; each once.
@@ -1503,6 +1504,31 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const signed = "logoswd1qgqqqqqqqz4rdfa0hhceys6wnzytkg76umedzhh2vfrw6yrnluqczgjkarl95rrs7jk58am87gggjfsqht535d6mq4tkkf5zs4z4c03fwcyc7gyk9al6rl2784y0kuqyjsjx5e85ddvtkw89vjrfret5skh5wpew2mgaxaqrrdxnurahgfu6sjsm4xcna0";
   check("a signed code (198 characters) is taken whole from the box, a link or chat text", [L.sendBackCode(signed), L.sendBackCode("https://nameswallet.app/bridge/#" + signed.substr(0, 90) + "\n" + signed.substr(90)), L.addressBoxKey(" " + signed.toUpperCase() + " ")], [signed, signed, signed]);
   check("signature line: under the four words, as a status line", /StatusLine \{ readonly property var sig: Logic\.signatureLine\(root\.sbCheck\)/.test(qml), true);
+}
+
+// The UI issues of 2026-11-18 (item C).
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  const notice = "This account was imported. Its bridge secrets come from this wallet's recovery phrase, so the phrase can finish a withdrawal; the account's own key is still needed to move what stays in it.";
+  check("imported notice: in the card, plain, once", [L.importedNoticeLine({ account_notice: notice }), L.importedNoticeLine({ account_notice: "a\u202eb\n c" }), L.importedNoticeLine({}), L.importedNoticeLine(null)], [notice, "a b c", "", ""]);
+  check("imported notice: shown in the card, not only under Details", /StatusLine \{ visible: text !== ""; kind: ""; text: Logic\.importedNoticeLine\(receiveScreen\.result\) \}/.test(qml) && !/receiveScreen\.result\.account_notice\) : ""/.test(qml), true);
+  check("deposit secret: said once and truly", [L.receiveSecretLine({ account_notice: notice }).indexOf("recovery phrase") > 0 && L.receiveSecretLine({ account_notice: notice }).indexOf("own key") < 0, L.receiveSecretLine({}).indexOf("own key") > 0 && L.receiveSecretLine({}).indexOf("recovery phrase") < 0], [true, true]);
+  check("the accounts are read again when Bridge to Ethereum or Move opens", /function openSendBack\(account, asset, focusId\) \{\n        walletView = "sendback"\n[^\n]*\n        loadAccounts\(\)/.test(qml) && /loadBackupStatus\(\)\n        loadAccounts\(\)\n        walletView = "bridgemove"/.test(qml), true);
+  check("Bridge to Ethereum step 1: another bridge's balance said beside private accounts too", /visible: \(root\.sbSources\.length > 0 \|\| root\.sbPrivateSources\.length > 0\) && root\.sbElsewhere !== ""/.test(qml), true);
+}
+
+// E: the LEZ Bridge module's text on the bridge and claim screens is cleaned and drawn as plain text
+// (LP0001 job B report: Hints default to AutoText, so markup in a remote message could render).
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("bridge text: hidden characters gone, markup left as text", L.clean("<b>bad</b>\u202e\u200b ok"), "<b>bad</b> ok");
+  const hints = qml.split("\n").filter((l) => /Hint \{/.test(l) && /\.message|\.error\b|\.note\b|\.notice|\.reason|claimLine/.test(l));
+  check("bridge text: every hint showing a module's message, error, note, notice or reason is plain text", hints.filter((l) => !/textFormat: Text\.PlainText/.test(l)).length, 0);
+  check("bridge text: no raw String(…message) left in a hint", hints.filter((l) => /String\([^)]*\.(message|note|notice|reason) \|\| ""\)/.test(l)).length, 0);
+  check("bridge text: the send-back check and plan errors are cleaned", /sbCheckError = e\.message \? sentence\(Logic\.clean\(e\.message\)\)/.test(qml) && /sbError = e\.message \? sentence\(Logic\.clean\(e\.message\)\)/.test(qml), true);
+  check("bridge text: the claim's phases are plain and cleaned", /textFormat: Text\.PlainText\n[^\n]*\n[^\n]*\n[^\n]*Logic\.clean\(modelData\.hint\)/.test(qml), true);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

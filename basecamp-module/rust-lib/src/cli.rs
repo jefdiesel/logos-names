@@ -1789,6 +1789,29 @@ pub fn job_problem(kind: &str, log: &str) -> String {
     format!("{what}: {}", failure_cause(log))
 }
 
+/// Whether the wallet file in `wallet` changed (its modification time or length) since this asked
+/// last for that folder; true the first time. An account the names tool imported into the wallet
+/// shows on the next read of the accounts, with no Refresh and no polling (test of 2026-11-18).
+pub fn wallet_changed(wallet: &Path) -> bool {
+    static SEEN: std::sync::Mutex<Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>> = std::sync::Mutex::new(Vec::new());
+    let now = std::fs::metadata(wallet.join(STORAGE_FILE)).ok().and_then(|meta| meta.modified().ok().map(|at| (at, meta.len())));
+    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match seen.iter_mut().find(|(dir, _)| dir == wallet) {
+        Some((_, last)) if *last == now => false,
+        Some((_, last)) => {
+            *last = now;
+            true
+        }
+        None => {
+            if seen.len() >= 16 {
+                seen.remove(0);
+            }
+            seen.push((wallet.to_owned(), now));
+            true
+        }
+    }
+}
+
 /// The last line of `text` that says something.
 pub fn last_line(text: &str) -> &str {
     text.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap_or("")
@@ -2931,6 +2954,21 @@ mod tests {
         let (payer, claims) = parse_claims(&log);
         assert_eq!(payer.as_deref(), Some(a));
         assert_eq!(claims, vec![(b.to_owned(), 1000)], "only the claim that landed");
+    }
+
+    #[test]
+    fn a_changed_wallet_file_is_noticed_once() {
+        let dir = scratch_dir("wallet-changed");
+        std::fs::write(dir.join(STORAGE_FILE), "{}").unwrap();
+        assert!(wallet_changed(&dir), "the first look");
+        assert!(!wallet_changed(&dir), "nothing changed");
+        // An import rewrites the file (another length here; a new time too on a real one).
+        std::fs::write(dir.join(STORAGE_FILE), "{\"key_chain\":{}}").unwrap();
+        assert!(wallet_changed(&dir), "the import is noticed");
+        assert!(!wallet_changed(&dir), "once");
+        std::fs::remove_file(dir.join(STORAGE_FILE)).unwrap();
+        assert!(wallet_changed(&dir), "a wallet gone is a change too");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

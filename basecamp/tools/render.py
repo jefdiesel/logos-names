@@ -1296,6 +1296,16 @@ MOVE = [
 ]
 for _name, _js in MOVE:
     SCENARIOS[_name] = _js
+# An imported account's deposit code (item C): its notice in the card, the secret line in Details said once.
+SCENARIOS["receive-code-imported-card"] = ('root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); '
+    'root.againAfter(300, function() { root.receiveResult = Object.assign({}, %s, { account_notice: %s }); root.receiveDetails = true }) }) })'
+    % (json.dumps(MOCKS["receive-code"]["bridge"]["make_public_deposit_request"]), json.dumps(_IMPORTED_LINE)))
+HEIGHTS_EXTRA = {"receive-code-imported-card": 1700}
+# Signed withdraw-to codes (roadmap 9): the bridge says the code is signed by its recipient, or not.
+SCENARIOS["sendback-words-signed"] = SCENARIOS["sendback-words"]
+MOCKS["sendback-words-signed"] = sb_mock(send_back_check=dict(SB_CHECK, signed=True, signed_by=SB_RECIPIENT, signature_line="(the module's line is not shown)"))
+SCENARIOS["sendback-words-unsigned"] = SCENARIOS["sendback-words"]
+MOCKS["sendback-words-unsigned"] = sb_mock(send_back_check=dict(SB_CHECK, signed=False, signed_by=None))
 
 def _ago(text):
     """A job's start in a mock ("@AGO:n@"): n seconds before this render, in ms."""
@@ -1306,6 +1316,7 @@ HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
 HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("sendback-address") or name.startswith("sendback-approve")})
 HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
 HEIGHTS.update({name: 1500 for name, _j in MOVE})
+HEIGHTS.update(HEIGHTS_EXTRA)
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

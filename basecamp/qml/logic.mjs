@@ -3047,12 +3047,12 @@ export const ADDRESS_BOX_HINT = "Paste the withdraw-to code from the bridge page
 export const ADDRESS_BOX_HINT_CODE = "Paste the withdraw-to code from the bridge page (logoswd1…). Copy it, don't type it."
 export const ADDRESS_GET_CODE = "No code yet? Copy the link, open it in the browser with your Ethereum wallet and connect: the page shows the code."
 export const ADDRESS_CHOOSE_TITLE = "Choose a previous address"
-export const ADDRESS_WORDS_LINE = "These four words are a fingerprint of this address. The bridge page shows the same four when the same Ethereum wallet is connected."
+export const ADDRESS_WORDS_LINE = "These four words are a fingerprint of this address. Compare them on the bridge page: open nameswallet.app/bridge (Bridge to Ethereum) in your browser with that Ethereum wallet connected; it shows the same four words."
 export const ADDRESS_TICK = "This is my address"
 export const ADDRESS_LAST_CHECK = "Last check before the burn. Withdrawals to a wrong address can't be recovered."
 export const ADDRESS_CONTINUE = "I've checked the address — continue"
 /// Step 3 (the burn's approval): the address and its words stay; the burn is what comes next.
-export const ADDRESS_BURN_NEXT = "Next: the burn. Approve it in your wallet's sheet; once it is sent it can't be undone."
+export const ADDRESS_BURN_NEXT = "Next: approve the burn in your wallet's sheet. Once it is sent it can't be undone."
 export const ADDRESS_SAVE_TITLE = "Save to my addresses"
 export const ADDRESS_SAVE_NOTE = "The name stays in this wallet on this computer, never on chain."
 
@@ -3330,4 +3330,23 @@ export function signatureLine(check) {
     if (!check || (check.signed !== true && check.signed !== false))
         return { kind: "", text: "" }
     return check.signed === true ? { kind: "done", text: SIGNED_LINE } : { kind: "", text: UNSIGNED_LINE }
+}
+
+// ── Imported accounts on Receive from Ethereum (test of 2026-11-18) ──
+
+/// The bridge's one-time notice for an imported account (`account_notice` on the deposit code's
+/// answer), for the card itself: plain text, at most 400 characters, or "".
+export function importedNoticeLine(result) {
+    var t = result && result.account_notice ? String(result.account_notice) : ""
+    t = t.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim()
+    return t.length > 400 ? t.substr(0, 399) + "…" : t
+}
+
+/// Where the deposit's secret comes from, said once and truly: an imported account's from the
+/// recovery phrase (the bridge's `account_notice` says so), every other account's from its own key.
+export function receiveSecretLine(result) {
+    var imported = !!(result && result.account_notice)
+    return (imported ? "The wallet makes this deposit's secret from your recovery phrase, because this account was imported; this app never sees it."
+                     : "The wallet makes this deposit's secret from your account's own key; this app never sees it.")
+        + " The page gets only a code: the amount, the vault and a commitment that hides which account receives it."
 }

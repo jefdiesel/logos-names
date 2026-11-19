@@ -1967,6 +1967,8 @@ Item {
     /// `focusId` (a card row).
     function openSendBack(account, asset, focusId) {
         walletView = "sendback"
+        // The accounts as the wallet file has them now (an account imported meanwhile shows at once).
+        loadAccounts()
         sbError = ""
         sbNeeds = null
         sbCheck = null
@@ -2059,7 +2061,7 @@ Item {
                 sbCheck = Object.assign({}, value, { key: key, code: value.code ? String(value.code) : code })
             else {
                 var e = value && value.error ? value.error : {}
-                sbCheckError = e.message ? sentence(String(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
+                sbCheckError = e.message ? sentence(Logic.clean(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
                 sbCheckErrorKey = key
             }
         }, function(message, kind) {
@@ -2111,7 +2113,7 @@ Item {
             }
             if (value && value.ok === false) {
                 var e = value.error || {}
-                sbError = e.message ? sentence(String(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
+                sbError = e.message ? sentence(Logic.clean(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
                 return
             }
             if (!value || !value.id) {
@@ -6858,6 +6860,7 @@ Item {
         moveProblem = ""
         try { moveToField.text = ""; moveAmountField.text = "" } catch (e) {}
         loadBackupStatus()
+        loadAccounts()
         walletView = "bridgemove"
     }
     /// Where the tokens go: the account picked, else what was typed.
@@ -8575,7 +8578,7 @@ Item {
             font.weight: Font.DemiBold
             wrapMode: Text.WordWrap
         }
-        Hint { visible: waitPanel.view !== null && waitPanel.view.detail !== ""; font.pixelSize: root.px(15); text: waitPanel.view !== null ? waitPanel.view.detail : "" }
+        Hint { textFormat: Text.PlainText; visible: waitPanel.view !== null && waitPanel.view.detail !== ""; font.pixelSize: root.px(15); text: waitPanel.view !== null ? waitPanel.view.detail : "" }
         Hint { visible: waitPanel.waiting; color: root.ink; text: Logic.PRIVATE_LEAVE_LINE }
         Hint { visible: waitPanel.waiting && root.proofWarning !== ""; font.pixelSize: root.px(15); text: root.proofWarning }
         // The wallet was busy when asked: the job goes on; asked again at the next check.
@@ -9657,7 +9660,7 @@ Item {
                         enabledNow: root.hasCliWallet && root.canShield && root.shieldJob === null
                         onPressed: root.moveToPrivate()
                     }
-                    Hint { visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(16); text: root.shieldLine() }
+                    Hint { textFormat: Text.PlainText; visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(16); text: root.shieldLine() }
                     StatusLine { visible: root.shieldProblem !== "" && root.shieldJob === null; kind: Logic.noticeKind(root.shieldProblem, true); text: root.shieldProblem }
                     Hint {
                         visible: root.hasPrivateFunds && root.shieldJob === null
@@ -11505,20 +11508,21 @@ Item {
                         }
                         Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + (root.receivePrivateAble ? " For a private claim, make a private code on Receive from Ethereum." : " Private claims aren't in this wallet yet.") : "" }
                         Hint { visible: root.claimCheck !== null && !!root.claimCheck.approval; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.approval ? root.claimCheck.approval : "" }
-                        Hint { visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + String(root.claimCheck.error.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + Logic.clean(root.claimCheck.error.message) : "" }
                         Repeater {
                             model: root.depositClaimJob !== null ? Logic.claimPhases(root.depositClaimJob) : []
                             Hint {
                                 required property var modelData
+                                textFormat: Text.PlainText
                                 font.pixelSize: root.px(15)
                                 color: modelData.done ? root.good : modelData.now ? root.brass : root.dim
-                                text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + modelData.hint
+                                text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + Logic.clean(modelData.hint)
                             }
                         }
-                        Hint { visible: root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? root.depositClaimJob.note : "" }
-                        Hint { visible: root.depositClaimJob !== null && !!root.depositClaimJob.error; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) + ": " + String(root.depositClaimJob.error.message || "") : "" }
-                        Hint { visible: root.claimUncertain !== null; font.pixelSize: root.px(15); text: root.claimUncertain !== null ? String(root.claimUncertain.message || "") : "" }
-                        Hint { visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? String(root.claimNeeds.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? Logic.clean(root.depositClaimJob.note) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.error; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) + ": " + Logic.clean(root.depositClaimJob.error.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimUncertain !== null; font.pixelSize: root.px(15); text: root.claimUncertain !== null ? Logic.clean(root.claimUncertain.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? Logic.clean(root.claimNeeds.message) : "" }
                     }
 
                     Link {
@@ -11625,13 +11629,13 @@ Item {
                         Hint { font.pixelSize: root.px(15); text: "LEZ 0.4 · bridge test network. The LEZ Bridge builds the claim and asks your wallet; your wallet simulates it, shows you what it does, then proves it on this computer and sends it. The bridge never sees your keys and never proves." }
                         Fact { visible: pclaimScreen.row !== null; label: "Into"; code: true; value: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : ""; full: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : "" }
                         Fact { visible: root.pcPlan !== null && root.pcPlan.sponsored !== undefined && root.pcPlan.sponsored !== null; label: "Fee"; value: root.pcPlan !== null && root.pcPlan.sponsored === true ? "Sponsored by the bridge, paid inside the proof" : "Paid inside the proof from the account" }
-                        Hint { visible: root.pcPlan !== null && !!root.pcPlan.privacy && !!root.pcPlan.privacy.headline; font.pixelSize: root.px(15); text: root.pcPlan !== null && root.pcPlan.privacy ? String(root.pcPlan.privacy.headline || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.pcPlan !== null && !!root.pcPlan.privacy && !!root.pcPlan.privacy.headline; font.pixelSize: root.px(15); text: root.pcPlan !== null && root.pcPlan.privacy ? String(root.pcPlan.privacy.headline || "") : "" }
                         Repeater {
                             model: root.pcPlan !== null && root.pcPlan.privacy && Array.isArray(root.pcPlan.privacy.notes) ? root.pcPlan.privacy.notes : []
                             Hint { required property var modelData; font.pixelSize: root.px(15); text: String(modelData) }
                         }
                         Hint { visible: root.pcRefused !== null && !!root.pcRefused.code; font.pixelSize: root.px(15); text: root.pcRefused !== null ? Logic.claimErrorTitle(root.pcRefused.code) + " (" + String(root.pcRefused.code || "") + ")" : "" }
-                        Hint { visible: root.pcNeeds !== null && !!root.pcNeeds.message; font.pixelSize: root.px(15); text: root.pcNeeds !== null ? String(root.pcNeeds.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.pcNeeds !== null && !!root.pcNeeds.message; font.pixelSize: root.px(15); text: root.pcNeeds !== null ? Logic.clean(root.pcNeeds.message) : "" }
                         Fact { visible: root.pcJobNow !== null; label: "Job"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.id : ""; full: root.pcJobNow !== null ? root.pcJobNow.id : "" }
                         Fact { visible: root.pcJobNow !== null && root.pcJobNow.tx !== ""; label: "Transaction"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.tx : ""; full: root.pcJobNow !== null ? root.pcJobNow.tx : "" }
                     }
@@ -11807,7 +11811,7 @@ Item {
                                    ? " · " + Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment) : ".")
                                 : receiveScreen.p.headline
                         }
-                        Hint { visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
                         Hint {
                             visible: receiveScreen.p.stage === "claimable" && root.receiveFocusRow !== null
                             color: root.ink
@@ -11842,6 +11846,9 @@ Item {
                         }
                     }
 
+                    // An imported account (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): what the phrase can and can't do for it,
+                    // said once in the card itself, not only under Details (test of 2026-11-18).
+                    StatusLine { visible: text !== ""; kind: ""; text: Logic.importedNoticeLine(receiveScreen.result) }
                     Link {
                         visible: !root.receiveMissing && !root.appInline
                         text: root.receiveDetails ? "Details ▾" : "Details ▸"
@@ -11853,14 +11860,14 @@ Item {
                         visible: root.receiveDetails && !root.receiveMissing && !root.appInline
                         Layout.fillWidth: true
                         spacing: 10
-                        Hint { font.pixelSize: root.px(15); text: "The wallet makes this deposit's secret from your account's own key; this app never sees it. The page gets only a code: the amount, the vault and a commitment that hides which account receives it." }
-                        Hint { visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: Logic.receiveSecretLine(receiveScreen.result) }
+                        Hint { textFormat: Text.PlainText; visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
                         Hint { visible: !root.receivePrivateAble; font.pixelSize: root.px(15); text: "This LEZ Bridge can't make private codes yet: their claim needs a proof made on this computer, which a newer LEZ Bridge offers." }
                         Hint { visible: root.receivePrivateAble; font.pixelSize: root.px(15); text: "A private code's deposit is claimed by a proof your wallet makes on this computer (" + Logic.PRIVATE_PROOF_TIME + ", about 9.5 GB of memory). Nothing public then links the Sepolia deposit to your account; the amount, the token and the timing are public." }
                         Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: receiveScreen.resultAccount; full: receiveScreen.resultAccount }
-                        Hint { visible: receiveScreen.refusal !== null && receiveScreen.refusal.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.refusal !== null ? receiveScreen.refusal.detail : "" }
-                        Hint { visible: receiveScreen.releaseNotice !== null; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.text) : "" }
-                        Hint { visible: receiveScreen.releaseNotice !== null && !!receiveScreen.releaseNotice.detail; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.detail || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.refusal !== null && receiveScreen.refusal.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.refusal !== null ? receiveScreen.refusal.detail : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.releaseNotice !== null; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.text) : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.releaseNotice !== null && !!receiveScreen.releaseNotice.detail; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.detail || "") : "" }
                         Hint { visible: receiveScreen.result !== null; font.pixelSize: root.px(15); text: "Text copied in Names may not reach another computer through Screen Sharing: paste the link in a browser on this computer, use the QR (On your phone), or select it below." }
                         // The link as text that can be selected by hand.
                         TextEdit {
@@ -11877,13 +11884,11 @@ Item {
                         }
                         Fact { visible: receiveScreen.result !== null; label: "Code"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : "" }
                         Fact { visible: receiveScreen.result !== null && !!receiveScreen.result.commitment; label: "Commitment"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : "" }
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
-                        // An imported account (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): what the phrase can and can't do for it.
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.account_notice; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.account_notice ? String(receiveScreen.result.account_notice) : "" }
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
                         Hint { visible: text !== ""; font.pixelSize: root.px(15); text: Logic.compareDigitsDetail(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
-                        Hint { visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? String(root.receiveNeeds.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? Logic.clean(root.receiveNeeds.message) : "" }
                     }
                     Link { visible: receiveScreen.shows && (root.receiveFocus !== "" || receiveScreen.result !== null); text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.startNewReceive() }
                 }
@@ -11944,7 +11949,8 @@ Item {
                                 }
                             }
                         }
-                        Hint { visible: root.sbSources.length > 0 && root.sbElsewhere !== ""; font.pixelSize: root.px(15); text: root.sbElsewhere }
+                        // Also when only private accounts are listed (test of 2026-11-18: a v6 balance went unsaid).
+                        Hint { visible: (root.sbSources.length > 0 || root.sbPrivateSources.length > 0) && root.sbElsewhere !== ""; font.pixelSize: root.px(15); text: root.sbElsewhere }
                         // From a private account (a newer LEZ Bridge): proved on this computer first.
                         Flow {
                             visible: root.sbPrivateSources.length > 0
@@ -12115,9 +12121,9 @@ Item {
                             kind: Logic.toneKind(sendBackScreen.p.tone)
                             text: sendBackScreen.p.headline
                         }
-                        Hint { visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
+                        Hint { textFormat: Text.PlainText; visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
                         // The steps done by hand today, said once, here.
-                        Hint { visible: Logic.sendBackByHand(sendBackScreen.p.stage) && sendBackScreen.p.action !== "settle" && sendBackScreen.p.gate !== true; font.pixelSize: root.px(15); text: Logic.sendBackByHandLine(sendBackScreen.p.stage) }
+                        Hint { textFormat: Text.PlainText; visible: Logic.sendBackByHand(sendBackScreen.p.stage) && sendBackScreen.p.action !== "settle" && sendBackScreen.p.gate !== true; font.pixelSize: root.px(15); text: Logic.sendBackByHandLine(sendBackScreen.p.stage) }
                         Hint {
                             visible: root.sbFocusRow !== null
                             color: root.ink
@@ -12125,7 +12131,7 @@ Item {
                                 + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? "; you receive " + sendBackScreen.st.receive_text + "." : ".")
                         }
                         Hint { visible: root.sbFocusRow !== null && root.sbFocusRow.words !== ""; font.pixelSize: root.px(15); text: root.sbFocusRow !== null ? "Its words: " + root.sbFocusRow.words : "" }
-                        Hint { visible: root.sbFocusRow !== null && !!root.sbFocusRow.notice; font.pixelSize: root.px(15); text: root.sbFocusRow !== null && root.sbFocusRow.notice ? String(root.sbFocusRow.notice) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.sbFocusRow !== null && !!root.sbFocusRow.notice; font.pixelSize: root.px(15); text: root.sbFocusRow !== null && root.sbFocusRow.notice ? String(root.sbFocusRow.notice) : "" }
                         // After the first send to an address with no name here: "Save to my addresses" with
                         // a short name (kept by the LEZ Bridge on this computer, never on chain).
                         ColumnLayout {
@@ -12183,7 +12189,7 @@ Item {
                                 font.family: root.mono
                                 font.pixelSize: root.px(13)
                             }
-                            Hint { font.pixelSize: root.px(15); text: root.sbWitness !== null && root.sbWitness.note ? String(root.sbWitness.note) : "" }
+                            Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: root.sbWitness !== null && root.sbWitness.note ? String(root.sbWitness.note) : "" }
                         }
                         // The proof's Ethereum wrapper, by hand today: the seal the bridge team sends.
                         ColumnLayout {
@@ -12258,7 +12264,7 @@ Item {
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.exit_commitment; label: "Exit"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.burn_tx; label: "Burn"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.released_tx; label: "Released"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : "" }
-                        Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + String(root.sbFocusStatus.text) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + String(root.sbFocusStatus.text) : "" }
                         TextEdit {
                             visible: root.sbRelease !== null && root.sbRelease.id === root.sbFocus
                             Layout.fillWidth: true
@@ -12428,7 +12434,7 @@ Item {
                             onPressed: { root.removeToken(accountPage.row.definition); root.walletView = "home" }
                         }
                     }
-                    Hint { visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
+                    Hint { textFormat: Text.PlainText; visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
                     Hint { visible: accountPage.row !== null && !!accountPage.row.later; font.pixelSize: root.px(14); text: Logic.chainLaterNote() }
                     Hint { visible: accountPage.send.switchFirst; font.pixelSize: root.px(14); text: "Send makes this the account payments come from, then opens the form." }
                     StatusLine { visible: root.accountsError !== ""; kind: Logic.noticeKind(root.accountsError, true); text: root.accountsError }
@@ -12723,7 +12729,7 @@ Item {
                             kind: "problem"
                             text: Logic.amountProblem(privateMoveField.text)
                         }
-                        Hint { visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(15); text: root.shieldLine() }
+                        Hint { textFormat: Text.PlainText; visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(15); text: root.shieldLine() }
                         Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
                         StatusLine { visible: root.shieldProblem !== "" && root.shieldJob === null; kind: Logic.noticeKind(root.shieldProblem, true); text: root.shieldProblem }
                     }
@@ -13518,7 +13524,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 8
                         // The bridge in use: its name, vault, its four words (the bridge page shows the same).
-                        Hint { color: root.ink; text: Logic.bridgeActiveLine(root.bridgeList) }
+                        Hint { textFormat: Text.PlainText; color: root.ink; text: Logic.bridgeActiveLine(root.bridgeList) }
                         Text {
                             visible: text !== ""
                             Layout.fillWidth: true
@@ -13537,7 +13543,7 @@ Item {
                                 required property var modelData
                                 Layout.fillWidth: true
                                 spacing: 12
-                                Hint { Layout.fillWidth: true; color: root.ink; font.pixelSize: root.px(15); text: Logic.bridgeRowLine(modelData) }
+                                Hint { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.ink; font.pixelSize: root.px(15); text: Logic.bridgeRowLine(modelData) }
                                 Action { label: root.bridgeActing === modelData.id ? "Choosing…" : "Use"; enabledNow: root.bridgeActing === "" && modelData.has_code !== false; onPressed: root.useBridge(modelData.id) }
                                 Link { visible: modelData.removable === true; text: root.bridgeActing === modelData.id ? "Removing…" : "Remove"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.removeBridge(modelData.id) }
                             }
@@ -13614,8 +13620,8 @@ Item {
                         }
                     }
                     Part { text: "Backup" }
-                    Hint { color: root.ink; text: Logic.backupLastLine(root.backupStatus !== null ? root.backupStatus.last : null, root.backupWhen) }
-                    Hint { visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.ink; text: Logic.backupUncoveredLine(root.backupStatus) }
+                    Hint { textFormat: Text.PlainText; color: root.ink; text: Logic.backupLastLine(root.backupStatus !== null ? root.backupStatus.last : null, root.backupWhen) }
+                    Hint { textFormat: Text.PlainText; visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.ink; text: Logic.backupUncoveredLine(root.backupStatus) }
                     RowLayout {
                         visible: root.backupMode === ""
                         spacing: 14
@@ -13668,7 +13674,7 @@ Item {
                         spacing: 8
                         readonly property var checked: Logic.backupCheckedLine(root.backupMade !== null ? root.backupMade.check : null)
                         Hint { color: parent.checked.ok ? root.good : root.ink; text: (parent.checked.ok ? "✓ " : "") + parent.checked.text }
-                        Hint { font.pixelSize: root.px(15); text: root.backupMade !== null ? Logic.backupFoldersLine(root.backupMade.folders) : "" }
+                        Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: root.backupMade !== null ? Logic.backupFoldersLine(root.backupMade.folders) : "" }
                         RowLayout {
                             spacing: 14
                             Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: root.backupMade !== null ? root.backupMade.file : "" }
@@ -14097,7 +14103,7 @@ Item {
                             font.pixelSize: root.px(16)
                             onPressed: root.claimName(root.missing)
                         }
-                        Hint { visible: root.claimLine !== ""; text: root.claimLine }
+                        Hint { textFormat: Text.PlainText; visible: root.claimLine !== ""; text: root.claimLine }
                     }
                     Hint {
                         visible: root.namesNet === "0.4"
@@ -14232,7 +14238,7 @@ Item {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.publishOnRegister = !root.publishOnRegister }
                             }
                         }
-                        Hint { visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
+                        Hint { textFormat: Text.PlainText; visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
                         Action {
                             label: "Register " + root.missing + " publicly"
                             strong: root.cliPath === ""
@@ -14549,7 +14555,7 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            Hint { visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["change"]) }
+                            Hint { textFormat: Text.PlainText; visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["change"]) }
                             Action {
                                 label: "Save profile"
                                 strong: true

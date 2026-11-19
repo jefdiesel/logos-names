@@ -6480,6 +6480,11 @@ impl NamesModule for Names {
             Ok(setup) => setup,
             Err(why) => return reply(Err(why)),
         };
+        // An account added to the wallet file by another program (the names tool's import) shows
+        // on this read, not only after Refresh: a changed file drops what was kept.
+        if cli::wallet_changed(&setup.wallet) {
+            self.forget_balances();
+        }
         // The CLI lists them (seconds when it catches the wallet up): on a thread of its own.
         let key = self.served_key("cli_accounts", &format!("{}|{}", setup.wallet.display(), setup.sequencer));
         let snap = self.served.read(&key, ACCOUNTS_EVERY, served::Lane::Cli, move || {
