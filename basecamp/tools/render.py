@@ -1211,7 +1211,7 @@ for _name, _js, _mock in PRIVATE_SCENARIOS:
     MOCKS[_name] = _mock
 
 # Bridge to Ethereum from a private account.
-PV_SB_CARD = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); root.bridgedHoldings = %s; %%s }) })' % (
+PV_SB_CARD = 'root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.bridgeConfig = %s; root.loadBridgeNet(); root.bridgedHoldings = %s; root.sendBacksLoaded = true; %%s }) })' % (
     json.dumps(PV_CONFIG), json.dumps([{"token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "app": "lez_bridge", "holdings": [{"account": PRIV, "account_kind": "private", "definition": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw", "symbol": "wETH", "balance": "100000000000000000", "decimals": 18}]}]))
 PV_SB_ID = "sb-p1"
 def pv_sb_focus(stage, job, extra=""):
