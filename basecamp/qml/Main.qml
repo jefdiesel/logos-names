@@ -10775,7 +10775,7 @@ Item {
                             required property var modelData
                             spacing: 6
                             NameCard { name: modelData.name; side: root.px(240) }
-                            Hint { font.pixelSize: root.px(13); text: "1 of 1 · moves with " + modelData.name + " · " + Logic.keyShown(root.nameDeeds[modelData.name].deed.definition) }
+                            Hint { font.pixelSize: root.px(13); text: Logic.keyShown(root.nameDeeds[modelData.name].deed.definition) }
                         }
                     }
                 }
@@ -12738,7 +12738,7 @@ Item {
                                         enabledNow: root.boardJob === null
                                         onPressed: root.claimDeed(myName.modelData.name)
                                     }
-                                    Hint { visible: !parent.deedInfo.deed; Layout.fillWidth: true; font.pixelSize: root.px(14); text: root.deedClaiming(myName.modelData.name) ? "Claiming its NFT card on LEZ 0.4: about a minute. Only gas is paid." : "A 1-of-1 card with your name on it, tied to the name. Free: only gas." }
+                                    Hint { visible: !parent.deedInfo.deed; Layout.fillWidth: true; font.pixelSize: root.px(14); text: root.deedClaiming(myName.modelData.name) ? "Claiming its NFT card on LEZ 0.4: about a minute. Only gas is paid." : "A card with your name on it. Free: only gas." }
                                 }
                                 StatusLine { visible: root.deedLine !== "" && root.deedLineName === myName.modelData.name; kind: "done"; text: root.deedLine }
                                 // Publishing its account: said under its own row.
