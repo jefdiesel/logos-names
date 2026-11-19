@@ -78,10 +78,17 @@ pub enum Request {
     /// base_fee_exec, base_fee_stor, public_transfer: {about, at_most}, private_transfer}`.
     Fee,
     /// The values an app asked for with `app_secret` (Wallet Provider SDK), from the JSON on
-    /// standard input: `{app, account, scope, context, tag, first, count}`; prints `{account,
+    /// standard input: `{app, account, scope, context, tag, first, count, scheme?}` (`scheme`: the
+    /// one the module pinned for the account, which then always wins); prints `{account,
     /// values, scheme}` (`scheme`: `phrase` or `imported`). The Basecamp module checks the app and
     /// its grant first; see `app_secret.rs`.
     AppSecret,
+    /// Import ONE public account by its signing key, from the JSON on standard input:
+    /// `{private_key: <64 hex>, account?: "Public/<id>", label?}` (never on the command line, so
+    /// never in `ps`). Refused when the key is for another account than `account`, or the wallet
+    /// has it already. Prints the account as one `account-list` entry, with `imported: true`. The
+    /// recovery phrase does NOT cover it. Errors never carry the key.
+    AccountImport,
     /// Whether one of this wallet's accounts is imported, from `{account}` on standard input;
     /// prints `{account, scheme}`. Derives nothing: what a secret request says before approval.
     AccountScheme,
@@ -183,6 +190,18 @@ impl Client {
                 std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).context("cannot read the request")?;
                 let request: serde_json::Value = serde_json::from_slice(&input).context("not a request")?;
                 self.app_secret(&request)
+            }
+            Request::AccountImport => {
+                // Room up front, so growing the buffer never leaves an unzeroed copy of the key behind.
+                let mut input = Vec::with_capacity(64 * 1024);
+                let read = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input);
+                let done = match read {
+                    Ok(_) => self.module_account_import(&input).await,
+                    Err(_) => Err(anyhow!("cannot read the request")),
+                };
+                // The key's text goes as soon as it is read.
+                input.iter_mut().for_each(|b| *b = 0);
+                done
             }
             Request::AccountScheme => {
                 let mut input = Vec::new();
@@ -310,6 +329,65 @@ impl Client {
         }
         save_defaults(&defaults)?;
         println!("{}", self.account_entry(private, id, &defaults).await);
+        Ok(())
+    }
+
+    /// See [`Request::AccountImport`]. Every refusal is a fixed sentence: nothing of the input is
+    /// ever printed.
+    async fn module_account_import(&mut self, input: &[u8]) -> Result<()> {
+        let mut request: serde_json::Value = serde_json::from_slice(input).map_err(|_| anyhow!("not an import request"))?;
+        // The key's text is taken out of the parsed request and zeroed as soon as its 32 bytes are read.
+        let mut key_text = match request.get_mut("private_key").map(serde_json::Value::take) {
+            Some(serde_json::Value::String(text)) => text,
+            _ => String::new(),
+        };
+        let mut key = [0u8; 32];
+        let read = {
+            let t = key_text.trim().trim_start_matches("0x");
+            if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+                key.iter_mut().enumerate().all(|(i, byte)| u8::from_str_radix(&t[2 * i..2 * i + 2], 16).map(|v| *byte = v).is_ok())
+            } else {
+                false
+            }
+        };
+        // SAFETY: zero bytes are valid UTF-8; the string is emptied right after.
+        unsafe { key_text.as_bytes_mut() }.fill(0);
+        key_text.clear();
+        if !read {
+            key.iter_mut().for_each(|b| *b = 0);
+            bail!("that isn't a signing key: a public account's key is 64 hex digits");
+        }
+        let private_key = lee::PrivateKey::try_new(key).map_err(|_| anyhow!("that isn't a usable signing key"));
+        key.iter_mut().for_each(|b| *b = 0);
+        let private_key = private_key?;
+        let id = lee::AccountId::from(&lee::PublicKey::new_from_private_key(&private_key));
+        if let Some(asked) = request["account"].as_str().filter(|a| !a.trim().is_empty()) {
+            let asked = parse_account(asked.trim()).map_err(|_| anyhow!("the account given isn't an account ID"))?;
+            if asked != id {
+                bail!("that key is for another account than the one given; nothing was imported");
+            }
+        }
+        if self.wallet.get_account_public_signing_key(id).is_some() {
+            bail!("this wallet has that account already; nothing was imported");
+        }
+        // A key this wallet's own recovery phrase makes (an account a smaller restore didn't make
+        // yet): imported, its bridge values would follow the imported scheme until "New account"
+        // reached it and turned them into the phrase scheme's. It is added the phrase's way instead.
+        let key_chain = self.wallet.storage().key_chain();
+        if crate::private_call::scheme_classify::phrase_gives(key_chain, false, id, None, crate::private_call::LOOK_AHEAD) {
+            bail!("that key is an account of this wallet's own recovery phrase; add it with New account instead; nothing was imported");
+        }
+        let label = checked_label(request["label"].as_str().unwrap_or(""))?;
+        self.wallet.storage_mut().key_chain_mut().add_imported_public_account(private_key);
+        crate::save_wallet(&mut self.wallet)?;
+        let mut defaults = load_defaults();
+        if !label.is_empty() {
+            defaults.labels.insert(format!("Public/{id}"), label);
+            save_defaults(&defaults)?;
+        }
+        let mut entry = self.account_entry(false, id, &defaults).await;
+        entry["imported"] = serde_json::Value::Bool(true);
+        println!("{entry}");
         Ok(())
     }
 

@@ -1,0 +1,44 @@
+{
+ "format": "burn opening, v1",
+ "spec": "modules/NAMES-SEND-BACK.md §3.3a; generator modules/tools/make-burn-opening-vector.py",
+ "cases": [
+  {
+   "name": "case 0",
+   "opening": {
+    "v": 1,
+    "recipient": "0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2",
+    "token": "0x0000000000000000000000000000000000000000",
+    "denom": "10000000000000000",
+    "max_relay_fee": "0",
+    "cfg_id": "0x572160cc58c2dc0af7ce61d6e34bfba081ffcda8eb775e2e68b2c12856db99db",
+    "index": 0,
+    "chain_id": 11155111,
+    "vault": "0xafbdf192434e9888bb23dae6f2d15eea6246ed10",
+    "fee_choice": 0
+   },
+   "k": "3e4ceb377172ced8be762b10b2b3475a16b1ca3bc34b160518b5b746f6bf5c66",
+   "context": "572160cc58c2dc0af7ce61d6e34bfba081ffcda8eb775e2e68b2c12856db99db0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002386f26fc10000b0275f9e94b2a437c834bf7dea5699f0b8707ec20000000000000000000000000000000000000000000000000000000000000000",
+   "exit": "0x7a6813e58a210d092d9cac1b9c92d12ac4502cce95019a0c7f49414a5b37f125",
+   "words_text": "increase · language · night · carbon"
+  },
+  {
+   "name": "case 1",
+   "opening": {
+    "v": 1,
+    "recipient": "0x7dcc7ef9949eb4fc854adea02fad6a53be1be018",
+    "token": "0x0000000000000000000000000000000000000000",
+    "denom": "1000000000000000000",
+    "max_relay_fee": "2000000000000000",
+    "cfg_id": "0x572160cc58c2dc0af7ce61d6e34bfba081ffcda8eb775e2e68b2c12856db99db",
+    "index": 7,
+    "chain_id": 11155111,
+    "vault": "0xafbdf192434e9888bb23dae6f2d15eea6246ed10",
+    "fee_choice": 2
+   },
+   "k": "6032e7684fd91f433e73620d83b6a610df86f8575afb3e34beaf48bbe1eacd6c",
+   "context": "572160cc58c2dc0af7ce61d6e34bfba081ffcda8eb775e2e68b2c12856db99db00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000de0b6b3a76400007dcc7ef9949eb4fc854adea02fad6a53be1be01800000000000000000000000000000000000000000000000000071afd498d0000",
+   "exit": "0xcebddbec77cdbe4c96ec48a5323c4b058ee833c1f3610074cf026dffff077214",
+   "words_text": "install · cotton · plate · squeeze"
+  }
+ ]
+}

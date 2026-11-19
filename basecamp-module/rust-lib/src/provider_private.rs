@@ -592,6 +592,29 @@ pub fn mark_imported(request: &mut Value, private: bool, first: bool) {
     request["explanation"] = json!(format!("{} {before}", lines.join(" ")));
 }
 
+/// Where an account's pinned scheme is kept for good: `app-secret-schemes.json` in the network's
+/// wallet folder, beside `storage.json`. Not in `provider.json`, whose grant rows go when an app is
+/// disconnected or a grant taken back (and the whole file with a reset of the connected apps); the
+/// wallet folder is per network and goes into every Backup with the keys whose values it
+/// describes. It holds no secret: an account id and the word `phrase`, `imported` or `unknown`.
+pub const PINS_FILE: &str = "app-secret-schemes.json";
+/// The pin of an account whose grant is from before pinning: the tool gives both sets.
+pub const SCHEME_UNKNOWN: &str = "unknown";
+
+/// The scheme kept for `account` in `wallet_dir`, if any.
+pub fn read_pin(wallet_dir: &std::path::Path, account: &str) -> Option<String> {
+    let text = std::fs::read_to_string(wallet_dir.join(PINS_FILE)).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?[account].as_str().map(str::to_owned)
+}
+
+/// Keeps `scheme` for `account` in `wallet_dir` (mode 600; replaces the file whole).
+pub fn write_pin(wallet_dir: &std::path::Path, account: &str, scheme: &str) -> Result<(), String> {
+    let path = wallet_dir.join(PINS_FILE);
+    let mut map = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Map<String, Value>>(&t).ok()).unwrap_or_default();
+    map.insert(account.to_owned(), json!(scheme));
+    crate::cli::write_private(&path, Value::Object(map).to_string().as_bytes()).map_err(|e| format!("cannot keep the account's scheme: {e}"))
+}
+
 /// Why `app_secret` gave no values, in plain words: never the names tool's own text, which named
 /// key trees and CLI errors (the 0.17.0 screen showed "the names CLI failed: Error: …").
 pub fn secret_failure(what: &str, account: &str, why: &str) -> String {
@@ -603,14 +626,29 @@ pub fn secret_failure(what: &str, account: &str, why: &str) -> String {
         return format!("This wallet can't make {what} for {account}: it isn't one of this wallet's own accounts (a shared or group account, or another wallet's). Nothing was shared.");
     }
     if why.contains("older than this app") || why.contains("unrecognized subcommand") {
-        return format!("The names tool set for this network is older than this app and can't make {what} for {account}. Update it in App settings; nothing was shared.");
+        return older_tool(what, account);
     }
-    format!("This wallet couldn't make {what} for {account}. Nothing was shared; try again, and if it keeps failing, update the names tool in App settings.")
+    format!("This wallet couldn't make {what} for {account}. Nothing was shared; try again, and if it keeps failing, {UPDATE_TOOL}")
+}
+
+/// What to do about a names tool that is too old, step by step: an update through Package Manager
+/// keeps a tool that is already set, so the person puts the bundled one in by hand.
+pub const UPDATE_TOOL: &str = "put in the names tool that comes with this app: open Settings, App settings, clear the names tool's path, press \"Use this CLI\", then press \"Install the LEZ 0.4 names tool\".";
+
+/// A names tool too old to say how it made the values (or what an account is).
+pub fn older_tool(what: &str, account: &str) -> String {
+    format!("The names tool set for this network is older than this app and can't make {what} for {account} safely. Nothing was shared. To fix it, {UPDATE_TOOL}")
 }
 
 /// An imported account and a names tool from before imported accounts' phrase values.
 pub fn older_tool_for_imported(what: &str, account: &str) -> String {
-    format!("{account} was imported, and the names tool set for this network is too old to make {what} for an imported account. Update the names tool in App settings; nothing was shared.")
+    format!("{account} was imported, and the names tool set for this network is too old to make {what} for an imported account. Nothing was shared. To fix it, {UPDATE_TOOL}")
+}
+
+/// The names tool gave values of another kind than this account's earlier ones (an older or
+/// different tool): refused, never handed out.
+pub fn other_scheme(what: &str, account: &str) -> String {
+    format!("The names tool made {what} for {account} another way than this account's earlier ones, so they wouldn't match what was made before. Nothing was shared. To fix it, {UPDATE_TOOL}")
 }
 
 pub fn secret_request(app: &str, account: &str, scope: &str, reason: &str, now: u64) -> Result<Value, String> {
@@ -782,8 +820,32 @@ impl Grants {
         if list.len() >= MAX_SECRET_GRANTS_PER_APP || total >= MAX_SECRET_GRANTS {
             return Err("this app has too many secret grants; take some back in Settings first".to_owned());
         }
-        list.push(json!({ "account": account, "scope": scope, "since": now }));
+        // `v: 2`: made by a build that pins the scheme at the first values (a row without it is
+        // from before: which scheme made its values is unknown).
+        list.push(json!({ "account": account, "scope": scope, "since": now, "v": 2 }));
         Ok(())
+    }
+
+    /// The scheme pinned for `account` (`phrase` or `imported`), from any app's grant: recorded at
+    /// the first values the wallet gave for it, then passed to the names tool on every call, so a
+    /// later change in key-tree membership never changes the account's values.
+    pub fn pinned_scheme(&self, account: &str) -> Option<String> {
+        self.secrets.values().filter_map(Value::as_array).flatten().find(|g| g["account"] == account && g["scheme"].is_string()).and_then(|g| g["scheme"].as_str().map(str::to_owned))
+    }
+
+    /// A grant for `account` from before this build pinned schemes (no `v`): its values may have
+    /// been made under either scheme.
+    pub fn has_legacy_grant(&self, account: &str) -> bool {
+        self.secrets.values().filter_map(Value::as_array).flatten().any(|g| g["account"] == account && g.get("v").is_none() && !g["scheme"].is_string())
+    }
+
+    /// Pins `scheme` on every grant for `account` that has none yet.
+    pub fn pin_scheme(&mut self, account: &str, scheme: &str) {
+        for list in self.secrets.values_mut().filter_map(Value::as_array_mut) {
+            for grant in list.iter_mut().filter(|g| g["account"] == account && !g["scheme"].is_string()) {
+                grant["scheme"] = json!(scheme);
+            }
+        }
     }
 
     pub fn programs_of(&self, app: &str) -> Vec<String> {

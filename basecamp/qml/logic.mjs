@@ -3216,12 +3216,12 @@ export const ADDRESS_BOX_HINT = "Paste the withdraw-to code from the bridge page
 export const ADDRESS_BOX_HINT_CODE = "Paste the withdraw-to code from the bridge page (logoswd1…). Copy it, don't type it."
 export const ADDRESS_GET_CODE = "No code yet? Copy the link, open it in the browser with your Ethereum wallet and connect: the page shows the code."
 export const ADDRESS_CHOOSE_TITLE = "Choose a previous address"
-export const ADDRESS_WORDS_LINE = "These four words are a fingerprint of this address. The bridge page shows the same four when the same Ethereum wallet is connected."
+export const ADDRESS_WORDS_LINE = "These four words are a fingerprint of this address. Compare them on the bridge page: open nameswallet.app/bridge (Bridge to Ethereum) in your browser with that Ethereum wallet connected; it shows the same four words."
 export const ADDRESS_TICK = "This is my address"
 export const ADDRESS_LAST_CHECK = "Last check before the burn. Withdrawals to a wrong address can't be recovered."
 export const ADDRESS_CONTINUE = "I've checked the address — continue"
 /// Step 3 (the burn's approval): the address and its words stay; the burn is what comes next.
-export const ADDRESS_BURN_NEXT = "Next: the burn. Approve it in your wallet's sheet; once it is sent it can't be undone."
+export const ADDRESS_BURN_NEXT = "Next: approve the burn in your wallet's sheet. Once it is sent it can't be undone."
 export const ADDRESS_SAVE_TITLE = "Save to my addresses"
 export const ADDRESS_SAVE_NOTE = "The name stays in this wallet on this computer, never on chain."
 
@@ -3372,4 +3372,232 @@ export function removeReply(value, kind) {
     var wait = ["unreachable", "busy", "rate_limited"].indexOf(code) >= 0
     var kept = ["deposited", "in_flight", "with_wallet", "unknown"].indexOf(code) >= 0
     return { removed: false, line: line, kind: wait ? "waiting" : kept ? "" : "problem" }
+}
+
+// ── Move wrapped tokens between accounts on the bridge test network (LEZ 0.4; roadmap 12) ──
+//
+// The names module checks and sends (`bridge_token_send`, bridge_send.rs); these say what the
+// screen shows. Amounts stay decimal text all the way: no JS number holds 18 decimals exactly.
+
+/// `text` typed in the token's unit ("1.2") as base units for `decimals` (digits, no leading
+/// zeros), or null when it isn't an amount. The module reads it again, the same way.
+export function unitsText(text, decimals) {
+    var typed = String(text === null || text === undefined ? "" : text).trim()
+    var places = Number(decimals) || 0
+    var m = /^(\d*)(?:\.(\d*))?$/.exec(typed)
+    if (!m || (m[1] === "" && (m[2] === undefined || m[2] === "")))
+        return null
+    var fraction = m[2] || ""
+    if (fraction.length > places)
+        return null
+    var digits = (m[1] + fraction + "0".repeat(places - fraction.length)).replace(/^0+/, "")
+    return digits === "" ? null : digits
+}
+
+/// Whether decimal text `a` is more than `b` (both digits).
+function moreThan(a, b) {
+    var x = String(a || "0").replace(/^0+(?=\d)/, ""), y = String(b || "0").replace(/^0+(?=\d)/, "")
+    return x.length !== y.length ? x.length > y.length : x > y
+}
+
+/// Why the amount typed can't be moved, or "": `held` is the base units the account holds.
+export function moveAmountProblem(text, decimals, held, symbol) {
+    var typed = String(text || "").trim()
+    if (typed === "")
+        return ""
+    if (/^-/.test(typed))
+        return typed + " is negative. Enter an amount above 0."
+    if (!/^\d*\.?\d*$/.test(typed) || typed === ".")
+        return typed + " isn't an amount. Use digits and one point, such as 0.01."
+    var fraction = (typed.split(".")[1] || "")
+    if (fraction.length > (Number(decimals) || 0))
+        return typed + " has more than " + (Number(decimals) || 0) + " digits after the point, the smallest unit of " + (symbol || "this token") + "."
+    var base = unitsText(typed, decimals)
+    if (base === null)
+        return "Enter an amount above 0."
+    if (held !== null && held !== undefined && moreThan(base, held))
+        return "That's more than this account holds: " + decimalShown(held, decimals) + " " + (symbol || "") + "."
+    return ""
+}
+
+/// The accounts the tokens can go to: the wallet's own public accounts on LEZ 0.4 but the one they
+/// leave, each `{account, title, imported}`. `imported` lists the accounts imported into the wallet
+/// (backup_status of lez-0.4): an imported account can't bridge back to Ethereum from here, so it is
+/// marked; the phrase accounts come first.
+export function moveTargets(own, from, imported) {
+    var gone = String(from || "")
+    var marked = Array.isArray(imported) ? imported : []
+    var seen = {}
+    var rows = (own || []).map(function(a) { return String(a && a.account !== undefined ? a.account : a) })
+        .map(function(a) { return a.indexOf("/") < 0 ? "Public/" + a : a })
+        .filter(function(a) { if (seen[a] || a === gone || a.indexOf("Public/") !== 0) return false; seen[a] = true; return true })
+        .map(function(a) {
+            var imp = marked.indexOf(a) >= 0
+            return { account: a, title: "Public account " + keyShown(a.replace(/^Public\//, "")), imported: imp,
+                     sub: imp ? "Imported: can't bridge back to Ethereum from here" : "From your recovery phrase: can bridge back to Ethereum" }
+        })
+    return rows.filter(function(r) { return !r.imported }).concat(rows.filter(function(r) { return r.imported }))
+}
+
+/// The imported public accounts of the LEZ 0.4 wallet, from backup_status.
+export function importedAccounts(backup, net) {
+    var nets = backup && Array.isArray(backup.networks) ? backup.networks : []
+    var one = nets.filter(function(n) { return n && n.id === (net || "lez-0.4") })[0]
+    return one && Array.isArray(one.accounts) ? one.accounts.filter(function(a) { return a && a.imported === true && a.account }).map(function(a) { return String(a.account) }) : []
+}
+
+/// Where the tokens go, as typed: "" for nothing yet, else a problem or "".
+export function moveToProblem(text, from) {
+    var typed = String(text || "").trim()
+    if (typed === "")
+        return ""
+    if (/^Private\//.test(typed))
+        return "Moving wrapped tokens to a private account isn't in the wallet yet: choose a public account."
+    var bare = typed.replace(/^Public\//, "")
+    if ("Public/" + bare === String(from || ""))
+        return "That's the account the tokens leave from. Choose another one."
+    if (/^Public\//.test(typed) && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(bare))
+        return "That isn't an account ID: it's Public/ and then letters and digits."
+    return ""
+}
+
+/// The fee line of the sheet: who pays and how much, from the check's ended job (`fee`) and the
+/// test LEZ the paying account holds (`native`, digits, or null when not read).
+export function moveFeeLine(plan, check, native) {
+    var payer = plan ? idShort(plan.fee_payer) : "the account"
+    if (!check || check.state === "checking")
+        return "Paid by " + payer + " in test LEZ. Checking how much…"
+    var about = check.fee && check.fee.about ? grouped(check.fee.about) : ""
+    var most = check.fee && check.fee.at_most ? grouped(check.fee.at_most) : ""
+    var held = native !== null && native !== undefined && native !== "" ? " (it holds " + grouped(native) + ")" : ""
+    if (about === "")
+        return "Paid by " + payer + " in test LEZ" + held + "."
+    return "About " + about + " test LEZ" + (most !== "" && most !== about ? ", at most " + most : "") + ", paid by " + payer + held + ". The bridge's relay pays only for claims and burns."
+}
+
+/// Who the move pays, in words: an LNS name with the account the check resolved (and its forward),
+/// or the account. Before the check has resolved a name: the name and "checking".
+export function moveToLine(plan, check) {
+    if (!plan)
+        return ""
+    var paid = check && check.to_account ? String(check.to_account) : (plan.paid ? String(plan.paid) : "")
+    var fwd = check && check.forwarded_to ? clean(check.forwarded_to) : (plan.forwarded_to ? clean(plan.forwarded_to) : "")
+    if (!plan.to_name)
+        return idShort(paid !== "" ? paid : plan.to)
+    var name = clean(plan.to_name)
+    if (paid === "")
+        return name + "'s public account (checking which…)"
+    return name + "'s public account " + idShort(paid) + (fwd !== "" ? ": " + name + " forwards to " + fwd + ", so this pays " + fwd : "")
+}
+
+/// The arguments the send goes with: the check's own, but to the account the check resolved (a
+/// name is never looked at again); null when the check gave no account for a name.
+export function moveSendArgs(check) {
+    if (!check || !Array.isArray(check.args) || check.args.length !== 5)
+        return null
+    var args = check.args.slice()
+    if (check.to_account)
+        args[4] = String(check.to_account)
+    else if (check.plan && check.plan.to_name)
+        return null
+    return args
+}
+
+/// How a send's start failed: "busy" (not taken: press again), "unclear" (no answer in time: it may
+/// have been taken) or "refused".
+export function moveStartFailure(message, busyText, noAnswerText) {
+    var m = String(message || "")
+    if (m === busyText || /^The wallet is busy/.test(m))
+        return "busy"
+    if (m === noAnswerText || /^No answer from the wallet yet/.test(m))
+        return "unclear"
+    return "refused"
+}
+
+/// What to do when a move's outcome isn't known.
+export const MOVE_UNCLEAR = "No answer in time: the move may have gone through. Check the balance on the card before moving again; a new move needs a new Review."
+
+/// The line after the move ended: done with its block, sent but not confirmed, or why not.
+export function moveResultLine(plan, ended) {
+    if (!ended)
+        return { kind: "", text: "" }
+    if (ended.state === "done" && !ended.problem) {
+        var what = plan ? plan.amount_shown + " " + plan.symbol + (plan.bridge_label ? " (" + plan.bridge_label + ")" : "") : "The tokens"
+        var to = plan ? moveToLine(plan, null) : ""
+        return { kind: "done", text: "Moved " + what + " to " + to + (ended.block !== null && ended.block !== undefined ? ", in block " + ended.block : "") + "." }
+    }
+    if (ended.state === "unclear")
+        return { kind: "waiting", text: String(ended.problem || MOVE_UNCLEAR) + (ended.tx ? " Its transaction: " + clean(ended.tx) + "." : "") }
+    return { kind: "problem", text: String(ended.problem || "The move didn't go through.") }
+}
+
+// ── Signed withdraw-to codes (rfp-022 WALLET-ROADMAP item 9) ──
+
+export const SIGNED_LINE = "Signed by this address on the bridge page. Still compare the four words."
+export const UNSIGNED_LINE = "Not signed: compare the four words."
+
+/// The line under the four words on Bridge to Ethereum, step 2, from `send_back_check`: `{kind,
+/// text}`. The LEZ Bridge module checked the signature (a broken one never gets here: it is refused
+/// with its words). A bridge module from before signed codes says nothing of it: no line.
+export function signatureLine(check) {
+    if (!check || (check.signed !== true && check.signed !== false))
+        return { kind: "", text: "" }
+    return check.signed === true ? { kind: "done", text: SIGNED_LINE } : { kind: "", text: UNSIGNED_LINE }
+}
+
+// ── Imported accounts on Receive from Ethereum (test of 2026-11-18) ──
+
+/// The bridge's one-time notice for an imported account (`account_notice` on the deposit code's
+/// answer), for the card itself: plain text, at most 400 characters, or "".
+export function importedNoticeLine(result) {
+    var t = result && result.account_notice ? String(result.account_notice) : ""
+    t = t.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim()
+    return t.length > 400 ? t.substr(0, 399) + "…" : t
+}
+
+/// Where the deposit's secret comes from, said once and truly: an imported account's from the
+/// recovery phrase (the bridge's `account_notice` says so), every other account's from its own key.
+export function receiveSecretLine(result) {
+    var imported = !!(result && result.account_notice)
+    return (imported ? "The wallet makes this deposit's secret from your recovery phrase, because this account was imported; this app never sees it."
+                     : "The wallet makes this deposit's secret from your account's own key; this app never sees it.")
+        + " The page gets only a code: the amount, the vault and a commitment that hides which account receives it."
+}
+
+// ── A burn's Ethereum address, checked (F; the names module's burn_opening.rs) ──
+
+/// The approval sheet's address line for a burn, from the request's `burn_opening` (the names module
+/// recomputed the exit commitment from the LEZ Bridge's opening and its own key): "" when the request
+/// has none (an older LEZ Bridge or names module: the sheet keeps its "sealed" line). Fixed words
+/// around values the module checked; every value cleaned.
+export function burnAddressLine(request) {
+    var o = request && request.burn_opening ? request.burn_opening : null
+    if (!o)
+        return ""
+    if (o.checked === true)
+        return "Ethereum address: " + clean(o.recipient) + ", checked by this wallet against the burn's exit commitment, with the token and amount burned. Its four words: "
+            + clean(o.words_text) + ". Compare them on the bridge page with that Ethereum wallet connected."
+            + (o.max_relay_fee_text ? (o.max_relay_fee === "0" ? " No relay fee: the address gets the whole " + clean(o.at_least_text) + " (less the vault's own fee)."
+                : " A relay may keep up to " + clean(o.max_relay_fee_text) + "; the address gets at least " + clean(o.at_least_text) + " (less the vault's own fee).") : "")
+    return "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. " + clean(o.why || "")
+}
+
+/// The checked address in two halves (to read back), or [] when it isn't checked.
+export function burnAddressHalves(request) {
+    var o = request && request.burn_opening ? request.burn_opening : null
+    return o && o.checked === true && Array.isArray(o.recipient_halves) ? o.recipient_halves.map(clean) : []
+}
+
+// ── Import account (item D; the names module's account_import.rs) ──
+
+export const IMPORT_WARNING = "Paste a key only from a wallet you own, on this computer. Anyone who sees it can spend from that account."
+export const IMPORT_COVER_LINE = "Your recovery phrase won't bring an imported account back: keep its key or a backup of this wallet. Bridged ETH claimed into it can't be bridged back to Ethereum from here; move it to an account of your recovery phrase first (Move)."
+
+/// The line after an import: the account and the module's one-time notice, in fixed words around it.
+export function importResultLine(value) {
+    var v = value || {}
+    var account = clean(v.account)
+    if (!/^Public\//.test(account))
+        return "Imported."
+    return "Imported " + (v.label ? clean(v.label) + " (" + idShort(account) + ")" : "public account " + idShort(account)) + ". " + clean(v.notice || "")
 }

@@ -1307,6 +1307,61 @@ for _name, _js, _mock in WALLET_NEXT:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
 
+# Move wrapped tokens on the bridge test network (roadmap 12): from the imported CCVd (0.1 wETH on
+# bridge v5) to the phrase account 7wx3, the case of 2026-11-18. The module's answers are set as state.
+_MV_FEAT = 'root.againAfter(150, function() { root.moduleFeatures = root.moduleFeatures.concat(["bridge_token_send"]) })'
+_MV_ASSET = {"symbol": "wETH", "name": "Wrapped Sepolia ETH (v5)", "amount": "0.1", "bridge": "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA", "bridgeLabel": "bridge v5",
+             "base": "100000000000000000", "decimals": 18, "definition": "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw"}
+_MV_TO = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"
+_MV_PLAN = {"bridge": _MV_ASSET["bridge"], "bridge_label": "bridge v5", "definition": _MV_ASSET["definition"], "symbol": "wETH", "decimals": 18,
+            "amount": "50000000000000000", "amount_shown": "0.05", "from": OWNER, "to": _MV_TO, "to_name": None, "fee_payer": OWNER, "relay_pays": False}
+def mv(js=""):
+    return (CARD_04 % ("[]", "({})", _MV_FEAT + '; root.againAfter(250, function() { root.openMove("%s", %s); root.againAfter(80, function() { %s }) })'
+                       % (OWNER, json.dumps(_MV_ASSET), js)))
+def mv_sheet(state, more=""):
+    check = {"id": "", "plan": _MV_PLAN, "args": [], "state": state, "fee": {"about": "2140", "at_most": "3000"} if state == "ready" else None, "problem": ""}
+    return mv('root.moveTo = "%s"; moveAmountField.text = "0.05"; root.againAfter(30, function() { root.moveCheck = %s; %s })' % (_MV_TO, json.dumps(check), more))
+MOVE = [
+    # The card: Move beside each wrapped token the wallet's own account holds.
+    ("card-move", CARD_04 % ("[]", "({})", _MV_FEAT)),
+    # The form, with the list of the wallet's accounts open (the imported one marked).
+    ("move-form", mv('root.moveToOpen = true')),
+    ("move-form-filled", mv('root.moveTo = "%s"; moveAmountField.text = "0.05"' % _MV_TO)),
+    ("move-too-much", mv('root.moveTo = "%s"; moveAmountField.text = "0.5"' % _MV_TO)),
+    ("move-checking", mv_sheet("checking")),
+    ("move-sheet", mv_sheet("ready")),
+    ("move-short", mv_sheet("failed", 'root.moveCheck = Object.assign({}, root.moveCheck, { problem: "CCVd76…pKnk has no test LEZ, and the fee needs about 3,000 test LEZ. Get test LEZ for it first (Get test LEZ, on the bridge test network card). Nothing was sent." })')),
+    ("move-old-tool", mv_sheet("failed", 'root.moveCheck = Object.assign({}, root.moveCheck, { problem: "This wallet\'s LEZ 0.4 names tool can\'t move wrapped tokens yet: it needs a newer tool. Nothing was sent." })')),
+    ("move-sending", mv_sheet("ready", 'root.moveSent = { id: "", plan: %s, state: "sending", block: null, tx: null, problem: "" }' % json.dumps(_MV_PLAN))),
+    ("move-done", mv('root.moveTo = "%s"; root.moveSent = { id: "", plan: %s, state: "done", block: 28512, tx: "ab12", problem: "" }' % (_MV_TO, json.dumps(_MV_PLAN)))),
+    # Review 2026-11-19: a name's account pinned at the check (and its forward); a send with no answer in time.
+    ("move-sheet-name", mv('moveToField.text = "alice"; moveAmountField.text = "0.05"; root.againAfter(30, function() { root.moveCheck = %s })'
+        % json.dumps({"id": "", "plan": dict(_MV_PLAN, to="alice", to_name="alice"), "args": ["b", "d", "0.05", OWNER, "alice"], "state": "ready", "fee": {"about": "2140", "at_most": "3000"}, "problem": "",
+                      "to_account": _MV_TO, "forwarded_to": "bob"}))),
+    ("move-unclear", mv('root.moveTo = "%s"; root.moveSent = { id: "", plan: %s, state: "unclear", block: null, tx: null, problem: Logic.MOVE_UNCLEAR }' % (_MV_TO, json.dumps(_MV_PLAN)))),
+    # To an imported account: said before the review.
+    ("move-to-imported", mv('moveToField.text = "%s"; moveAmountField.text = "0.05"' % OWNER).replace('root.openMove("%s"' % OWNER, 'root.openMove("%s"' % _MV_TO)),
+]
+for _name, _js in MOVE:
+    SCENARIOS[_name] = _js
+# An imported account's deposit code (item C): its notice in the card, the secret line in Details said once.
+SCENARIOS["receive-code-imported-card"] = ('root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { root.openEthReceive(); '
+    'root.againAfter(300, function() { root.receiveResult = Object.assign({}, %s, { account_notice: %s }); root.receiveDetails = true }) }) })'
+    % (json.dumps(MOCKS["receive-code"]["bridge"]["make_public_deposit_request"]), json.dumps(_IMPORTED_LINE)))
+HEIGHTS_EXTRA = {"receive-code-imported-card": 1700}
+# Import account (item D): the form with the key pasted (shown as dots), and the line after an import.
+_IMP = 'root.section = "settings"; root.loadAccounts(); root.againAfter(150, function() { root.moduleFeatures = root.moduleFeatures.concat(["account_import"]); root.againAfter(50, function() { %s }) })'
+SCENARIOS["settings-account-import"] = _IMP % 'root.accountImportOpen = true; importKeyField.text = "5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1"; importLabelField.text = "Old wallet"'
+SCENARIOS["settings-account-imported"] = _IMP % ('root.accountImportKind = "done"; root.accountImportLine = Logic.importResultLine({ account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", label: "Old wallet", notice: %s })'
+                                                 % json.dumps("Your recovery phrase does not bring this account back: keep its key (or a backup of this wallet) safe. Bridged ETH claimed into it can be moved to an account of your recovery phrase with Move."))
+SCENARIOS["settings-account-import-refused"] = _IMP % 'root.accountImportOpen = true; root.accountsError = "This wallet has that account already. Nothing was imported."'
+HEIGHTS_EXTRA.update({"settings-account-import": 2700, "settings-account-imported": 2700, "settings-account-import-refused": 2700})
+# Signed withdraw-to codes (roadmap 9): the bridge says the code is signed by its recipient, or not.
+SCENARIOS["sendback-words-signed"] = SCENARIOS["sendback-words"]
+MOCKS["sendback-words-signed"] = sb_mock(send_back_check=dict(SB_CHECK, signed=True, signed_by=SB_RECIPIENT, signature_line="(the module's line is not shown)"))
+SCENARIOS["sendback-words-unsigned"] = SCENARIOS["sendback-words"]
+MOCKS["sendback-words-unsigned"] = sb_mock(send_back_check=dict(SB_CHECK, signed=False, signed_by=None))
+
 def _ago(text):
     """A job's start in a mock ("@AGO:n@"): n seconds before this render, in ms."""
     import re as _re, time as _time
@@ -1316,6 +1371,8 @@ HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
 HEIGHTS.update({name: 1500 for name in ("approve-burn-other-app", "approve-burn-other-app-ticked", "approve-burn-bridge-away", "sendback-approve-unticked", "sendback-approve-other-burn", "plain-markup-note", "approve-exit-recipient", "approve-exit-recipient-unknown", "sendback-approve-after-restart")})
 HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("sendback-address") or name.startswith("sendback-approve")})
 HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
+HEIGHTS.update({name: 1500 for name, _j in MOVE})
+HEIGHTS.update(HEIGHTS_EXTRA)
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

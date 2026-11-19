@@ -1802,6 +1802,33 @@ pub fn job_problem(kind: &str, log: &str) -> String {
     format!("{what}: {}", failure_cause(log))
 }
 
+/// Whether the accounts in the wallet file in `wallet` changed since this asked last for that
+/// folder; true the first time. Only the list of accounts counts (`backup::accounts_of`, which reads
+/// no key): a read that catches the wallet up rewrites the file without changing it, and must not
+/// count. An account the names tool imported shows on the next read, with no Refresh and no polling
+/// (test of 2026-11-18).
+pub fn wallet_changed(wallet: &Path) -> bool {
+    static SEEN: std::sync::Mutex<Vec<(PathBuf, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+    let now: Vec<String> = std::fs::read(wallet.join(STORAGE_FILE))
+        .map(|bytes| crate::backup::accounts_of(&bytes).iter().map(|a| a.to_string()).collect())
+        .unwrap_or_default();
+    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match seen.iter_mut().find(|(dir, _)| dir == wallet) {
+        Some((_, last)) if *last == now => false,
+        Some((_, last)) => {
+            *last = now;
+            true
+        }
+        None => {
+            if seen.len() >= 16 {
+                seen.remove(0);
+            }
+            seen.push((wallet.to_owned(), now));
+            true
+        }
+    }
+}
+
 /// The last line of `text` that says something.
 pub fn last_line(text: &str) -> &str {
     text.lines().rev().map(str::trim).find(|line| !line.is_empty()).unwrap_or("")
@@ -2395,9 +2422,12 @@ fn feed(mut process: Command, program: &Path, input: &str, patience: Duration, s
     };
     // Written from a thread: a large page can fill the pipe before the CLI reads it.
     if let Some(mut stdin) = child.stdin.take() {
-        let input = input.to_owned();
+        let mut input = input.to_owned();
         std::thread::spawn(move || {
             let _ = std::io::Write::write_all(&mut stdin, input.as_bytes());
+            // The copy is overwritten once written (an import's request holds a signing key).
+            // SAFETY: zero bytes are valid UTF-8, and the string is dropped right after.
+            unsafe { input.as_bytes_mut() }.fill(0);
         });
     }
     let drain = |stream: Option<Box<dyn Read + Send>>| {
@@ -2810,6 +2840,16 @@ impl Jobs {
         self.start_process(id, name, kind, setup.command(command), &what, scratch)
     }
 
+    /// `start`, with `env` set for the CLI (`LOGOS_NAMES_DRY_RUN` for a check that sends nothing).
+    pub fn start_with_env(&self, setup: &Setup, id: &str, name: &str, kind: &str, command: Vec<String>, env: &[(&str, &str)]) -> Result<Value, String> {
+        let what = format!("the names CLI at {}", setup.program.display());
+        let mut process = setup.command(command);
+        for (key, value) in env {
+            process.env(key, value);
+        }
+        self.start_process(id, name, kind, process, &what, None)
+    }
+
     /// Starts `process` (`what` says what it runs) as job `id` for `name`, and
     /// returns at once, as `start` does.
     fn start_process(
@@ -2967,6 +3007,24 @@ mod tests {
         let (payer, claims) = parse_claims(&log);
         assert_eq!(payer.as_deref(), Some(a));
         assert_eq!(claims, vec![(b.to_owned(), 1000)], "only the claim that landed");
+    }
+
+    #[test]
+    fn a_changed_wallet_file_is_noticed_once() {
+        let dir = scratch_dir("wallet-changed");
+        std::fs::write(dir.join(STORAGE_FILE), "{}").unwrap();
+        assert!(wallet_changed(&dir), "the first look");
+        assert!(!wallet_changed(&dir), "nothing changed");
+        // A catch-up rewrites the file with the same accounts: no change.
+        std::fs::write(dir.join(STORAGE_FILE), "{\"key_chain\":{\"accounts\":[]},\"last_synced\":7}").unwrap();
+        assert!(!wallet_changed(&dir), "the same (no) accounts");
+        // An import adds one.
+        std::fs::write(dir.join(STORAGE_FILE), "{\"key_chain\":{\"accounts\":[{\"ImportedPublic\":{\"account_id\":\"7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR\",\"pub_sign_key\":\"MARKER\"}}]}}").unwrap();
+        assert!(wallet_changed(&dir), "the import is noticed");
+        assert!(!wallet_changed(&dir), "once");
+        std::fs::remove_file(dir.join(STORAGE_FILE)).unwrap();
+        assert!(wallet_changed(&dir), "a wallet gone is a change too");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

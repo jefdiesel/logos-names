@@ -2027,6 +2027,8 @@ Item {
     /// `focusId` (a card row).
     function openSendBack(account, asset, focusId) {
         walletView = "sendback"
+        // The accounts as the wallet file has them now (an account imported meanwhile shows at once).
+        loadAccounts()
         sbError = ""
         sbNeeds = null
         sbCheck = null
@@ -2125,7 +2127,7 @@ Item {
                 sbCheck = Object.assign({}, value, { key: key, code: value.code ? String(value.code) : code })
             else {
                 var e = value && value.error ? value.error : {}
-                sbCheckError = e.message ? sentence(String(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
+                sbCheckError = e.message ? sentence(Logic.clean(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
                 sbCheckErrorKey = key
             }
         }, function(message, kind) {
@@ -2202,7 +2204,7 @@ Item {
             }
             if (value && value.ok === false) {
                 var e = value.error || {}
-                sbError = e.message ? sentence(String(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
+                sbError = e.message ? sentence(Logic.clean(e.message)) : Logic.sendBackCodeTitle(e.code) + "."
                 return
             }
             if (!value || !value.id) {
@@ -3542,6 +3544,39 @@ Item {
 
     function nameAccount(account, label) {
         accountChange("cli_account_label", [account, label], function() { accountRenaming = "" })
+    }
+
+    // ── Import account (item D; account_import.rs): one public account from its key or key-chain
+    //    JSON, pasted or picked from a file. The text goes to the module once and the field is
+    //    emptied at once, whatever the answer; nothing of it is ever shown or logged here. ──
+    property bool accountImportOpen: false
+    property string accountImportLine: ""
+    property string accountImportKind: ""
+    readonly property bool accountImportCan: moduleFeatures.indexOf("account_import") >= 0
+    function importAccount(textOrFile, label) {
+        if (accountsBusy || String(textOrFile || "").trim() === "")
+            return
+        accountImportLine = ""
+        accountImportKind = ""
+        var asked = String(textOrFile)
+        try { importKeyField.text = "" } catch (e) {}
+        accountChange("cli_account_import", [asked, label], function(value) {
+            accountImportOpen = false
+            accountImportKind = "done"
+            accountImportLine = Logic.importResultLine(value)
+        })
+        asked = ""
+    }
+    function pickImportFile() {
+        try {
+            var d = Qt.createQmlObject('import QtQuick.Dialogs; FileDialog { title: "Choose the account\'s key file"; nameFilters: ["Key files (*.json *.txt *.key)", "All files (*)"] }', root, "importPicker")
+            d.accepted.connect(function() { root.importAccount(String(d.selectedFile), importLabelField.text); d.destroy() })
+            d.rejected.connect(function() { d.destroy() })
+            d.open()
+        } catch (e) {
+            accountImportKind = "problem"
+            accountImportLine = "This Basecamp can't open a file picker here. Paste the key instead."
+        }
     }
 
     function newAccount(kind, label) {
@@ -6950,6 +6985,191 @@ Item {
         onTriggered: root.loadTokens()
     }
 
+    // ── Move wrapped tokens on the bridge test network (LEZ 0.4; rfp-022 WALLET-ROADMAP.md item 12) ──
+    //
+    // The names module checks the move against the bridge's Config, prices it with a check that
+    // sends nothing, then sends it from the chosen account (`bridge_token_send`, bridge_send.rs).
+    // Every press says something at once: "Checking the fee…", then the sheet; "Moving it…", then
+    // the block or why not.
+    property string moveFrom: ""          // Public/<id> the tokens leave
+    property var moveAsset: null          // the card's asset row: {symbol, name, amount, bridge, bridgeLabel, base, decimals, definition}
+    property string moveTo: ""            // one of the wallet's accounts, chosen from the list ("" while typed)
+    property bool moveToOpen: false
+    property int moveTurn: 0              // a review or a move asked since: answers to an older one are dropped
+    property var moveCheck: null          // {id, plan, args, state: "checking" | "ready" | "failed", fee, problem}
+    property var moveSent: null           // {id, plan, state: "sending" | "done" | "failed", block, tx, problem}
+    property string moveProblem: ""
+    readonly property bool moveCan: namesNet === "0.4" && moduleFeatures.indexOf("bridge_token_send") >= 0
+    readonly property var moveImported: Logic.importedAccounts(backupStatus, "lez-0.4")
+    readonly property var moveTargetsNow: Logic.moveTargets(bridgeNetAccounts, moveFrom, moveImported)
+
+    function openMove(account, asset) {
+        moveFrom = "Public/" + String(account || "").replace(/^Public\//, "")
+        moveAsset = asset
+        moveTo = ""
+        moveToOpen = false
+        moveTurn++
+        moveCheck = null
+        moveSent = null
+        moveProblem = ""
+        try { moveToField.text = ""; moveAmountField.text = "" } catch (e) {}
+        loadBackupStatus()
+        loadAccounts()
+        walletView = "bridgemove"
+    }
+    /// Where the tokens go: the account picked, else what was typed.
+    function moveToText() {
+        if (moveTo !== "")
+            return moveTo
+        try { return moveToField.text.trim() } catch (e) { return "" }
+    }
+    function moveAmountText() {
+        try { return moveAmountField.text.trim() } catch (e) { return "" }
+    }
+    /// What the account holds of the token now (base units), from the card's last read.
+    function moveHeld() {
+        return moveAsset !== null ? String(moveAsset.base || "0") : null
+    }
+    /// The test LEZ the paying account holds, from the card's last read, or null.
+    function moveNative() {
+        var read = bridgeNet && bridgeNet.read ? bridgeNet.read : null
+        var id = moveFrom.replace(/^Public\//, "")
+        var row = read && Array.isArray(read.accounts) ? read.accounts.filter(function(a) { return String(a.account || "").replace(/^Public\//, "") === id })[0] : null
+        return row && row.found ? String(row.native || "0") : null
+    }
+    function moveFormProblem() {
+        if (moveAsset === null)
+            return ""
+        var amount = Logic.moveAmountProblem(moveAmountText(), moveAsset.decimals, moveHeld(), moveAsset.symbol)
+        return amount !== "" ? amount : Logic.moveToProblem(moveToText(), moveFrom)
+    }
+    /// Anything edited after a check: the sheet goes, the next Review checks again.
+    function moveReset() {
+        if (moveSent !== null && moveSent.state === "sending")
+            return
+        moveTurn++
+        moveCheck = null
+        moveProblem = ""
+    }
+    /// Review: the module checks the move and starts the fee check; the sheet shows at once.
+    function moveReview() {
+        if (moveAsset === null || (moveCheck !== null && moveCheck.state === "checking") || (moveSent !== null && moveSent.state === "sending"))
+            return
+        var to = moveToText(), amount = moveAmountText()
+        if (to === "" || amount === "" || moveFormProblem() !== "")
+            return
+        var turn = ++moveTurn
+        var args = [String(moveAsset.bridge), String(moveAsset.definition), amount, moveFrom, to]
+        moveProblem = ""
+        moveSent = null
+        moveCheck = { id: "", plan: null, args: args, state: "checking", fee: null, problem: "" }
+        askLater("bridge_token_send", args.concat([false]), function(value) {
+            if (turn !== moveTurn)
+                return
+            moveCheck = { id: String(value.id || ""), plan: value.plan || null, args: args, state: "checking", fee: null, problem: "" }
+            moveFollowSoon()
+        }, function(message) {
+            if (turn !== moveTurn)
+                return
+            moveCheck = null
+            moveProblem = sentence(message)
+        })
+    }
+    /// Approve: the move the check priced, sent to the account the check resolved (an LNS name is
+    /// never resolved again at send time). Only from a check that priced it.
+    function moveApprove() {
+        if (moveCheck === null || moveCheck.state !== "ready" || (moveSent !== null && moveSent.state === "sending"))
+            return
+        var args = Logic.moveSendArgs(moveCheck)
+        if (args === null) {
+            moveCheck = Object.assign({}, moveCheck, { state: "failed", problem: "The check didn't say which account this pays. Nothing was sent; review it again." })
+            return
+        }
+        var plan = Object.assign({}, moveCheck.plan, { paid: moveCheck.to_account || "", forwarded_to: moveCheck.forwarded_to || "" })
+        var turn = moveTurn
+        moveSent = { id: "", plan: plan, state: "sending", block: null, tx: null, problem: "" }
+        askLater("bridge_token_send", args.concat([true]), function(value) {
+            if (turn !== moveTurn)
+                return
+            moveSent = { id: String(value.id || ""), plan: plan, state: "sending", block: null, tx: null, problem: "" }
+            moveFollowSoon()
+        }, function(message) {
+            if (turn !== moveTurn)
+                return
+            var how = Logic.moveStartFailure(message, moduleBusy, moduleNoAnswer)
+            if (how === "busy") {
+                // Not taken (the module answered busy before running anything): press again.
+                moveSent = null
+                moveProblem = "The wallet is busy with something else; nothing was sent. Press Approve and move again."
+                return
+            }
+            if (how === "unclear") {
+                // May have been taken: never Approve again on this review. Look for the move's job.
+                moveTurn++
+                moveCheck = null
+                moveSent = { id: "", plan: plan, state: "unclear", block: null, tx: null, problem: "No answer from the wallet in time: the move may still be on its way. Looking…" }
+                moveLookForSend(plan, moveTurn)
+                return
+            }
+            moveSent = { id: "", plan: plan, state: "failed", block: null, tx: null, problem: sentence(message) }
+        })
+    }
+    /// After an unclear start: follow the move's job if the wallet runs one, else read the balances
+    /// again and say what to check before moving again.
+    function moveLookForSend(plan, turn) {
+        askLater("cli_status", [], function(value) {
+            if (turn !== moveTurn)
+                return
+            var busy = value && value.busy ? value.busy : null
+            if (busy && busy.kind === "bridge_send" && busy.id) {
+                moveSent = { id: String(busy.id), plan: plan, state: "sending", block: null, tx: null, problem: "" }
+                moveFollowSoon()
+                return
+            }
+            moveSent = { id: "", plan: plan, state: "unclear", block: null, tx: null, problem: Logic.MOVE_UNCLEAR }
+            loadBridgeNet()
+            loadActivity()
+        }, function() {
+            if (turn !== moveTurn)
+                return
+            moveSent = { id: "", plan: plan, state: "unclear", block: null, tx: null, problem: Logic.MOVE_UNCLEAR }
+            loadBridgeNet()
+        })
+    }
+    /// Follows the check or the move until its job ends.
+    function moveFollow() {
+        var check = moveCheck, sent = moveSent, turn = moveTurn
+        var following = sent !== null && sent.state === "sending" && sent.id !== "" ? sent : check !== null && check.state === "checking" && check.id !== "" ? check : null
+        if (following === null || following.asking)
+            return
+        following.asking = true
+        askLater("job", [following.id], function(value) {
+            following.asking = false
+            if (turn !== moveTurn || value.state === "running")
+                return
+            if (following === sent) {
+                moveSent = { id: sent.id, plan: sent.plan, state: value.state === "done" && !value.problem ? "done" : value.tx ? "unclear" : "failed", block: value.block, tx: value.tx, problem: value.problem || "" }
+                moveCheck = null
+                try { if (moveSent.state === "done") moveAmountField.text = "" } catch (e) {}
+                loadBridgeNet()
+            } else {
+                moveCheck = { id: check.id, plan: check.plan, args: check.args, state: value.ready === true ? "ready" : "failed", fee: value.fee || null, problem: value.ready === true ? "" : String(value.problem || "The check didn't finish."),
+                              to_account: value.to_account ? String(value.to_account) : "", forwarded_to: value.forwarded_to ? String(value.forwarded_to) : "" }
+            }
+        }, function() { following.asking = false })
+    }
+    /// Asks again in 1.5 s while the check or the move runs (no Timer of its own: `againAfter`).
+    function moveFollowSoon() {
+        var turn = moveTurn
+        againAfter(1500, function() {
+            var running = (moveCheck !== null && moveCheck.state === "checking") || (moveSent !== null && moveSent.state === "sending")
+            if (turn !== moveTurn || !running)
+                return
+            moveFollow()
+            moveFollowSoon()
+        })
+    }
+
     // ── Apps asking the wallet (Wallet Provider SDK) ────────────────────
     //
     // Other apps ask the names module for access, payments and program calls
@@ -8610,7 +8830,7 @@ Item {
             font.weight: Font.DemiBold
             wrapMode: Text.WordWrap
         }
-        Hint { visible: waitPanel.view !== null && waitPanel.view.detail !== ""; font.pixelSize: root.px(15); text: waitPanel.view !== null ? waitPanel.view.detail : "" }
+        Hint { textFormat: Text.PlainText; visible: waitPanel.view !== null && waitPanel.view.detail !== ""; font.pixelSize: root.px(15); text: waitPanel.view !== null ? waitPanel.view.detail : "" }
         Hint { visible: waitPanel.waiting; color: root.ink; text: Logic.PRIVATE_LEAVE_LINE }
         Hint { visible: waitPanel.waiting && root.proofWarning !== ""; font.pixelSize: root.px(15); text: root.proofWarning }
         // The wallet was busy when asked: the job goes on; asked again at the next check.
@@ -9710,7 +9930,7 @@ Item {
                         enabledNow: root.hasCliWallet && root.canShield && root.shieldJob === null
                         onPressed: root.moveToPrivate()
                     }
-                    Hint { visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(16); text: root.shieldLine() }
+                    Hint { textFormat: Text.PlainText; visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(16); text: root.shieldLine() }
                     StatusLine { visible: root.shieldProblem !== "" && root.shieldJob === null; kind: Logic.noticeKind(root.shieldProblem, true); text: root.shieldProblem }
                     Hint {
                         visible: root.hasPrivateFunds && root.shieldJob === null
@@ -10314,6 +10534,14 @@ Item {
                                             Text { text: netAsset.modelData.name; textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
                                         }
                                         Item { Layout.fillWidth: true }
+                                        // A wrapped token of the wallet's own account: moved to another account (roadmap 12).
+                                        Link {
+                                            visible: root.moveCan && !!netAsset.modelData.definition && netAsset.modelData.base !== "0" && !netAccount.modelData.viewOnly && !netAccount.modelData.watched
+                                            text: "Move"
+                                            color: root.dim
+                                            font.pixelSize: root.px(14)
+                                            onPressed: root.openMove(netAccount.modelData.account, netAsset.modelData)
+                                        }
                                         Text {
                                             textFormat: Text.PlainText
                                             text: root.walletHidden ? "••••••" : netAsset.modelData.amount
@@ -10370,7 +10598,7 @@ Item {
                         }
                         StatusLine { visible: root.bridgeNetWatchProblem !== ""; kind: Logic.noticeKind(root.bridgeNetWatchProblem, true); text: root.bridgeNetWatchProblem }
                         Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
-                        Hint { font.pixelSize: root.px(14); text: "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
+                        Hint { font.pixelSize: root.px(14); text: root.moveCan ? "Move beside a wrapped token sends it to another account here. Sending test LEZ isn't in the wallet yet." : "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
                     }
                     // What runs on LEZ 0.3 only, unavailable while LEZ 0.4 is shown.
                     ColumnLayout {
@@ -10825,6 +11053,136 @@ Item {
                         text: root.chainSent === null ? "" : "Sent " + root.grouped(root.chainSent.amount) + ": it's in a block." + (root.chainSent.fee ? " The fee was " + root.grouped(root.chainSent.fee) + "." : "")
                     }
                     StatusLine { visible: root.notice !== "" && root.noticeAt === "" && root.sendingLine() === ""; kind: root.noticeKind; text: root.notice }
+                }
+
+                // ── Move wrapped tokens (LEZ 0.4, between public accounts) ──
+                ColumnLayout {
+                    id: moveScreen
+                    visible: root.walletView === "bridgemove"
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: root.pageWidth
+                    spacing: 12
+                    readonly property var asset: root.moveAsset
+                    readonly property bool checking: root.moveCheck !== null && root.moveCheck.state === "checking"
+                    readonly property bool sending: root.moveSent !== null && root.moveSent.state === "sending"
+                    readonly property string formProblem: root.moveFormProblem()
+                    readonly property bool importedTo: root.moveImported.indexOf(root.moveToText().indexOf("/") < 0 ? "Public/" + root.moveToText() : root.moveToText()) >= 0
+                    readonly property var result: Logic.moveResultLine(root.moveSent !== null ? root.moveSent.plan : null, root.moveSent !== null && root.moveSent.state !== "sending" ? root.moveSent : null)
+                    PageHeader { title: "Move wrapped tokens"; net: "0.4"; onBack: root.walletView = "home" }
+                    Hint { color: root.ink; text: "Moves wrapped tokens to another account on the bridge test network. Nothing goes to Ethereum: Bridge to Ethereum does that, from an account made from your recovery phrase." }
+                    StatusLine { visible: !root.moveCan; kind: "problem"; text: "This Names build can't move wrapped tokens. Update Names." }
+
+                    Part { text: "From" }
+                    PickRow {
+                        title: "Public account " + Logic.keyShown(root.moveFrom.replace(/^Public\//, "")) + (root.moveImported.indexOf(root.moveFrom) >= 0 ? " · imported" : "")
+                        sub: moveScreen.asset !== null ? moveScreen.asset.symbol + (moveScreen.asset.bridgeLabel !== "" ? " · " + moveScreen.asset.bridgeLabel : "") + " · pays the fee in test LEZ" : ""
+                        amount: moveScreen.asset !== null ? (root.walletHidden ? "••••••" : moveScreen.asset.amount + " " + moveScreen.asset.symbol) : ""
+                        current: true
+                    }
+
+                    Part { text: "To" }
+                    PickRow {
+                        title: root.moveTo !== "" ? "Public account " + Logic.keyShown(root.moveTo.replace(/^Public\//, "")) : "Choose one of your accounts"
+                        sub: root.moveTo !== "" ? (root.moveImported.indexOf(root.moveTo) >= 0 ? "Imported: can't bridge back to Ethereum from here" : "From your recovery phrase: can bridge back to Ethereum") : root.moveTargetsNow.length + (root.moveTargetsNow.length === 1 ? " account" : " accounts")
+                        dropdown: true
+                        open: root.moveToOpen
+                        enabledNow: !moveScreen.sending
+                        onPressed: root.moveToOpen = !root.moveToOpen
+                    }
+                    ColumnLayout {
+                        visible: root.moveToOpen
+                        Layout.fillWidth: true
+                        Layout.leftMargin: root.px(14)
+                        spacing: 4
+                        Repeater {
+                            model: root.moveTargetsNow
+                            PickRow {
+                                required property var modelData
+                                compact: true
+                                title: modelData.title + (modelData.imported ? " · imported" : "")
+                                sub: modelData.sub
+                                current: root.moveTo === modelData.account
+                                onPressed: { root.moveToOpen = false; moveToField.text = ""; root.moveTo = modelData.account; root.moveReset() }
+                            }
+                        }
+                        Hint { visible: root.moveTargetsNow.length === 0; font.pixelSize: root.px(15); text: "Your wallet has no other public account here. Make one in Accounts, or paste an account ID below." }
+                    }
+                    Field {
+                        id: moveToField
+                        Layout.fillWidth: true
+                        size: 17
+                        code: true
+                        hint: "Or paste an account ID (Public/…) or an LNS name"
+                        onTextChanged: { if (text.trim() !== "") root.moveTo = ""; root.moveReset() }
+                    }
+                    Hint {
+                        visible: moveScreen.importedTo
+                        color: root.ink
+                        font.pixelSize: root.px(15)
+                        text: "That account was imported: wrapped tokens there can't be bridged back to Ethereum from this wallet. To bridge back, choose an account made from your recovery phrase."
+                    }
+
+                    Part { text: "Amount" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        Field {
+                            id: moveAmountField
+                            Layout.fillWidth: true
+                            size: 19
+                            hint: "0.01"
+                            onTextChanged: root.moveReset()
+                        }
+                        Text { text: moveScreen.asset !== null ? moveScreen.asset.symbol : ""; color: root.dim; font.family: root.sans; font.pixelSize: root.px(17) }
+                        Link {
+                            visible: moveScreen.asset !== null && !moveScreen.sending
+                            text: "All"
+                            color: root.dim
+                            font.pixelSize: root.px(15)
+                            onPressed: moveAmountField.text = Logic.decimalShown(moveScreen.asset.base, moveScreen.asset.decimals).replace(/,/g, "")
+                        }
+                    }
+                    StatusLine {
+                        readonly property string problem: moveScreen.formProblem !== "" ? moveScreen.formProblem : root.moveProblem
+                        visible: problem !== ""
+                        kind: "problem"
+                        text: problem
+                    }
+                    Action {
+                        visible: root.moveCheck === null || moveScreen.checking && root.moveCheck.plan === null
+                        label: moveScreen.checking ? "Checking the fee…" : "Review"
+                        strong: true
+                        enabledNow: root.moveCan && !moveScreen.checking && !moveScreen.sending && root.moveToText() !== "" && root.moveAmountText() !== "" && moveScreen.formProblem === ""
+                        onPressed: root.moveReview()
+                    }
+
+                    // The sheet: what moves, from where to where, and who pays.
+                    Card {
+                        id: moveSheet
+                        visible: root.moveCheck !== null && root.moveCheck.plan !== null
+                        Layout.fillWidth: true
+                        readonly property var plan: root.moveCheck !== null ? root.moveCheck.plan : null
+                        Text { text: "Check it, then approve"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                        Fact { label: "Moves"; value: moveSheet.plan ? moveSheet.plan.amount_shown + " " + moveSheet.plan.symbol + (moveSheet.plan.bridge_label ? " (" + moveSheet.plan.bridge_label + ")" : "") : "" }
+                        Fact { label: "Token"; code: true; value: moveSheet.plan ? Logic.keyShown(moveSheet.plan.definition) : ""; full: moveSheet.plan ? String(moveSheet.plan.definition) : "" }
+                        Fact { label: "From"; value: moveSheet.plan ? Logic.idShort(moveSheet.plan.from) + ", which signs it" : "" }
+                        Fact { label: "To"; value: Logic.moveToLine(moveSheet.plan, root.moveCheck) + (moveScreen.importedTo ? " (imported)" : ""); full: root.moveCheck !== null && root.moveCheck.to_account ? root.moveCheck.to_account : "" }
+                        Fact { label: "Fee"; value: Logic.moveFeeLine(moveSheet.plan, root.moveCheck, root.moveNative()) }
+                        Hint { font.pixelSize: root.px(16); text: "Public: everyone can see both accounts and the amount. One block, about 30 seconds. It can't be undone." }
+                        StatusLine { visible: root.moveCheck !== null && root.moveCheck.state === "failed"; kind: "problem"; text: root.moveCheck !== null ? root.moveCheck.problem : "" }
+                        RowLayout {
+                            spacing: 10
+                            Action {
+                                label: moveScreen.sending ? "Moving…" : moveScreen.checking ? "Checking the fee…" : "Approve and move"
+                                strong: true
+                                enabledNow: root.moveCheck !== null && root.moveCheck.state === "ready" && !moveScreen.sending && Logic.moveSendArgs(root.moveCheck) !== null
+                                onPressed: root.moveApprove()
+                            }
+                            Action { label: "Change something"; enabledNow: !moveScreen.sending; onPressed: root.moveReset() }
+                        }
+                    }
+                    StatusLine { visible: moveScreen.sending; kind: "working"; text: "Moving it: one block, about 30 seconds." }
+                    StatusLine { visible: moveScreen.result.text !== ""; kind: moveScreen.result.kind; text: moveScreen.result.text }
                 }
 
                 // ── Receive ──
@@ -11435,20 +11793,21 @@ Item {
                         }
                         Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + (root.receivePrivateAble ? " For a private claim, make a private code on Receive from Ethereum." : " Private claims aren't in this wallet yet.") : "" }
                         Hint { visible: root.claimCheck !== null && !!root.claimCheck.approval; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.approval ? root.claimCheck.approval : "" }
-                        Hint { visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + String(root.claimCheck.error.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + Logic.clean(root.claimCheck.error.message) : "" }
                         Repeater {
                             model: root.depositClaimJob !== null ? Logic.claimPhases(root.depositClaimJob) : []
                             Hint {
                                 required property var modelData
+                                textFormat: Text.PlainText
                                 font.pixelSize: root.px(15)
                                 color: modelData.done ? root.good : modelData.now ? root.brass : root.dim
-                                text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + modelData.hint
+                                text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + Logic.clean(modelData.hint)
                             }
                         }
-                        Hint { visible: root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? root.depositClaimJob.note : "" }
-                        Hint { visible: root.depositClaimJob !== null && !!root.depositClaimJob.error; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) + ": " + String(root.depositClaimJob.error.message || "") : "" }
-                        Hint { visible: root.claimUncertain !== null; font.pixelSize: root.px(15); text: root.claimUncertain !== null ? String(root.claimUncertain.message || "") : "" }
-                        Hint { visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? String(root.claimNeeds.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? Logic.clean(root.depositClaimJob.note) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.error; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) + ": " + Logic.clean(root.depositClaimJob.error.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimUncertain !== null; font.pixelSize: root.px(15); text: root.claimUncertain !== null ? Logic.clean(root.claimUncertain.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? Logic.clean(root.claimNeeds.message) : "" }
                     }
 
                     Link {
@@ -11555,13 +11914,13 @@ Item {
                         Hint { font.pixelSize: root.px(15); text: "LEZ 0.4 · bridge test network. The LEZ Bridge builds the claim and asks your wallet; your wallet simulates it, shows you what it does, then proves it on this computer and sends it. The bridge never sees your keys and never proves." }
                         Fact { visible: pclaimScreen.row !== null; label: "Into"; code: true; value: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : ""; full: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : "" }
                         Fact { visible: root.pcPlan !== null && root.pcPlan.sponsored !== undefined && root.pcPlan.sponsored !== null; label: "Fee"; value: root.pcPlan !== null && root.pcPlan.sponsored === true ? "Sponsored by the bridge, paid inside the proof" : "Paid inside the proof from the account" }
-                        Hint { visible: root.pcPlan !== null && !!root.pcPlan.privacy && !!root.pcPlan.privacy.headline; font.pixelSize: root.px(15); text: root.pcPlan !== null && root.pcPlan.privacy ? String(root.pcPlan.privacy.headline || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.pcPlan !== null && !!root.pcPlan.privacy && !!root.pcPlan.privacy.headline; font.pixelSize: root.px(15); text: root.pcPlan !== null && root.pcPlan.privacy ? String(root.pcPlan.privacy.headline || "") : "" }
                         Repeater {
                             model: root.pcPlan !== null && root.pcPlan.privacy && Array.isArray(root.pcPlan.privacy.notes) ? root.pcPlan.privacy.notes : []
                             Hint { required property var modelData; font.pixelSize: root.px(15); text: String(modelData) }
                         }
                         Hint { visible: root.pcRefused !== null && !!root.pcRefused.code; font.pixelSize: root.px(15); text: root.pcRefused !== null ? Logic.claimErrorTitle(root.pcRefused.code) + " (" + String(root.pcRefused.code || "") + ")" : "" }
-                        Hint { visible: root.pcNeeds !== null && !!root.pcNeeds.message; font.pixelSize: root.px(15); text: root.pcNeeds !== null ? String(root.pcNeeds.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.pcNeeds !== null && !!root.pcNeeds.message; font.pixelSize: root.px(15); text: root.pcNeeds !== null ? Logic.clean(root.pcNeeds.message) : "" }
                         Fact { visible: root.pcJobNow !== null; label: "Job"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.id : ""; full: root.pcJobNow !== null ? root.pcJobNow.id : "" }
                         Fact { visible: root.pcJobNow !== null && root.pcJobNow.tx !== ""; label: "Transaction"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.tx : ""; full: root.pcJobNow !== null ? root.pcJobNow.tx : "" }
                     }
@@ -11739,7 +12098,7 @@ Item {
                                    ? " · " + Logic.receiveBalanceLine(root.bridgeNetBlocks, root.receiveFocusRow.account, root.receiveFocusRow.symbol, root.receiveFocusRow.deployment, root.bridgeNetReadAt, root.receiveClaimedAt[root.receiveFocusRow.id]) : ".")
                                 : receiveScreen.p.headline
                         }
-                        Hint { visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.p.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.p.detail }
                         Hint {
                             visible: receiveScreen.p.stage === "claimable" && root.receiveFocusRow !== null
                             color: root.ink
@@ -11774,6 +12133,9 @@ Item {
                         }
                     }
 
+                    // An imported account (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): what the phrase can and can't do for it,
+                    // said once in the card itself, not only under Details (test of 2026-11-18).
+                    StatusLine { visible: text !== ""; kind: ""; text: Logic.importedNoticeLine(receiveScreen.result) }
                     Link {
                         visible: !root.receiveMissing && !root.appInline
                         text: root.receiveDetails ? "Details ▾" : "Details ▸"
@@ -11785,14 +12147,14 @@ Item {
                         visible: root.receiveDetails && !root.receiveMissing && !root.appInline
                         Layout.fillWidth: true
                         spacing: 10
-                        Hint { font.pixelSize: root.px(15); text: "The wallet makes this deposit's secret from your account's own key; this app never sees it. The page gets only a code: the amount, the vault and a commitment that hides which account receives it." }
-                        Hint { visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: Logic.receiveSecretLine(receiveScreen.result) }
+                        Hint { textFormat: Text.PlainText; visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
                         Hint { visible: !root.receivePrivateAble; font.pixelSize: root.px(15); text: "This LEZ Bridge can't make private codes yet: their claim needs a proof made on this computer, which a newer LEZ Bridge offers." }
                         Hint { visible: root.receivePrivateAble; font.pixelSize: root.px(15); text: "A private code's deposit is claimed by a proof your wallet makes on this computer (" + Logic.PRIVATE_PROOF_TIME + ", about 9.5 GB of memory). Nothing public then links the Sepolia deposit to your account; the amount, the token and the timing are public." }
                         Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: receiveScreen.resultAccount; full: receiveScreen.resultAccount }
-                        Hint { visible: receiveScreen.refusal !== null && receiveScreen.refusal.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.refusal !== null ? receiveScreen.refusal.detail : "" }
-                        Hint { visible: receiveScreen.releaseNotice !== null; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.text) : "" }
-                        Hint { visible: receiveScreen.releaseNotice !== null && !!receiveScreen.releaseNotice.detail; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.detail || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.refusal !== null && receiveScreen.refusal.detail !== ""; font.pixelSize: root.px(15); text: receiveScreen.refusal !== null ? receiveScreen.refusal.detail : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.releaseNotice !== null; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.text) : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.releaseNotice !== null && !!receiveScreen.releaseNotice.detail; font.pixelSize: root.px(15); text: receiveScreen.releaseNotice !== null ? String(receiveScreen.releaseNotice.detail || "") : "" }
                         Hint { visible: receiveScreen.result !== null; font.pixelSize: root.px(15); text: "Text copied in Names may not reach another computer through Screen Sharing: paste the link in a browser on this computer, use the QR (On your phone), or select it below." }
                         // The link as text that can be selected by hand.
                         TextEdit {
@@ -11809,13 +12171,11 @@ Item {
                         }
                         Fact { visible: receiveScreen.result !== null; label: "Code"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : "" }
                         Fact { visible: receiveScreen.result !== null && !!receiveScreen.result.commitment; label: "Commitment"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : "" }
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
-                        // An imported account (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): what the phrase can and can't do for it.
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.account_notice; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.account_notice ? String(receiveScreen.result.account_notice) : "" }
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
-                        Hint { visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
                         Hint { visible: text !== ""; font.pixelSize: root.px(15); text: Logic.compareDigitsDetail(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
-                        Hint { visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? String(root.receiveNeeds.message || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? Logic.clean(root.receiveNeeds.message) : "" }
                     }
                     Link { visible: receiveScreen.shows && (root.receiveFocus !== "" || receiveScreen.result !== null); text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.startNewReceive() }
                 }
@@ -11876,7 +12236,8 @@ Item {
                                 }
                             }
                         }
-                        Hint { visible: root.sbSources.length > 0 && root.sbElsewhere !== ""; font.pixelSize: root.px(15); text: root.sbElsewhere }
+                        // Also when only private accounts are listed (test of 2026-11-18: a v6 balance went unsaid).
+                        Hint { visible: (root.sbSources.length > 0 || root.sbPrivateSources.length > 0) && root.sbElsewhere !== ""; font.pixelSize: root.px(15); text: root.sbElsewhere }
                         // From a private account (a newer LEZ Bridge): proved on this computer first.
                         Flow {
                             visible: root.sbPrivateSources.length > 0
@@ -11980,6 +12341,8 @@ Item {
                                 Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                             }
                             Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                            // A signed code (WALLET-ROADMAP item 9): checked by the LEZ Bridge module; the words stay required.
+                            StatusLine { readonly property var sig: Logic.signatureLine(root.sbCheck); visible: sig.text !== ""; kind: sig.kind; text: sig.text }
                             // What the words are, and where to compare them.
                             RowLayout {
                                 Layout.fillWidth: true
@@ -12047,9 +12410,9 @@ Item {
                             kind: Logic.toneKind(sendBackScreen.p.tone)
                             text: sendBackScreen.p.headline
                         }
-                        Hint { visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
+                        Hint { textFormat: Text.PlainText; visible: sendBackScreen.p.detail !== ""; font.pixelSize: root.px(15); text: sendBackScreen.p.detail }
                         // The steps done by hand today, said once, here.
-                        Hint { visible: Logic.sendBackByHand(sendBackScreen.p.stage) && sendBackScreen.p.action !== "settle" && sendBackScreen.p.gate !== true; font.pixelSize: root.px(15); text: Logic.sendBackByHandLine(sendBackScreen.p.stage) }
+                        Hint { textFormat: Text.PlainText; visible: Logic.sendBackByHand(sendBackScreen.p.stage) && sendBackScreen.p.action !== "settle" && sendBackScreen.p.gate !== true; font.pixelSize: root.px(15); text: Logic.sendBackByHandLine(sendBackScreen.p.stage) }
                         Hint {
                             visible: root.sbFocusRow !== null
                             color: root.ink
@@ -12057,7 +12420,7 @@ Item {
                                 + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? "; you receive " + sendBackScreen.st.receive_text + "." : ".")
                         }
                         Hint { visible: root.sbFocusRow !== null && root.sbFocusRow.words !== ""; font.pixelSize: root.px(15); text: root.sbFocusRow !== null ? "Its words: " + root.sbFocusRow.words : "" }
-                        Hint { visible: root.sbFocusRow !== null && !!root.sbFocusRow.notice; font.pixelSize: root.px(15); text: root.sbFocusRow !== null && root.sbFocusRow.notice ? String(root.sbFocusRow.notice) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.sbFocusRow !== null && !!root.sbFocusRow.notice; font.pixelSize: root.px(15); text: root.sbFocusRow !== null && root.sbFocusRow.notice ? String(root.sbFocusRow.notice) : "" }
                         // After the first send to an address with no name here: "Save to my addresses" with
                         // a short name (kept by the LEZ Bridge on this computer, never on chain).
                         ColumnLayout {
@@ -12115,7 +12478,7 @@ Item {
                                 font.family: root.mono
                                 font.pixelSize: root.px(13)
                             }
-                            Hint { font.pixelSize: root.px(15); text: root.sbWitness !== null && root.sbWitness.note ? String(root.sbWitness.note) : "" }
+                            Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: root.sbWitness !== null && root.sbWitness.note ? String(root.sbWitness.note) : "" }
                         }
                         // The proof's Ethereum wrapper, by hand today: the seal the bridge team sends.
                         ColumnLayout {
@@ -12190,7 +12553,7 @@ Item {
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.exit_commitment; label: "Exit"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.burn_tx; label: "Burn"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.released_tx; label: "Released"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : "" }
-                        Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + String(root.sbFocusStatus.text) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + String(root.sbFocusStatus.text) : "" }
                         TextEdit {
                             visible: root.sbRelease !== null && root.sbRelease.id === root.sbFocus
                             Layout.fillWidth: true
@@ -12361,7 +12724,7 @@ Item {
                             onPressed: { root.removeToken(accountPage.row.definition); root.walletView = "home" }
                         }
                     }
-                    Hint { visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
+                    Hint { textFormat: Text.PlainText; visible: accountPage.send.reason !== ""; font.pixelSize: root.px(14); text: accountPage.send.reason }
                     Hint { visible: accountPage.row !== null && !!accountPage.row.later; font.pixelSize: root.px(14); text: Logic.chainLaterNote() }
                     Hint { visible: accountPage.send.switchFirst; font.pixelSize: root.px(14); text: "Send makes this the account payments come from, then opens the form." }
                     StatusLine { visible: root.accountsError !== ""; kind: Logic.noticeKind(root.accountsError, true); text: root.accountsError }
@@ -12656,7 +13019,7 @@ Item {
                             kind: "problem"
                             text: Logic.amountProblem(privateMoveField.text)
                         }
-                        Hint { visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(15); text: root.shieldLine() }
+                        Hint { textFormat: Text.PlainText; visible: root.shieldJob !== null; color: root.waitTone; font.pixelSize: root.px(15); text: root.shieldLine() }
                         Hint { visible: root.shieldMoved && root.shieldJob === null; color: root.good; font.pixelSize: root.px(15); text: "Moved. Your private account is ready for names." }
                         StatusLine { visible: root.shieldProblem !== "" && root.shieldJob === null; kind: Logic.noticeKind(root.shieldProblem, true); text: root.shieldProblem }
                     }
@@ -13311,7 +13674,27 @@ Item {
                         spacing: 10
                         Action { label: "+  New private account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "private"; newAccountField.text = "" } }
                         Action { label: "+  New public account"; enabledNow: !root.accountsBusy; onPressed: { root.accountNewKind = "public"; newAccountField.text = "" } }
+                        Action { visible: root.accountImportCan; label: "+  Import a public account"; enabledNow: !root.accountsBusy; onPressed: { root.accountImportOpen = true; root.accountImportLine = ""; importKeyField.text = ""; importLabelField.text = "" } }
                     }
+                    // Import account (item D): the key is pasted (shown as dots) or picked from a file.
+                    ColumnLayout {
+                        visible: root.accountImportOpen && root.accountImportCan
+                        Layout.fillWidth: true
+                        spacing: 6
+                        StatusLine { kind: "waiting"; text: Logic.IMPORT_WARNING }
+                        Hint { font.pixelSize: root.px(15); text: Logic.IMPORT_COVER_LINE }
+                        Field { id: importKeyField; Layout.fillWidth: true; size: 16; secret: true; code: true; hint: "The account's signing key (64 hex digits) or its key-chain JSON" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field { id: importLabelField; Layout.fillWidth: true; size: 16; hint: "Nickname (optional)" }
+                            Action { label: root.accountsBusy ? "Importing…" : "Import it"; strong: true; enabledNow: !root.accountsBusy && importKeyField.text.trim() !== ""; onPressed: root.importAccount(importKeyField.text, importLabelField.text) }
+                            Action { label: "Choose a file…"; enabledNow: !root.accountsBusy; onPressed: root.pickImportFile() }
+                            Action { label: "Cancel"; enabledNow: !root.accountsBusy; onPressed: { importKeyField.text = ""; root.accountImportOpen = false } }
+                        }
+                        StatusLine { visible: root.accountsBusy; kind: "working"; text: "Importing it into this wallet…" }
+                    }
+                    StatusLine { visible: root.accountImportLine !== ""; kind: root.accountImportKind; text: root.accountImportLine }
                     ColumnLayout {
                         visible: root.accountNewKind !== ""
                         Layout.fillWidth: true
@@ -13462,7 +13845,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 8
                         // The bridge in use: its name, vault, its four words (the bridge page shows the same).
-                        Hint { color: root.ink; text: Logic.bridgeActiveLine(root.bridgeList) }
+                        Hint { textFormat: Text.PlainText; color: root.ink; text: Logic.bridgeActiveLine(root.bridgeList) }
                         Text {
                             textFormat: Text.PlainText
                             visible: text !== ""
@@ -13482,7 +13865,7 @@ Item {
                                 required property var modelData
                                 Layout.fillWidth: true
                                 spacing: 12
-                                Hint { Layout.fillWidth: true; color: root.ink; font.pixelSize: root.px(15); text: Logic.bridgeRowLine(modelData) }
+                                Hint { textFormat: Text.PlainText; Layout.fillWidth: true; color: root.ink; font.pixelSize: root.px(15); text: Logic.bridgeRowLine(modelData) }
                                 Action { label: root.bridgeActing === modelData.id ? "Choosing…" : "Use"; enabledNow: root.bridgeActing === "" && modelData.has_code !== false; onPressed: root.useBridge(modelData.id) }
                                 Link { visible: modelData.removable === true; text: root.bridgeActing === modelData.id ? "Removing…" : "Remove"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.removeBridge(modelData.id) }
                             }
@@ -13560,8 +13943,8 @@ Item {
                         }
                     }
                     Part { text: "Backup" }
-                    Hint { color: root.ink; text: Logic.backupLastLine(root.backupStatus !== null ? root.backupStatus.last : null, root.backupWhen) }
-                    Hint { visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.ink; text: Logic.backupUncoveredLine(root.backupStatus) }
+                    Hint { textFormat: Text.PlainText; color: root.ink; text: Logic.backupLastLine(root.backupStatus !== null ? root.backupStatus.last : null, root.backupWhen) }
+                    Hint { textFormat: Text.PlainText; visible: Logic.backupUncoveredLine(root.backupStatus) !== ""; color: root.ink; text: Logic.backupUncoveredLine(root.backupStatus) }
                     RowLayout {
                         visible: root.backupMode === ""
                         spacing: 14
@@ -13614,7 +13997,7 @@ Item {
                         spacing: 8
                         readonly property var checked: Logic.backupCheckedLine(root.backupMade !== null ? root.backupMade.check : null)
                         Hint { color: parent.checked.ok ? root.good : root.ink; text: (parent.checked.ok ? "✓ " : "") + parent.checked.text }
-                        Hint { font.pixelSize: root.px(15); text: root.backupMade !== null ? Logic.backupFoldersLine(root.backupMade.folders) : "" }
+                        Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: root.backupMade !== null ? Logic.backupFoldersLine(root.backupMade.folders) : "" }
                         RowLayout {
                             spacing: 14
                             Hint { Layout.fillWidth: false; font.pixelSize: root.px(15); text: root.backupMade !== null ? root.backupMade.file : "" }
@@ -14050,7 +14433,7 @@ Item {
                             font.pixelSize: root.px(16)
                             onPressed: root.claimName(root.missing)
                         }
-                        Hint { visible: root.claimLine !== ""; text: root.claimLine }
+                        Hint { textFormat: Text.PlainText; visible: root.claimLine !== ""; text: root.claimLine }
                     }
                     Hint {
                         visible: root.namesNet === "0.4"
@@ -14188,7 +14571,7 @@ Item {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.publishOnRegister = !root.publishOnRegister }
                             }
                         }
-                        Hint { visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
+                        Hint { textFormat: Text.PlainText; visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
                         Action {
                             label: "Register " + root.missing + " publicly"
                             strong: root.cliPath === ""
@@ -14507,7 +14890,7 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            Hint { visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["change"]) }
+                            Hint { textFormat: Text.PlainText; visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["change"]) }
                             Action {
                                 label: "Save profile"
                                 strong: true

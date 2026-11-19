@@ -1,7 +1,12 @@
-# Signed withdraw-to codes (design only, 2026-11-18)
+# Signed withdraw-to codes (designed 2026-11-18, built 2026-11-19)
 
-rfp-022 `proposal/WALLET-ROADMAP.md` item 9. **State: designed only (3).** No code exists on either side
-(the bridge page or the LEZ Bridge module). The Names app needs only one new line of display (§6).
+rfp-022 `proposal/WALLET-ROADMAP.md` item 9. **State: tested in unit and page tests only (2), 2026-11-19.**
+Built on rfp-022 branch `roadmap-2` (the page's "Sign the code with your wallet", the module's
+`decode_withdraw_to_signed`, vectors `web/deposit/test/vectors/withdraw-signed-v1.json`; its
+`modules/NAMES-SEND-BACK.md` §3.1d is the record) and here on `names-roadmap-2` (the line under the four
+words, `Logic.signatureLine`). The page is not deployed. The owner's answers to §7 (2026-11-19, through
+the task): unsigned codes and pasted addresses keep working, with "Not signed: compare the four words";
+a signature that is present but wrong is refused. The text below is the design as written before.
 
 ## 1. What it is for
 

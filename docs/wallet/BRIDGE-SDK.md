@@ -180,12 +180,24 @@ flow (root signer, async `Credit`), the same limits (name 64, 32 holdings). Diff
 |---|---|---|
 | `MintBy { to, amount }` (tag 9): mint by any actor of the authority program | — | yes (the bridge mints through it) |
 | `BurnWithNotice { definition, amount, notify: Actor, memo }` (tag 10) and `BurnNotice` | — | yes (exit burns) |
-| Definition authority | an account | the bridge's **program** id |
+| Definition authority | `Option<AccountId>` | `Option<Authority>` (`Account(id)` or `Program(id)`, one byte longer): a wrapped token's definition is the bridge's **program** |
 | Decimals, symbol | none | none in the token; the bridge's `Config.tokens[i].decimals` |
 | Image | `wallet-tokens` guest | own image (`633555cc…`), immutable |
 
-So nothing must change on the bridge side, and the wallet's own token code reads and moves
-bridged tokens when pointed at the bridge token program. What the wallet adds:
+**Correction (2026-11-19):** "wire-compatible" holds for messages, holdings and credits, not for
+definitions. Since the bridge's 2026-11-14 fixes a definition's authority is typed, so the prototype
+codec reads a wrapped token's definition with one byte left over and calls it no token: `names
+token send` stopped at its first line for every bridged token. The CLI has a second codec for it,
+`--token-codec=bridge` (`cli/src/tokens.rs` `BridgeCodec`, tested on the v5 wETH definition's real
+bytes). The module's `bridge_token_send` (`basecamp-module/rust-lib/src/bridge_send.rs`) uses it to
+move wrapped tokens between public accounts on LEZ 0.4 (rfp-022 WALLET-ROADMAP item 12): token
+program and decimals from the bridge's Config, a dry run (`LOGOS_NAMES_DRY_RUN`) to price the fee
+before the sheet, the account the tokens leave paying the fee (the relay pays only claims and burns).
+It needs a LEZ 0.4 names tool built with that codec; an older tool is said plainly
+("needs a newer tool"). `cli_token_send_source` still uses the prototype codec.
+
+Before that correction this section said: nothing must change on the bridge side, and the wallet's
+own token code reads and moves bridged tokens when pointed at the bridge token program. What the wallet adds:
 - **Token sources** (`propose_token_source(program, definitions)`): an app registers a token
   program and its definitions with name, symbol, decimals and origin; the person approves; the
   holdings view lists them as "Bridged tokens" with decimals (`token_source_holdings`), and
@@ -271,3 +283,17 @@ message 6,595 bytes, byte-identical in encoding to the on-chain public claim of 
 2853) apart from the opening. Planning twice gives the same digest; a send with another digest
 stops before `phase: prove`. The drain (V's 100,000,000 dUSDC to P, nothing declared) shows as
 "pays 100 dUSDC" with P's holding +100,000,000 and is refused. Nothing was proven or sent.
+
+## 7. A burn's address, checked (`burn_opening`, 2026-11-19)
+
+`propose_relayed_call` takes an `opening` beside a burn's call (rfp-022 `modules/NAMES-SEND-BACK.md`
+§3.3a). The module (`basecamp-module/rust-lib/src/burn_opening.rs`) strips it before the call is read,
+makes k' with the names CLI (`module app-secret`, scope `RFP022/exit`, tag `RFP022/ek`, the opening's
+index and context; only when the asking app holds that grant, counted in its hourly secret calls),
+recomputes E and sets the request's `burn_opening`: `{checked: true, recipient, recipient_halves,
+words_text}` when E equals the burn's memo, a refusal when it doesn't, `{checked: false, why}` without
+an opening or a grant. `get_config` `features` lists `burn_opening`. The app's line is
+`Logic.burnAddressLine`; the sheet itself lives on branch `names-safety-b`, so its wiring is the patch
+`docs/wallet/burn-opening-sheet.patch` (one line of its `burnDestination`), applied at merge.
+Golden vector `basecamp-module/rust-lib/testdata/burn-opening-v1.json` (rfp-022's, byte for byte). Unit
+tests only.

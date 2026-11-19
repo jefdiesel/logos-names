@@ -32,10 +32,13 @@
 //! a job (`cli_*` and `job`; see `cli.rs`): its changes are proven on this
 //! machine with the CLI's own keys.
 
+mod account_import;
 mod activity;
 mod avatar;
 mod backup;
 mod bridge_net;
+mod bridge_send;
+mod burn_opening;
 mod chain;
 mod chain_keys;
 mod chain_fee;
@@ -866,6 +869,18 @@ pub trait NamesModule: Send + 'static {
     /// Refused while a CLI job runs, since a job saves the wallet when it ends.
     fn cli_account_new(&mut self, kind: String, label: String) -> String;
 
+    /// Imports ONE public account into the wallet in use from `text`: its signing key (64 hex
+    /// digits) or its key-chain JSON (`{"Public": …}`, `{"ImportedPublic": …}`, `{private_key,
+    /// account?}`), with an optional nickname. The names tool reads the key on standard input
+    /// (`names module account-import`), never on a command line; nothing of `text` is ever in a
+    /// reply, an error, a log or the history. Overwritten after use, best effort: the pasted text, a
+    /// file's text, the key taken out, the request line and the tool's stdin copy; NOT the JSON
+    /// parser's temporaries or the host's and the app's own copies (account_import.rs).
+    /// `{account, imported: true, notice, label}`. The recovery phrase does not cover the account.
+    /// A private account's key chain is refused. Names app only. get_config `features` lists
+    /// `account_import` (`account_import.rs`).
+    fn cli_account_import(&mut self, text: String, label: String) -> String;
+
     /// Gives the wallet's `account` (`Public/<id>` or `Private/<id>`) the
     /// nickname `label`; an empty one clears it. `{account, label}`.
     fn cli_account_label(&mut self, account: String, label: String) -> String;
@@ -1190,6 +1205,21 @@ pub trait NamesModule: Send + 'static {
     /// Sends a token of a registered token source, as `cli_token_send` does for the wallet's
     /// own token program. Names app only.
     fn cli_token_send_source(&mut self, token_program: String, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String;
+
+    /// LEZ 0.4 (the bridge test network): moves `amount` (the token's own unit, such as `0.5`) of
+    /// the wrapped token `definition` of the bridge `bridge` (its program ID) from the wallet's
+    /// public account `from` (`Public/<id>`) to `to`: a public account (`Public/<id>`) or an LNS
+    /// name's public account. The token program and the decimals come from the bridge's Config,
+    /// which must list `definition`. The account the tokens leave pays the fee in test LEZ (the
+    /// bridge's relay pays only for claims and burns). Without `send` it is a CHECK: a wallet job
+    /// that prices the fee and sends nothing; its ended `job` state has `ready` (or `problem`, in
+    /// plain words) and `fee` `{about, at_most}`. With `send`, the move itself: one block; its
+    /// ended `job` state has `tx`, `block` or `problem`. The value is the job, with `plan`
+    /// `{bridge, bridge_label, definition, symbol, decimals, amount, amount_shown, from, to,
+    /// to_name, fee_payer, relay_pays}` for the sheet. Needs a LEZ 0.4 names tool with the
+    /// `bridge` token codec (an older one is said plainly). Names app only. get_config `features`
+    /// lists `bridge_token_send` (`bridge_send.rs`).
+    fn bridge_token_send(&mut self, bridge: String, definition: String, amount: String, from: String, to: String, send: bool) -> String;
 
     /// Forgets a token source. `{removed}`. Names app only.
     fn remove_token_source(&mut self, token_program: String) -> String;
@@ -1590,7 +1620,7 @@ const MODULE_VERSION: &str = "0.17.0";
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
 /// `relayed_bridge_burn`: `propose_relayed_call` signs a burn of one denomination to a bridge whose
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
-const MODULE_FEATURES: [&str; 8] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet"];
+const MODULE_FEATURES: [&str; 11] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -3423,6 +3453,144 @@ impl Names {
     /// an install that worked is put to use (`version`, `path`, `warning`),
     /// one that didn't says why (`problem`); a move to private says whether
     /// anything `moved`; a failed payment says why.
+    /// `propose_relayed_call`'s `burn_opening` for a burn (`burn_opening::for_burn`): k' made by the
+    /// names CLI as `app_secret` would make it for `app` (only when `app` holds that grant; counted in
+    /// its hourly secret calls). The tool's words never reach the sheet.
+    fn burn_opening_of(&mut self, app: &str, account: &str, opening: Option<&Value>, asked: &Value) -> Result<Value, String> {
+        let message = asked["message"].as_str().and_then(|m| registry::unhex(m.trim().trim_start_matches("0x")).ok()).unwrap_or_default();
+        let burn = bridge_net::decode_burn(&message).map_err(|_| "the burn's message can't be read, so the wallet doesn't sign it".to_owned())?;
+        let memo = burn.memo;
+        // What was burned, by the target bridge's own token list: the opening must name it.
+        let burned = Self::burn_target(asked).and_then(|target| {
+            #[cfg(test)]
+            let said = tests::BURN_CONFIGS.with(|c| c.borrow().get(&registry::account_text(&target)).cloned());
+            #[cfg(not(test))]
+            let said: Option<Result<Option<bridge_net::BridgeConfig>, String>> = None;
+            let config = match said {
+                Some(said) => said.ok().flatten(),
+                None => match bridge_net::config_within(&self.bridge_url(), &target, bridge_net::BURN_SIGN_FRESH, std::time::Duration::from_secs(4)) {
+                    bridge_net::ConfigNow::Read(Some(bytes)) => bridge_net::decode_bridge_config(&bytes).ok(),
+                    _ => None,
+                },
+            }?;
+            let token = config.tokens.iter().find(|t| t.definition == burn.definition)?;
+            let eth = registry::unhex(token.eth_token.trim_start_matches("0x")).ok().and_then(|b| <[u8; 20]>::try_from(b).ok())?;
+            Some(burn_opening::Burned { eth_token: eth, amount: burn.amount, decimals: token.decimals, symbol: token.symbol() })
+        });
+        // The burn's own bridge, as its Config says (read within the burn's signing freshness, kept):
+        // the opening must name its cfgId, vault and chain.
+        let bridge = Self::burn_target(asked).and_then(|target| {
+            #[cfg(test)]
+            if let Some(identity) = tests::BURN_IDENTITY.with(|i| *i.borrow()) {
+                return Some(identity);
+            }
+            match bridge_net::config_within(&self.bridge_url(), &target, bridge_net::BURN_SIGN_FRESH, std::time::Duration::from_secs(4)) {
+                bridge_net::ConfigNow::Read(Some(bytes)) => bridge_net::decode_config_identity(&bytes).ok(),
+                _ => None,
+            }
+        });
+        let granted = self.store().private.has_secret(app, account, burn_opening::SCOPE);
+        let setup = self.cli_setup();
+        let now = provider::now_ms();
+        let calls = self.secret_calls.entry(app.to_owned()).or_default();
+        burn_opening::for_burn(opening, &memo, bridge, burned.as_ref(), |o| {
+            if !granted {
+                return Ok(None);
+            }
+            calls.retain(|at| now.saturating_sub(*at) < 60 * 60 * 1000);
+            if calls.len() >= provider_private::MAX_SECRET_CALLS_PER_HOUR {
+                return Err("this app has asked for secrets too often in the last hour; try again later".to_owned());
+            }
+            calls.push(now);
+            let setup = setup?;
+            setup.wallet_ready()?;
+            // The scheme pinned for this account, as for every value given out (an `unknown` pin: unchecked).
+            let pinned = provider_private::read_pin(&setup.wallet, account);
+            if pinned.as_deref() == Some(provider_private::SCHEME_UNKNOWN) {
+                return Ok(None);
+            }
+            let mut input = json!({ "app": app, "account": account, "scope": burn_opening::SCOPE, "context": registry::hex(&burn_opening::context(o)),
+                                "tag": burn_opening::TAG, "first": o.index, "count": 1 });
+            if let Some(scheme) = pinned {
+                input["scheme"] = json!(scheme);
+            }
+            let unreadable = || "the wallet couldn't make the values to check the burn's address with; nothing was shown to approve".to_owned();
+            let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE).map_err(|_| unreadable())?;
+            let answer: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| unreadable())?;
+            let value = answer["values"][0].as_str().filter(|v| answer["account"] == account && v.len() == 64).ok_or_else(unreadable)?;
+            let k: [u8; 32] = registry::unhex(value).ok().and_then(|b| b.try_into().ok()).ok_or_else(unreadable)?;
+            Ok(Some(k))
+        })
+    }
+
+    /// `cli_account_import`, once the key is read: the names tool imports it from standard input.
+    fn account_import_with(&mut self, key: &str, account: Option<&str>, label: &str) -> Result<Value, String> {
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        self.no_job_running()?;
+        let mut input = account_import::request(key, account, label);
+        // In the CLI lane: no other names run this module started (a balance read syncs and writes the
+        // wallet file) overlaps the import. The names tool also locks the file for the write.
+        let ran = served::in_lane(&served::Lane::Cli, || cli::run_with_input(&setup, vec!["module".into(), "account-import".into()], &input, SECRET_PATIENCE));
+        account_import::wipe(&mut input);
+        let output = ran.map_err(|why| account_import::refusal(&why).to_owned())?;
+        let entry: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "The import didn't go through. Nothing was imported.".to_owned())?;
+        let imported = entry["account"].as_str().filter(|a| a.starts_with("Public/") && registry::parse_account(&a["Public/".len()..]).is_ok()).map(str::to_owned);
+        let imported = imported.ok_or_else(|| "The import didn't go through. Nothing was imported.".to_owned())?;
+        // Said imported only once the wallet file holds it as an imported account (its key is in no tree).
+        let stored = std::fs::read(setup.wallet.join(cli::STORAGE_FILE)).ok().map(|bytes| backup::accounts_of(&bytes)).unwrap_or_default();
+        if !stored.iter().any(|a| a["account"] == imported.as_str() && a["imported"] == true) {
+            return Err("The names tool answered, but the account isn't in the wallet file. Nothing is imported: import it again.".to_owned());
+        }
+        // Its bridge values follow the imported scheme for good, whatever the key trees make later.
+        provider_private::write_pin(&setup.wallet, &imported, app_secret::SCHEME_IMPORTED)
+            .map_err(|_| "The account is imported, but its scheme couldn't be kept beside the wallet. Try the import again before using it with the bridge.".to_owned())?;
+        // The accounts the app reads next include it.
+        self.forget_balances();
+        Ok(json!({ "account": imported, "imported": true, "notice": account_import::IMPORTED_NOTICE, "label": entry["label"] }))
+    }
+
+    /// `bridge_token_send`: the bridge's Config (kept, or read for at most a few seconds), the
+    /// move checked against it, then a wallet job (`dry`: the check, which sends nothing).
+    fn bridge_send_start(&self, bridge: &str, definition: &str, amount: &str, from: &str, to: &str, send: bool) -> Result<Value, String> {
+        if self.net != Net::Lez04 {
+            return Err("Moving wrapped tokens runs on LEZ 0.4, the bridge test network; the wallet is on LEZ 0.3 now. Nothing was started.".to_owned());
+        }
+        let program = registry::bare_account(bridge.trim()).map_err(|_| "That isn't a bridge's program ID.".to_owned())?;
+        let gone = || "That bridge isn't on the bridge test network now. Nothing was started.".to_owned();
+        // Tests set the Config the chain would give (`BURN_CONFIGS`).
+        #[cfg(test)]
+        let said = tests::BURN_CONFIGS.with(|configs| configs.borrow().get(&registry::account_text(&program)).cloned());
+        #[cfg(not(test))]
+        let said: Option<Result<Option<bridge_net::BridgeConfig>, String>> = None;
+        let config = match said {
+            Some(said) => said.map_err(|why| format!("Couldn't read the bridge's token list ({why}). Nothing was started."))?.ok_or_else(gone)?,
+            None => match bridge_net::config_within(&self.bridge_url(), &program, bridge_net::CONFIG_FRESH, std::time::Duration::from_secs(4)) {
+                bridge_net::ConfigNow::Read(Some(bytes)) => bridge_net::decode_bridge_config(&bytes)?,
+                bridge_net::ConfigNow::Read(None) => return Err(gone()),
+                bridge_net::ConfigNow::Unread(why) => return Err(format!("Couldn't read the bridge's token list ({why}). Nothing was started.")),
+                bridge_net::ConfigNow::Reading => return Err("Still reading the bridge's token list. Try again in a moment; nothing was started.".to_owned()),
+            },
+        };
+        let it = bridge_send::checked(&config, program, definition, amount, from, to)?;
+        let setup = self.cli_setup()?;
+        setup.wallet_ready()?;
+        self.no_background_job()?;
+        // One send per check: a second send of the same move (a late answer pressed again) needs a new review.
+        let key = bridge_send::move_key(&it);
+        if send {
+            bridge_send::may_send(&key, std::time::Instant::now())?;
+        } else {
+            bridge_send::checked_now(&key, std::time::Instant::now());
+        }
+        chain_answers(&setup, None, &readable_account(&setup, self.program.as_ref()), &mut Start::new(&self.sequencer))?;
+        let jobs = self.jobs()?;
+        let id = jobs.prepare(cli::WALLET_JOB)?;
+        let (kind, env): (&str, &[(&str, &str)]) = if send { (bridge_send::SEND_KIND, &[]) } else { (bridge_send::CHECK_KIND, &[("LOGOS_NAMES_DRY_RUN", "1")]) };
+        let started = jobs.start_with_env(&setup, &id, cli::WALLET_JOB, kind, bridge_send::args(&it), env)?;
+        Ok(merged(started, &json!({ "plan": bridge_send::plan(&it) })))
+    }
+
     fn job_outcome(&mut self, state: &mut Value) {
         let running = state["state"] == "running";
         let done = state["state"] == "done";
@@ -3499,6 +3667,19 @@ impl Names {
                     state["problem"] = Value::from(format!("Claiming finished only in part: {}", cli::failure_cause(&log)));
                 }
             }
+            Some(kind @ (bridge_send::CHECK_KIND | bridge_send::SEND_KIND)) => {
+                let check = kind == bridge_send::CHECK_KIND;
+                let whole = state["id"].as_str().and_then(|id| self.jobs().ok().map(|jobs| jobs.whole_log(id))).unwrap_or_else(|| log.clone());
+                let fields = if check { bridge_send::check_outcome(&whole, running) } else { bridge_send::send_outcome(&whole, running, done) };
+                if let Some(fields) = fields.as_object() {
+                    for (key, value) in fields {
+                        state[key.as_str()] = value.clone();
+                    }
+                }
+                if !check && !running {
+                    self.forget_tokens();
+                }
+            }
             Some("token_send" | "token_receive") if !running => {
                 if let Some(fields) = cli::token_outcome(&log).as_object() {
                     for (key, value) in fields {
@@ -3512,7 +3693,8 @@ impl Names {
         }
         // Every job that failed says what didn't happen and why in one line, built from
         // the CLI's error, never its last cause line (transfer-failure-text-is-last-cause-line).
-        let failed = !running && !done && state["state"] != "unknown";
+        // A bridge move's check that priced it and stopped before sending is `ready`, not failed.
+        let failed = !running && !done && state["state"] != "unknown" && state["ready"] != true;
         if failed && !state["problem"].as_str().is_some_and(|problem| !problem.is_empty()) {
             let kind = state["kind"].as_str().unwrap_or_default().to_owned();
             state["problem"] = Value::from(cli::job_problem(&kind, &log));
@@ -6662,6 +6844,11 @@ impl NamesModule for Names {
             Ok(setup) => setup,
             Err(why) => return busy_or_reply(Err(why)),
         };
+        // An account added to the wallet file by another program (the names tool's import) shows
+        // on this read, not only after Refresh: a changed file drops what was kept.
+        if cli::wallet_changed(&setup.wallet) {
+            self.forget_balances();
+        }
         // The CLI lists them (seconds when it catches the wallet up): on a thread of its own.
         let key = self.served_key("cli_accounts", &format!("{}|{}", setup.wallet.display(), setup.sequencer));
         let snap = self.served.read(&key, ACCOUNTS_EVERY, served::Lane::Cli, move || {
@@ -6683,6 +6870,33 @@ impl NamesModule for Names {
             self.forget_balances();
             Ok(made)
         })())
+    }
+
+    fn cli_account_import(&mut self, text: String, label: String) -> String {
+        let mut text = text;
+        let out = match only_the_names_app() {
+            Err(refused) => Err(refused),
+            Ok(()) => match account_import::content(&text) {
+                Err(why) => Err(why.to_owned()),
+                Ok(file) => {
+                    let mut file = file;
+                    let done = match account_import::key_of(file.as_deref().unwrap_or(&text)) {
+                        Err(why) => Err(why.to_owned()),
+                        Ok((mut key, account)) => {
+                            let done = self.account_import_with(&key, account.as_deref(), &label);
+                            account_import::wipe(&mut key);
+                            done
+                        }
+                    };
+                    if let Some(file) = file.as_mut() {
+                        account_import::wipe(file);
+                    }
+                    done
+                }
+            },
+        };
+        account_import::wipe(&mut text);
+        reply(out)
     }
 
     fn cli_account_label(&mut self, account: String, label: String) -> String {
@@ -7548,6 +7762,8 @@ impl NamesModule for Names {
         reply((|| {
             let app = asking_app()?;
             let now = provider::now_ms();
+            // A burn's opening (burn_opening.rs) is read here; the call itself goes on without it.
+            let (call_json, opening) = burn_opening::split(&call_json);
             if self.net != Net::Lez04 {
                 return Err("calls someone else pays for are signed on LEZ 0.4 (the bridge test network) only; the wallet is on LEZ 0.3 now".to_owned());
             }
@@ -7608,6 +7824,11 @@ impl NamesModule for Names {
             }
             request["report"] = report;
             request["check"] = json!("ready");
+            // The burn's Ethereum address, checked against its exit commitment when the app opened it.
+            if asks_burn {
+                let written = request["account"].as_str().unwrap_or_default().to_owned();
+                request["burn_opening"] = self.burn_opening_of(&app, &written, opening.as_ref(), &asked)?;
+            }
             self.queue_any(&app, request, now)
         })())
     }
@@ -7713,6 +7934,18 @@ impl NamesModule for Names {
             })
         })());
         self.log_started(&out, json!({ "kind": "token_send", "chain": "lez", "to": to.trim(), "amount": cli::amount_text(&amount).ok(), "token": definition.trim() }));
+        out
+    }
+
+    fn bridge_token_send(&mut self, bridge: String, definition: String, amount: String, from: String, to: String, send: bool) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let out = reply(self.bridge_send_start(&bridge, &definition, &amount, &from, &to, send));
+        if send {
+            let plan = serde_json::from_str::<Value>(&out).ok().map(|out| out["value"]["plan"].clone()).unwrap_or(Value::Null);
+            self.log_started(&out, json!({ "kind": "token_send", "chain": "lez", "network": "lez-0.4", "from": plan["from"], "to": plan["to"], "amount": plan["amount"], "token": plan["definition"] }));
+        }
         out
     }
 
@@ -8424,10 +8657,25 @@ impl Names {
         calls.push(now);
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
-        let input = json!({
+        // The scheme pinned for this account at its first values (any app): the tool must use it.
+        // Kept in the wallet folder (provider_private::PINS_FILE), falling back to the grant rows a
+        // build before that kept it in. A grant from before pinning: `unknown`, both sets asked.
+        let wallet_dir = self.wallet_dir_of(self.net);
+        let mut pinned = wallet_dir.as_deref().and_then(|dir| provider_private::read_pin(dir, &account)).or_else(|| self.store().private.pinned_scheme(&account));
+        if pinned.is_none() && self.store().private.has_legacy_grant(&account) {
+            pinned = Some(provider_private::SCHEME_UNKNOWN.to_owned());
+            if let Some(dir) = &wallet_dir {
+                provider_private::write_pin(dir, &account, provider_private::SCHEME_UNKNOWN)?;
+            }
+        }
+        let unknown = pinned.as_deref() == Some(provider_private::SCHEME_UNKNOWN);
+        let mut input = json!({
             "app": ask.app, "account": account, "scope": ask.scope, "context": registry::hex(&ask.context),
             "tag": ask.tag, "first": ask.first, "count": ask.count,
         });
+        if let Some(scheme) = &pinned {
+            input["scheme"] = json!(if unknown { "both" } else { scheme.as_str() });
+        }
         let what = if ask.scope.starts_with("RFP022/deposit") { "deposit keys" } else { "the values this app asks for" };
         // The tool's words never reach the screen (they named key trees and CLI errors): a plain line.
         let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE)
@@ -8437,15 +8685,50 @@ impl Names {
         if values.len() as u64 != ask.count || answer["account"] != account.as_str() || values.iter().any(|v| v.len() != 64) {
             return Err(provider_private::secret_failure(what, &account, ""));
         }
-        // A tool that doesn't name its scheme predates imported accounts' phrase values: for an
-        // imported account it may give values from the imported key, which the phrase can't make again.
-        let imported = match answer["scheme"].as_str() {
-            Some(app_secret::SCHEME_IMPORTED) => true,
-            Some(app_secret::SCHEME_PHRASE) => false,
-            _ if self.account_imported(&account) == Some(true) => return Err(provider_private::older_tool_for_imported(what, &account)),
-            _ => false,
+        // A tool that doesn't name its scheme predates imported accounts' phrase values: it gives an
+        // imported account values from the imported key, which the phrase can't make again. Its
+        // answer is taken only for an account known to be a phrase account (review 2026-11-18).
+        let scheme = match answer["scheme"].as_str() {
+            Some(scheme @ (app_secret::SCHEME_IMPORTED | app_secret::SCHEME_PHRASE)) => scheme.to_owned(),
+            _ if pinned.as_deref() == Some(app_secret::SCHEME_IMPORTED) || unknown => return Err(provider_private::older_tool_for_imported(what, &account)),
+            _ => match self.account_imported(&account) {
+                Some(false) => app_secret::SCHEME_PHRASE.to_owned(),
+                Some(true) => return Err(provider_private::older_tool_for_imported(what, &account)),
+                None => return Err(provider_private::older_tool(what, &account)),
+            },
         };
-        Ok(json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values, "imported": imported }))
+        // Pinned once; a tool that answers another way than the pin is refused, never handed out.
+        if !unknown && pinned.as_ref().is_some_and(|p| *p != scheme) {
+            return Err(provider_private::other_scheme(what, &account));
+        }
+        // An unknown pin: the other scheme's values too, which the app matches against what it
+        // stored (it never pins: what it stored decides, record by record).
+        let other: Option<Vec<String>> = if unknown {
+            let o: Vec<String> = answer["other_values"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+            if o.len() as u64 != ask.count || o.iter().any(|v| v.len() != 64) || answer["other_scheme"].as_str().is_none_or(|x| x == scheme) {
+                return Err(provider_private::older_tool(what, &account));
+            }
+            Some(o)
+        } else {
+            None
+        };
+        if pinned.is_none() {
+            if let Some(dir) = &wallet_dir {
+                provider_private::write_pin(dir, &account, &scheme)?;
+            }
+        }
+        let store = self.store();
+        if !unknown && store.private.secrets.values().filter_map(Value::as_array).flatten().any(|g| g["account"] == account.as_str() && !g["scheme"].is_string()) {
+            store.private.pin_scheme(&account, &scheme);
+            store.save();
+        }
+        let imported = scheme == app_secret::SCHEME_IMPORTED;
+        let mut reply = json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values, "imported": imported });
+        if let Some(other) = other {
+            reply["other_values"] = json!(other);
+            reply["other_imported"] = json!(!imported);
+        }
+        Ok(reply)
     }
 
     /// Whether `account` is imported: the names CLI's word (`module account-scheme`, by key-tree
@@ -8470,9 +8753,13 @@ impl Names {
         }
         let dir = self.wallet_dir_of(self.net)?;
         let store = std::fs::read(dir.join(cli::STORAGE_FILE)).ok()?;
-        let entries: Vec<Value> = backup::accounts_of(&store).into_iter().filter(|a| a["account"] == account).collect();
+        let listed = backup::accounts_of(&store);
+        let entries: Vec<&Value> = listed.iter().filter(|a| a["account"] == account).collect();
         if entries.is_empty() {
-            return None;
+            // An imported PRIVATE account is listed without its id: a private account the file
+            // doesn't name, in a wallet holding one, is taken as imported (it fails safe).
+            let unnamed_private = listed.iter().any(|a| a["kind"] == "private" && a["imported"] == true && a["account"].is_null());
+            return (account.starts_with("Private/") && unnamed_private).then_some(true);
         }
         // Listed in a key tree as well: a phrase account (the CLI's rule).
         Some(entries.iter().all(|a| a["imported"] == true))
@@ -10309,6 +10596,8 @@ mod tests {
         pub(super) static BRIDGE_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<String>, String>>> = std::cell::RefCell::new(HashMap::new());
         /// The Config bytes the chain gives for each bridge a burn may go to (`burn_configs`), by
         /// bridge program: a bridge not listed has no Config there.
+        /// The burn target's Config identity (cfgId, vault, chain) a test says the chain gives.
+        pub(super) static BURN_IDENTITY: std::cell::RefCell<Option<([u8; 32], [u8; 20], u64)>> = const { std::cell::RefCell::new(None) };
         pub(super) static BURN_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<bridge_net::BridgeConfig>, String>>> = std::cell::RefCell::new(HashMap::new());
         /// Whether a bridge neither map names is read over HTTP from the test's endpoint (the
         /// stall tests), not taken as having no Config.
@@ -13539,7 +13828,7 @@ mod tests {
         let values = format!("[\"{}\",\"{}\"]", "ab".repeat(32), "cd".repeat(32));
         let tail = format!(
             "case \"$*\" in\n\
-             *\"module app-secret\"*) cat > \"$(dirname \"$0\")/secret-in.json\"; echo '{{\"account\":\"Private/{PRIVATE}\",\"values\":{values}}}' ;;\n\
+             *\"module app-secret\"*) cat > \"$(dirname \"$0\")/secret-in.json\"; echo '{{\"account\":\"Private/{PRIVATE}\",\"values\":{values},\"scheme\":\"phrase\"}}' ;;\n\
              esac"
         );
         let (mut names, dir) = with_wallet("provider-secret", &tail);
@@ -13731,10 +14020,130 @@ mod tests {
         assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
         as_caller(app("lez_bridge"));
         let error = ask(&mut names, "RFP022/exit")["error"].as_str().unwrap_or_default().to_owned();
-        assert!(error.contains("too old") && error.contains("Update the names tool"), "{error}");
+        assert!(error.contains("too old") && error.contains("Install the LEZ 0.4 names tool"), "{error}");
+        // The settings button's own label ("Use this CLI") is the one place the word may appear.
+        let shown = error.replace("\"Use this CLI\"", "");
         for raw in ["CLI", "Error", "recovery phrase, so values", "key tree"] {
-            assert!(!error.contains(raw), "{raw:?} in {error}");
+            assert!(!shown.contains(raw), "{raw:?} in {error}");
         }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Review 2026-11-18: a names tool from 14ec746..7096020 (no `scheme` in its answer, no
+    /// `module account-scheme`) is refused for an imported PRIVATE account, which the wallet file
+    /// lists without an id; a phrase private account listed with its id still works with it.
+    #[test]
+    fn an_old_tool_is_refused_for_an_imported_private_account_the_file_cannot_name() {
+        let values = format!("[\"{}\"]", "ab".repeat(32));
+        let account = format!("Private/{PRIVATE}");
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module account-scheme\"*) echo \"error: unrecognized subcommand 'account-scheme'\" >&2; exit 2 ;;\n\
+             *\"module app-secret\"*) echo '{{\"account\":\"{account}\",\"values\":{values}}}' ;;\n\
+             esac"
+        );
+        let store_with = |names: &Names, entries: Value| {
+            let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+            std::fs::write(wallet.join(cli::STORAGE_FILE), json!({ "key_chain": { "accounts": entries } }).to_string()).unwrap();
+        };
+        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1));
+        for (label, entries, granted) in [
+            ("old-tool-imported-private", json!([{ "ImportedPrivate": { "account": {}, "key_chain": {}, "kind": "Regular" } }, { "Public": { "account_id": PUBLIC } }]), false),
+            ("old-tool-phrase-private", json!([{ "Private": { "account_id": PRIVATE } }, { "Public": { "account_id": PUBLIC } }]), true),
+        ] {
+            let (mut names, dir) = with_wallet(label, &tail);
+            store_with(&names, entries);
+            connect(&mut names, "lez_bridge", &account);
+            as_caller(app("lez_bridge"));
+            let id = ask(&mut names)["value"]["request"]["request"].as_str().unwrap().to_owned();
+            assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+            as_caller(app("lez_bridge"));
+            let got = ask(&mut names);
+            if granted {
+                assert_eq!((got["value"]["granted"].as_bool(), got["value"]["imported"].as_bool()), (Some(true), Some(false)), "{got}");
+            } else {
+                let error = got["error"].as_str().unwrap_or_default();
+                assert!(error.contains("too old") && got["value"]["values"].is_null(), "{got}");
+            }
+            as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Review 2026-11-18: the scheme is pinned at the account's first values and sent to the tool
+    /// on every later call; a tool that answers another way than the pin is refused.
+    #[test]
+    fn the_scheme_is_pinned_at_the_first_values_and_a_different_answer_is_refused() {
+        let values = format!("[\"{}\"]", "ab".repeat(32));
+        let account = format!("Public/{PUBLIC}");
+        // The stand-in answers `imported` the first time, `phrase` after (as if a key tree had
+        // reached the account), and keeps what it was sent.
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module account-scheme\"*) echo '{{\"account\":\"{account}\",\"scheme\":\"imported\"}}' ;;\n\
+             *\"module app-secret\"*) d=\"$(dirname \"$0\")\"; n=$(cat \"$d/n\" 2>/dev/null || echo 0); echo $((n+1)) > \"$d/n\"; cat > \"$d/secret-in-$n.json\"; cat \"$d/answer-$n.json\" ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("pinned-scheme", &tail);
+        for (n, scheme) in [(0, "imported"), (1, "phrase"), (2, "phrase")] {
+            std::fs::write(dir.join(format!("answer-{n}.json")), json!({ "account": account, "values": serde_json::from_str::<Value>(&values).unwrap(), "scheme": scheme }).to_string() + "\n").unwrap();
+        }
+        connect(&mut names, "lez_bridge", &account);
+        as_caller(app("lez_bridge"));
+        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1));
+        let id = ask(&mut names)["value"]["request"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let first = ask(&mut names);
+        assert_eq!(first["value"]["imported"], true, "{first}");
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in-0.json")).unwrap()).unwrap();
+        assert!(sent["scheme"].is_null(), "nothing pinned before the first values: {sent}");
+        let second = ask(&mut names);
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in-1.json")).unwrap()).unwrap();
+        assert_eq!(sent["scheme"], "imported", "the pin goes to the tool");
+        assert!(second["error"].as_str().unwrap_or_default().contains("another way"), "{second}");
+        assert!(second["value"]["values"].is_null());
+        // The pin is kept in the wallet folder, so taking the grant back and giving it again
+        // (the app's only grant for the account) does not lose it (review 2026-11-18).
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        assert_eq!(provider_private::read_pin(&wallet, &account).as_deref(), Some("imported"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.revoke_secret("lez_bridge".into(), account.clone(), "RFP022/exit".into()))["value"]["revoked"], true);
+        as_caller(app("lez_bridge"));
+        let id = ask(&mut names)["value"]["request"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let third = ask(&mut names);
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in-2.json")).unwrap()).unwrap();
+        assert_eq!(sent["scheme"], "imported", "the pin outlives the grant");
+        assert!(third["error"].as_str().unwrap_or_default().contains("another way"), "{third}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Review 2026-11-18: a grant from before this build pinned schemes is `unknown`: the tool is
+    /// asked for both sets and the app gets both, to match against what it stored.
+    #[test]
+    fn a_grant_from_before_pinning_gets_both_sets() {
+        let account = format!("Public/{PUBLIC}");
+        let tail = "case \"$*\" in\n\
+             *\"module app-secret\"*) d=\"$(dirname \"$0\")\"; cat > \"$d/secret-in.json\"; cat \"$d/answer.json\" ;;\n\
+             esac".to_owned();
+        let (mut names, dir) = with_wallet("legacy-grant", &tail);
+        std::fs::write(dir.join("answer.json"), json!({ "account": account, "values": ["ab".repeat(32)], "scheme": "phrase", "other_values": ["cd".repeat(32)], "other_scheme": "imported" }).to_string() + "\n").unwrap();
+        connect(&mut names, "lez_bridge", &account);
+        // A secret grant row as builds before pinning wrote it (no `v`, no `scheme`).
+        names.store().private.secrets.insert("lez_bridge".into(), json!([{ "account": account, "scope": "RFP022/exit", "since": 1 }]));
+        names.store().save();
+        as_caller(app("lez_bridge"));
+        let got = parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1))["value"].clone();
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in.json")).unwrap()).unwrap();
+        assert_eq!(sent["scheme"], "both", "{sent}");
+        assert_eq!(got["values"], json!(["ab".repeat(32)]), "{got}");
+        assert_eq!((got["other_values"].clone(), got["other_imported"].as_bool()), (json!(["cd".repeat(32)]), Some(true)));
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        assert_eq!(provider_private::read_pin(&wallet, &account).as_deref(), Some("unknown"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -13751,7 +14160,8 @@ mod tests {
         ] {
             let text = provider_private::secret_failure("deposit keys", a, why);
             assert!(text.contains(has), "{why} -> {text}");
-            assert!(!text.contains("CLI") && !text.contains("Error") && !text.contains("panicked"), "{text}");
+            let shown = text.replace("\"Use this CLI\"", "");
+            assert!(!shown.contains("CLI") && !shown.contains("Error") && !shown.contains("panicked"), "{text}");
         }
     }
 
@@ -13839,6 +14249,132 @@ mod tests {
 
     /// The LEZ 0.4 faucet through the module: the Names app only, LEZ 0.4 only, the endpoint's
     /// answer kept plain; the feature is published.
+    /// Import account (item D): the key goes to the names tool on standard input only, and never
+    /// comes back in a reply, an error, the argv, a log or the history, on success or failure.
+    #[test]
+    fn an_imported_key_never_shows_anywhere_but_the_tool_s_stdin() {
+        let marker = "5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1c0ffee5ec2e7e1";
+        let scan = |dir: &std::path::Path, said: &str| {
+            assert!(!said.contains(marker) && !said.contains("5ec2e7"), "{said}");
+            for entry in walk(dir) {
+                if entry.ends_with("stdin.txt") {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&std::fs::read(&entry).unwrap_or_default()).into_owned();
+                assert!(!text.contains(marker), "{} holds the key", entry.display());
+            }
+            let history = config_dir().map(|d| std::fs::read_to_string(d.join("activity.json")).unwrap_or_default()).unwrap_or_default();
+            assert!(!history.contains(marker), "the history holds the key");
+        };
+        let ok_tail = format!("printf '%s\\n' \"$*\" > \"$(dirname \"$0\")/argv.txt\"\ncase \"$*\" in\n *account-import*) cat > \"$(dirname \"$0\")/stdin.txt\"; printf '%s' '{{\"key_chain\":{{\"accounts\":[{{\"ImportedPublic\":{{\"account_id\":\"{OTHER}\"}}}}]}}}}' > \"$LEE_WALLET_HOME_DIR/storage.json\"; echo '{{\"account\":\"Public/{OTHER}\",\"label\":\"Shop\"}}' ;;\n *lost*) echo '{{\"account\":\"Public/{OTHER}\"}}' ;;\n esac");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let (mut names, dir) = with_wallet("import-ok", &ok_tail);
+        let json_entry = json!({ "ImportedPublic": { "account_id": OTHER, "pub_sign_key": marker } }).to_string();
+        let said = names.cli_account_import(json_entry, "Shop".into());
+        let v = parsed(&said);
+        assert_eq!((v["value"]["account"].as_str(), v["value"]["imported"].as_bool()), (Some(format!("Public/{OTHER}").as_str()), Some(true)), "{said}");
+        assert!(v["value"]["notice"].as_str().unwrap().contains("recovery phrase does not bring this account back"));
+        let stdin = std::fs::read_to_string(dir.join("stdin.txt")).unwrap();
+        assert!(stdin.contains(marker), "the key reached the tool, on standard input");
+        // The scheme is pinned beside the wallet: imported, for good.
+        let wallet_dir = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        assert_eq!(provider_private::read_pin(&wallet_dir, &format!("Public/{OTHER}")).as_deref(), Some("imported"));
+        assert!(!std::fs::read_to_string(dir.join("argv.txt")).unwrap().contains(marker), "never on the command line");
+        let _ = std::fs::remove_file(dir.join("stdin.txt"));
+        scan(&dir, &said);
+        let _ = std::fs::remove_dir_all(&dir);
+        // The tool refuses and echoes what it read: none of it comes back.
+        let (mut names, dir) = with_wallet("import-refused", "case \"$*\" in\n *account-import*) cat >&2; echo 'Error: this wallet has that account already; nothing was imported' >&2; exit 1 ;;\n esac");
+        let said = names.cli_account_import(marker.into(), String::new());
+        assert_eq!(parsed(&said)["error"], "This wallet has that account already. Nothing was imported.");
+        scan(&dir, &said);
+        let (mut names, dir2) = with_wallet("import-odd", "cat >&2; exit 1");
+        let said = names.cli_account_import(format!("0x{marker}"), String::new());
+        assert_eq!(parsed(&said)["error"], "The import didn't go through. Nothing was imported.");
+        scan(&dir2, &said);
+        // The tool says imported but the wallet file doesn't hold it (another process wrote an older
+        // copy back): not said imported.
+        let (mut lost, dir3) = with_wallet("import-lost", "case \"$*\" in\n *account-import*) cat > /dev/null; echo '{\"account\":\"Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR\"}' ;;\n esac");
+        let said = lost.cli_account_import(marker.into(), String::new());
+        assert!(parsed(&said)["error"].as_str().unwrap().contains("isn't in the wallet file"), "{said}");
+        scan(&dir3, &said);
+        let _ = std::fs::remove_dir_all(dir3);
+        // Not a key, a private key chain, another app: refused before anything runs, in fixed words.
+        for (text, words) in [("hello", "isn't a signing key"), ("{\"Private\":{}}", "private account")] {
+            let said = names.cli_account_import(text.into(), String::new());
+            assert!(parsed(&said)["error"].as_str().unwrap().contains(words), "{said}");
+        }
+        as_caller(app("other_app"));
+        let said = names.cli_account_import(marker.into(), String::new());
+        assert_eq!(parsed(&said)["success"], false);
+        assert!(!said.contains(marker));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("account_import")));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    /// F: a burn's opening, from the asking app's grant through the names CLI's k' to the sheet's
+    /// value; another bridge named, a wrong k' or no grant are each said or refused.
+    #[test]
+    fn a_burn_s_opening_is_checked_with_the_wallet_s_own_key() {
+        let v: Value = serde_json::from_str(include_str!("../testdata/burn-opening-v1.json")).unwrap();
+        let c = &v["cases"][0];
+        let o = burn_opening::parse(&c["opening"]).unwrap();
+        let k = c["k"].as_str().unwrap();
+        let tail = format!("case \"$*\" in\n *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n *app-secret*) cat > \"$(dirname \"$0\")/asked.json\"; echo '{{\"account\":\"Public/{PUBLIC}\",\"values\":[\"{k}\"],\"scheme\":\"phrase\"}}' ;;\n esac");
+        let (mut names, dir) = with_wallet("burn-opening", &tail);
+        names.net = Net::Lez04;
+        let account = format!("Public/{PUBLIC}");
+        let memo = registry::unhex(c["exit"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+        let message = bridge_net::encode_burn(&bridge_net::BurnMessage {
+            definition: [5; 32], amount: 10_000_000_000_000_000, notify_account: bridge_net::config_address(&registry::parse_account(bridge_net::BRIDGE_V5_PROGRAM).unwrap()),
+            notify_program: registry::parse_account(bridge_net::BRIDGE_V5_PROGRAM).unwrap(), memo: memo.clone().try_into().unwrap(),
+        });
+        let asked = json!({ "message": registry::hex(&message) });
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, o.vault, o.chain_id)));
+        // The v5 Config's token list: the burned definition is its wETH (the opening's token, ETH = 0x0).
+        let weth = bridge_net::Token { eth_token: "0x0000000000000000000000000000000000000000".into(), definition: [5; 32], decimals: 18, denoms: vec![10_000_000_000_000_000], registered: true, burn_frozen: false };
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge_net::BRIDGE_V5_PROGRAM.to_owned(), Ok(Some(bridge_net::BridgeConfig { token_program: [9; 32], burn_frozen: false, tokens: vec![weth] }))));
+        // No grant: unchecked, and the tool isn't asked.
+        let shown = names.burn_opening_of("lez_bridge", &account, Some(&c["opening"]), &asked).unwrap();
+        assert_eq!(shown["checked"], false, "{shown}");
+        assert!(!dir.join("asked.json").exists());
+        names.store().private.grant_secret("lez_bridge", &account, burn_opening::SCOPE, 1).unwrap();
+        let shown = names.burn_opening_of("lez_bridge", &account, Some(&c["opening"]), &asked).unwrap();
+        assert_eq!((shown["checked"].as_bool(), shown["words_text"].as_str()), (Some(true), c["words_text"].as_str()), "{shown}");
+        // The tool was asked for exactly that value: the app, the account, the scope, the context, the tag, the index.
+        let asked_tool: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("asked.json")).unwrap()).unwrap();
+        assert_eq!(asked_tool, json!({ "app": "lez_bridge", "account": account, "scope": "RFP022/exit", "context": c["context"], "tag": "RFP022/ek", "first": 0, "count": 1 }));
+        // Another bridge's vault in the opening: refused before the tool is asked.
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, [0x26; 20], o.chain_id)));
+        assert!(names.burn_opening_of("lez_bridge", &account, Some(&c["opening"]), &asked).unwrap_err().contains("another bridge"));
+        // The burn's E isn't the opening's: refused.
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, o.vault, o.chain_id)));
+        let mut other = c["opening"].clone();
+        other["recipient"] = json!("0x1111111111111111111111111111111111111111");
+        assert!(names.burn_opening_of("lez_bridge", &account, Some(&other), &asked).unwrap_err().contains("doesn't match"));
+        // No opening at all (an older LEZ Bridge): sealed, as before.
+        assert_eq!(names.burn_opening_of("lez_bridge", &account, None, &asked).unwrap()["checked"], false);
+        // An opening naming another amount than the one burned (E made to match): refused.
+        let mut more = c["opening"].clone();
+        more["denom"] = json!("100000000000000000");
+        assert!(names.burn_opening_of("lez_bridge", &account, Some(&more), &asked).unwrap_err().contains("another amount"));
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = None);
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every file under `dir`.
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() { out.extend(walk(&path)) } else { out.push(path) }
+        }
+        out
+    }
+
     #[test]
     fn the_test_lez_faucet_is_asked_on_lez_0_4_only() {
         let url = registry::stub_rpc(|request| match request["method"].as_str().unwrap_or_default() {
@@ -14565,6 +15101,96 @@ mod tests {
         assert_eq!(ended["state"], "failed");
         assert_eq!(ended["problem"], "The token transfer didn't go through: Public/CCVd holds 0 Demo, less than 5");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Roadmap 12: wrapped tokens moved between public accounts on LEZ 0.4. Checked against the
+    /// bridge's Config (its token program and decimals, never the app's), priced first by a check
+    /// that sends nothing, then sent from the chosen account with the bridge codec.
+    #[test]
+    fn wrapped_tokens_move_between_accounts_checked_and_priced_first() {
+        let tail = "case \"$*\" in\n\
+                    *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n\
+                    *\"token send\"*) if [ -n \"$LOGOS_NAMES_DRY_RUN\" ]; then echo 'fee: about 2140, at most 3000 (gas: 9 cycles, limit 20)'; echo 'Error: LOGOS_NAMES_DRY_RUN is set, so nothing was sent' >&2; exit 1; fi; echo 'submitted ab12'; echo 'applied in block 7' ;;\n\
+                    esac";
+        let (mut names, dir) = with_wallet("bridge-send", tail);
+        let v5 = bridge_net::BRIDGE_V5_PROGRAM;
+        let demo = registry::account_text(&DEMO);
+        let from = format!("Public/{PUBLIC}");
+        let to = format!("Public/{OTHER}");
+        let config = bridge_net::BridgeConfig {
+            token_program: PROGRAM,
+            burn_frozen: false,
+            tokens: vec![bridge_net::Token { eth_token: "0x0000000000000000000000000000000000000000".into(), definition: DEMO, decimals: 18, denoms: vec![], registered: true, burn_frozen: false }],
+        };
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(v5.to_owned(), Ok(Some(config))));
+        assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("bridge_token_send")));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        // LEZ 0.3: refused; another app: refused.
+        assert!(parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["error"].as_str().unwrap().contains("LEZ 0.4"));
+        names.net = Net::Lez04;
+        as_caller(app("other_app"));
+        assert_eq!(parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["success"], false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        // Checked before anything runs.
+        for (definition, amount, from_, to_, words) in [
+            (registry::account_text(&[8; 32]), "1", from.clone(), to.clone(), "isn't one this bridge made"),
+            (demo.clone(), "0", from.clone(), to.clone(), "above 0"),
+            (demo.clone(), "1,5", from.clone(), to.clone(), "isn't an amount"),
+            (demo.clone(), "1", format!("Private/{PRIVATE}"), to.clone(), "private account"),
+            (demo.clone(), "1", from.clone(), format!("Private/{OTHER}"), "private account"),
+            (demo.clone(), "1", from.clone(), from.clone(), "leave from"),
+        ] {
+            let refused = parsed(&names.bridge_token_send(v5.into(), definition, amount.into(), from_, to_, false));
+            assert!(refused["error"].as_str().unwrap_or_default().contains(words), "{words}: {refused}");
+        }
+        // A bridge with no Config on the chain, and one whose Config can't be read: nothing starts.
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge_net::BRIDGE_V4_PROGRAM.to_owned(), Ok(None)));
+        assert!(parsed(&names.bridge_token_send(bridge_net::BRIDGE_V4_PROGRAM.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["error"].as_str().unwrap().contains("isn't on the bridge test network"));
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge_net::BRIDGE_V4_PROGRAM.to_owned(), Err("timed out".to_owned())));
+        assert!(parsed(&names.bridge_token_send(bridge_net::BRIDGE_V4_PROGRAM.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false))["error"].as_str().unwrap().contains("Couldn't read the bridge's token list"));
+        assert!(!dir.join("jobs").exists(), "nothing ran");
+
+        // The check: priced, nothing sent, ready.
+        let checked = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), false));
+        assert_eq!(checked["value"]["kind"], bridge_send::CHECK_KIND, "{checked}");
+        assert_eq!(checked["value"]["plan"]["amount"], "1200000000000000000");
+        assert_eq!(checked["value"]["plan"]["fee_payer"], from.as_str());
+        assert_eq!(checked["value"]["plan"]["bridge_label"], "bridge v5");
+        let ended = job_end(&mut names, checked["value"]["id"].as_str().unwrap());
+        assert_eq!((ended["state"].as_str(), ended["ready"].as_bool()), (Some("done"), Some(true)), "{ended}");
+        assert!(ended["problem"].is_null(), "{ended}");
+        assert_eq!(ended["fee"]["about"], "2140");
+        let program = registry::account_text(&PROGRAM);
+        assert!(ended["log_tail"].as_str().unwrap().contains(&format!("[--token-program={program}]\n[--token-codec=bridge]\n[token]\n[send]\n[--to={to}]\n[--from={from}]\n[--]\n[{demo}]\n[1200000000000000000]")), "{ended}");
+        // The move.
+        let sent = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), true));
+        assert_eq!(sent["value"]["kind"], bridge_send::SEND_KIND, "{sent}");
+        let ended = job_end(&mut names, sent["value"]["id"].as_str().unwrap());
+        assert_eq!((ended["state"].as_str(), ended["tx"].as_str(), ended["block"].as_u64()), (Some("done"), Some("ab12"), Some(7)), "{ended}");
+        // Pressed again (a late answer looked failed): refused until the move is reviewed again.
+        let again = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), true));
+        assert!(again["error"].as_str().unwrap().contains("sent already"), "{again}");
+        let rechecked = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), false));
+        job_end(&mut names, rechecked["value"]["id"].as_str().unwrap());
+        let resent = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), true));
+        assert_eq!(resent["value"]["kind"], bridge_send::SEND_KIND, "{resent}");
+        job_end(&mut names, resent["value"]["id"].as_str().unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+
+        // A tool without the bridge codec, and an account short of the fee: plain words.
+        for (said, words) in [
+            ("echo 'Error: no token codec called bridge; known: prototype' >&2; exit 1", "needs a newer tool"),
+            ("echo 'fee: about 2140, at most 3000 (gas)'; echo 'Error: Public/AbC holds 0; about 3000 is held for the fee while this runs' >&2; exit 1", "has no test LEZ, and the fee needs about 3,000"),
+        ] {
+            let (mut names, dir) = with_wallet("bridge-send-refused", &format!("case \"$*\" in\n*--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n*) {said} ;;\nesac"));
+            names.net = Net::Lez04;
+            let checked = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1".into(), from.clone(), to.clone(), false));
+            let ended = job_end(&mut names, checked["value"]["id"].as_str().unwrap());
+            assert_eq!((ended["state"].as_str(), ended["ready"].as_bool()), (Some("failed"), Some(false)), "{ended}");
+            assert!(ended["problem"].as_str().unwrap().contains(words), "{words}: {ended}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
     }
 
     #[test]

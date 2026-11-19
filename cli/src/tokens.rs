@@ -204,12 +204,128 @@ fn encode(message: &token_core::Message) -> Vec<u8> {
     borsh::to_vec(message).expect("a token message serializes")
 }
 
+/// The RFP-022 bridge's token program (rfp-022 `lez-bridge/token/src/lib.rs`), which holds the
+/// wrapped tokens on the bridge test network. Its messages, holdings and credits are the
+/// prototype's byte for byte (Transfer is tag 0, Credit tag 5, the same fields), but since the
+/// bridge's 2026-11-14 fixes a definition's authority is typed, `Option<Authority>` with
+/// `Authority::Account(id)` or `Authority::Program(id)`, one byte longer than the prototype's
+/// `Option<AccountId>`: read with the prototype's types, a wrapped token's definition has a byte
+/// left over and is no token at all. So this codec reads definitions in the bridge's layout and
+/// writes a new token's authority as `Authority::Account`.
+pub struct BridgeCodec;
+
+/// The bridge token program's own layouts, where they differ from the prototype's.
+mod bridge_wire {
+    use borsh::{BorshDeserialize, BorshSerialize};
+    use lee_core::account::AccountId;
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+    pub enum Authority {
+        Account(AccountId),
+        Program(AccountId),
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+    pub enum Definition {
+        Fungible { name: String, total_supply: u128, metadata_id: Option<AccountId>, authority: Option<Authority> },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+    pub enum State {
+        Holdings(BTreeMap<AccountId, u128>),
+        Definition(Definition),
+    }
+
+    /// The first two messages, in the program's order (the tag byte is the variant index).
+    #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+    pub enum Message {
+        Transfer { definition: AccountId, to: AccountId, amount: u128 },
+        NewFungibleDefinition { name: String, total_supply: u128, mint_authority: Option<Authority>, supply_to: AccountId },
+    }
+
+    /// An actor state; empty is no holdings, anything else must be read whole.
+    pub fn decode(data: &[u8]) -> Option<State> {
+        if data.is_empty() {
+            return Some(State::Holdings(BTreeMap::new()));
+        }
+        borsh::from_slice(data).ok()
+    }
+}
+
+impl TokenCodec for BridgeCodec {
+    fn transfer(&self, definition: AccountId, from: AccountId, to: AccountId, amount: u128) -> Call {
+        PrototypeCodec.transfer(definition, from, to, amount)
+    }
+
+    fn mint(&self, definition: AccountId, authority: AccountId, to: AccountId, amount: u128) -> Call {
+        // An account authority mints as in the prototype; a program's mint is the program's.
+        PrototypeCodec.mint(definition, authority, to, amount)
+    }
+
+    fn create(&self, definition: AccountId, name: &str, supply: u128, authority: Option<AccountId>, supply_to: AccountId) -> Call {
+        let message = bridge_wire::Message::NewFungibleDefinition {
+            name: name.to_owned(),
+            total_supply: supply,
+            mint_authority: authority.map(bridge_wire::Authority::Account),
+            supply_to,
+        };
+        Call {
+            message: borsh::to_vec(&message).expect("a token message serializes"),
+            roles: vec![Role::Signer(definition), Role::Credited(supply_to)],
+        }
+    }
+
+    fn holdings(&self, state: &[u8]) -> Result<Holdings> {
+        match bridge_wire::decode(state) {
+            Some(bridge_wire::State::Holdings(holdings)) => Ok(holdings),
+            Some(bridge_wire::State::Definition(_)) => Ok(Holdings::new()),
+            None => bail!("the account holds state the token program does not write"),
+        }
+    }
+
+    fn definition(&self, state: &[u8]) -> Option<Definition> {
+        match bridge_wire::decode(state)? {
+            bridge_wire::State::Definition(bridge_wire::Definition::Fungible { name, total_supply, authority, .. }) => Some(Definition {
+                name,
+                supply: total_supply,
+                // Only an account authority is one this wallet could sign for; a program's
+                // (the bridge's, for every wrapped token) mints through that program alone.
+                authority: match authority {
+                    Some(bridge_wire::Authority::Account(id)) => Some(id),
+                    _ => None,
+                },
+            }),
+            bridge_wire::State::Holdings(_) => None,
+        }
+    }
+
+    fn credit(&self, message: &[u8]) -> Option<(AccountId, u128)> {
+        PrototypeCodec.credit(message)
+    }
+
+    fn max_name_len(&self) -> usize {
+        token_core::MAX_NAME_LEN
+    }
+
+    fn max_holdings(&self) -> Option<usize> {
+        Some(token_core::MAX_HOLDINGS)
+    }
+}
+
+/// The cycles a public token transfer is sent with when it can't be tried here first (a bare
+/// build). NOT MEASURED for the bridge's token program: a generous guess (registry calls measure
+/// 20k-180k); `unchecked_limit` triples it. Measure with a dry run of a tool that can run programs
+/// (`fee: … (gas: N cycles …)`) and set it to about that.
+pub const UNCHECKED_TOKEN_CYCLES: u64 = 200_000;
+
 /// The codecs `--token-codec` may name.
-pub const CODECS: [&str; 1] = ["prototype"];
+pub const CODECS: [&str; 2] = ["prototype", "bridge"];
 
 fn codec(name: &str) -> Result<Box<dyn TokenCodec>> {
     match name {
         "prototype" => Ok(Box::new(PrototypeCodec)),
+        "bridge" => Ok(Box::new(BridgeCodec)),
         other => bail!(
             "no token codec called {other}; known: {}",
             CODECS.join(", ")
@@ -1169,18 +1285,26 @@ impl Client {
             println!("proved in {}s", started.elapsed().as_secs());
             hash
         } else {
-            let program = self
-                .program_at(
-                    tokens.program,
-                    "NAMES_TOKEN_PROGRAM_ELF",
-                    "names-token",
-                    "the token program",
-                )
-                .await?;
-            let cycles = self
-                .simulate(&mentions, &call.message, vec![(tokens.program, program)])
-                .await?;
-            let limit = gas_limit_for(cycles);
+            // A build that can't run programs here (the bundled LEZ 0.4 tool, no r0vm) sends a
+            // public token call unchecked with a fixed cap, as it does a registry call
+            // (`unchecked_limit`); one that can tries it first and sizes the limit from that run.
+            let (cycles, limit) = if crate::prover::can_run() {
+                let program = self
+                    .program_at(
+                        tokens.program,
+                        "NAMES_TOKEN_PROGRAM_ELF",
+                        "names-token",
+                        "the token program",
+                    )
+                    .await?;
+                let cycles = self
+                    .simulate(&mentions, &call.message, vec![(tokens.program, program)])
+                    .await?;
+                (cycles, gas_limit_for(cycles))
+            } else {
+                println!("This computer can't check the token call first. If the network refuses it, its whole fee reserve is still paid.");
+                (UNCHECKED_TOKEN_CYCLES, crate::unchecked_limit(UNCHECKED_TOKEN_CYCLES))
+            };
             self.check_payer(&paying, call.message.len(), 0, limit, cycles)
                 .await?;
             if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
@@ -1190,11 +1314,16 @@ impl Client {
             let mut config = saved.clone();
             config.gas_limit = limit;
             self.wallet.set_config(config);
+            // Unchecked, the wallet's own run before sending is skipped too: both are pinned.
+            if !crate::prover::can_run() {
+                self.wallet.set_fee_params(wallet::FeeParams { gas_limit: Some(limit), max_fee: Some(wallet::max_fee_for(limit)), ..wallet::FeeParams::default() });
+            }
             let sent = self
                 .wallet
                 .send_pub_tx_paid_by(mentions, 0, call.message, payer)
                 .await;
             self.wallet.set_config(saved);
+            self.wallet.set_fee_params(wallet::FeeParams::default());
             sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");
@@ -1301,6 +1430,54 @@ mod tests {
 
     fn id(byte: u8) -> AccountId {
         AccountId::new([byte; 32])
+    }
+
+    /// The v5 bridge's wrapped Sepolia ETH definition (`Dx5tbzn54vKJiMYmjuYV3uuhi4eNwqnzZys7EqT3gj9z`)
+    /// as the bridge test network held it on 2026-11-19 (`getAccount`, the bytes under the token
+    /// program 5w6nTkft…): authority `Some(Authority::Program(<the v5 bridge>))`.
+    const V5_WETH_DEFINITION: &str = "01001800000057726170706564205365706f6c696120455448202876352900007862a441a7100000000000000000000101b0e26e1628be4dd9d35319baf2075ffa260c13af3c43abd8ebd1b34d0a7dd3a9";
+
+    #[test]
+    fn a_wrapped_tokens_definition_is_read_by_the_bridge_codec_only() {
+        let state = hex::decode(V5_WETH_DEFINITION).unwrap();
+        // The prototype's layout leaves a byte over: it is no token to it (why `bridge` exists).
+        assert_eq!(PrototypeCodec.definition(&state), None);
+        let read = BridgeCodec.definition(&state).expect("a bridge token definition");
+        assert_eq!(read.name, "Wrapped Sepolia ETH (v5)");
+        assert_eq!(read.supply, u128::from_le_bytes(hex::decode("00007862a441a7100000000000000000").unwrap().try_into().unwrap()));
+        assert_eq!(read.authority, None, "a program's authority is no account this wallet signs for");
+        assert!(BridgeCodec.holdings(&state).unwrap().is_empty(), "a definition holds nothing");
+        // An account authority is read as the account.
+        let own = borsh::to_vec(&bridge_wire::State::Definition(bridge_wire::Definition::Fungible {
+            name: "Demo".to_owned(),
+            total_supply: 5,
+            metadata_id: None,
+            authority: Some(bridge_wire::Authority::Account(id(7))),
+        }))
+        .unwrap();
+        assert_eq!(BridgeCodec.definition(&own).unwrap().authority, Some(id(7)));
+        // Holdings, transfers and credits are the prototype's bytes.
+        let holdings = borsh::to_vec(&token_core::TokenState::Holdings([(id(1), 10u128)].into_iter().collect())).unwrap();
+        assert_eq!(BridgeCodec.holdings(&holdings).unwrap(), PrototypeCodec.holdings(&holdings).unwrap());
+        assert_eq!(BridgeCodec.transfer(id(1), id(2), id(3), 250), PrototypeCodec.transfer(id(1), id(2), id(3), 250));
+        assert_eq!(
+            borsh::to_vec(&bridge_wire::Message::Transfer { definition: id(1), to: id(3), amount: 250 }).unwrap(),
+            BridgeCodec.transfer(id(1), id(2), id(3), 250).message
+        );
+        let credit = borsh::to_vec(&token_core::Message::Credit { definition: id(1), amount: 9 }).unwrap();
+        assert_eq!(BridgeCodec.credit(&credit), Some((id(1), 9)));
+        // A new token's authority is written as the bridge program reads it.
+        let create = BridgeCodec.create(id(4), "Demo", 100, Some(id(2)), id(2));
+        assert_eq!(create.message[0], 1);
+        assert_eq!(
+            borsh::from_slice::<bridge_wire::Message>(&create.message).unwrap(),
+            bridge_wire::Message::NewFungibleDefinition { name: "Demo".to_owned(), total_supply: 100, mint_authority: Some(bridge_wire::Authority::Account(id(2))), supply_to: id(2) }
+        );
+        assert!(codec("bridge").is_ok());
+        match codec("nope") {
+            Err(error) => assert!(error.to_string().contains("prototype, bridge")),
+            Ok(_) => panic!("an unknown codec is refused"),
+        }
     }
 
     #[test]

@@ -291,6 +291,18 @@ pub fn decode_config(bytes: &[u8]) -> Result<(AccountId, Vec<Token>), String> {
     decode_bridge_config(bytes).map(|config| (config.token_program, config.tokens))
 }
 
+/// What binds a Config to its vault: its `cfg_id`, the vault and the Ethereum chain id (the first
+/// 60 bytes, borsh: 32, 20, u64 little-endian). A burn's opening must name these (burn_opening.rs).
+pub fn decode_config_identity(bytes: &[u8]) -> Result<([u8; 32], [u8; 20], u64), String> {
+    let mut r = Reader::new(bytes);
+    let cfg: [u8; 32] = r.take(32)?.try_into().expect("32 bytes");
+    let vault: [u8; 20] = r.take(20)?.try_into().expect("20 bytes");
+    let chain = u64::from_le_bytes(r.take(8)?.try_into().expect("8 bytes"));
+    // The whole Config must read, or none of it is taken.
+    decode_bridge_config(bytes)?;
+    Ok((cfg, vault, chain))
+}
+
 /// The same Config, with the burn freeze and each token's denominations and flags.
 pub fn decode_bridge_config(bytes: &[u8]) -> Result<BridgeConfig, String> {
     let mut r = Reader::new(bytes);
@@ -1210,6 +1222,9 @@ mod tests {
         distinct.sort();
         distinct.dedup();
         assert_eq!((definitions.len(), distinct.len()), (8, 8), "every bridge's wrapped tokens are its own");
+        // What binds each Config to its vault (a burn's opening must name it): v5 on Sepolia.
+        let (_, vault5, chain5) = decode_config_identity(&config_bytes_in(&fixture("config-v5.json")["result"], &id(BRIDGE_V5_PROGRAM)).unwrap()).unwrap();
+        assert_eq!((hex(&vault5), chain5), ("afbdf192434e9888bb23dae6f2d15eea6246ed10".to_owned(), 11_155_111));
         let v6 = decode_bridge_config(&config_bytes_in(&fixture("config-v6.json")["result"], &id(BRIDGE_V6_PROGRAM)).unwrap()).unwrap();
         assert_eq!(registry::account_text(&v6.tokens.iter().find(|t| t.symbol() == "wETH").unwrap().definition), "5WLrfRYHGY14wnNG7sa8b6Bzy9ZXPCeB4XnHK2qiuP5t");
         let v7 = decode_bridge_config(&config_bytes_in(&fixture("config-v7.json")["result"], &id(BRIDGE_V7_PROGRAM)).unwrap()).unwrap();

@@ -1444,8 +1444,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("address step: not twice while the plan runs", st({ input: A, check: ok(A), ticked: true, asking: true }).canContinue, false);
   check("address step: the words of the design", [L.ADDRESS_CONTINUE, L.ADDRESS_TICK, L.ADDRESS_LAST_CHECK, L.ADDRESS_CHOOSE_TITLE, L.ADDRESS_SAVE_TITLE],
     ["I've checked the address — continue", "This is my address", "Last check before the burn. Withdrawals to a wrong address can't be recovered.", "Choose a previous address", "Save to my addresses"]);
-  check("address step: the words line says what and where", L.ADDRESS_WORDS_LINE, "These four words are a fingerprint of this address. The bridge page shows the same four when the same Ethereum wallet is connected.");
-  check("address step: step 3 says the burn is next", /^Next: the burn\./.test(L.ADDRESS_BURN_NEXT), true);
+  check("address step: the words line says what and where (roadmap 7: where to compare)", L.ADDRESS_WORDS_LINE, "These four words are a fingerprint of this address. Compare them on the bridge page: open nameswallet.app/bridge (Bridge to Ethereum) in your browser with that Ethereum wallet connected; it shows the same four words.");
+  check("address step: the next step is named for what it does (roadmap 7)", L.ADDRESS_BURN_NEXT.indexOf("Next: approve the burn") === 0, true);
+  check("address step: step 3 says the burn is next", /^Next: approve the burn /.test(L.ADDRESS_BURN_NEXT), true);
   check("address step: box key", [L.addressBoxKey(" " + A + " "), L.addressBoxKey("https://nameswallet.app/bridge/#" + CODE), L.addressBoxKey("nope")], [A, CODE, ""]);
 
   // The previous addresses: the book's names and words; an older bridge's recipients; each once.
@@ -1594,6 +1595,125 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [L.sendBackPrivateNoteShown(priv, "", false), L.sendBackPrivateNoteShown(priv, "Private/AAA", true), L.sendBackPrivateNoteShown(priv, "Public/BBB", false), L.sendBackPrivateNoteShown([], "", false)],
     [true, true, false, false]);
   check("private note: the screen uses the rule", /visible: Logic\.sendBackPrivateNoteShown\(root\.sbPrivateSources, root\.sbAccount, root\.sbFromPrivate\); color: root\.ink; text: Logic\.PRIVATE_SEND_BACK_NOTE/.test(qml), true);
+}
+
+// Roadmap 12: moving wrapped tokens between accounts on the bridge test network.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("move units: 1.2 wETH, 0.01, .5, the smallest unit", [L.unitsText("1.2", 18), L.unitsText("0.01", 18), L.unitsText(".5", 18), L.unitsText("0.000000000000000001", 18)],
+    ["1200000000000000000", "10000000000000000", "500000000000000000", "1"]);
+  check("move units: not amounts", [L.unitsText("", 18), L.unitsText("0", 18), L.unitsText(".", 18), L.unitsText("1,5", 18), L.unitsText("1e3", 18), L.unitsText("0.0000000000000000001", 18), L.unitsText("-1", 18)],
+    [null, null, null, null, null, null, null]);
+  check("move units: past what a JS number holds, exactly", L.unitsText("123456789.123456789123456789", 18), "123456789123456789123456789");
+  check("move amount problems", [L.moveAmountProblem("", 18, "1", "wETH"), L.moveAmountProblem("0.05", 18, "100000000000000000", "wETH"), L.moveAmountProblem("0.1", 18, "100000000000000000", "wETH"),
+    L.moveAmountProblem("0.2", 18, "100000000000000000", "wETH"), L.moveAmountProblem("0", 18, "1", "wETH"), L.moveAmountProblem("-1", 18, "1", "wETH"),
+    L.moveAmountProblem("1,5", 18, "1", "wETH"), L.moveAmountProblem("0.0000000000000000001", 18, "1", "wETH")],
+    ["", "", "", "That's more than this account holds: 0.1 wETH.", "Enter an amount above 0.", "-1 is negative. Enter an amount above 0.",
+     "1,5 isn't an amount. Use digits and one point, such as 0.01.", "0.0000000000000000001 has more than 18 digits after the point, the smallest unit of wETH."]);
+  const own = [{ account: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk" }, "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", "Private/yGrP", "Public/9vXeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"];
+  const targets = L.moveTargets(own, "Public/9vXeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ["Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"]);
+  check("move targets: own public accounts but the one they leave, phrase ones first, imported marked",
+    targets.map(function(t) { return [t.account.substr(7, 4), t.imported] }), [["7wx3", false], ["CCVd", true]]);
+  check("imported accounts from backup_status", L.importedAccounts({ networks: [{ id: "lez-0.3", accounts: [{ account: "Public/A", imported: true }] }, { id: "lez-0.4", accounts: [{ account: "Public/B", imported: true }, { account: "Public/C", imported: false }] }] }, "lez-0.4"), ["Public/B"]);
+  check("move to problems", [L.moveToProblem("", "Public/A"), L.moveToProblem("Private/X", "Public/A"), L.moveToProblem("Public/A", "Public/A"), L.moveToProblem("A", "Public/A"), L.moveToProblem("Public/nope!", "Public/B"), L.moveToProblem("alice", "Public/B")],
+    ["", "Moving wrapped tokens to a private account isn't in the wallet yet: choose a public account.", "That's the account the tokens leave from. Choose another one.", "That's the account the tokens leave from. Choose another one.", "That isn't an account ID: it's Public/ and then letters and digits.", ""]);
+  const plan = { amount_shown: "0.05", symbol: "wETH", bridge_label: "bridge v5", fee_payer: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", to: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", to_name: null };
+  check("move fee line: checking, priced, held", [L.moveFeeLine(plan, { state: "checking" }, "5"), L.moveFeeLine(plan, { state: "ready", fee: { about: "2140", at_most: "3000" } }, "23786858")],
+    ["Paid by CCVd76…pKnk in test LEZ. Checking how much…", "About 2,140 test LEZ, at most 3,000, paid by CCVd76…pKnk (it holds 23,786,858). The bridge's relay pays only for claims and burns."]);
+  check("move result: done in a block / failed in words", [L.moveResultLine(plan, { state: "done", block: 28512 }), L.moveResultLine(plan, { state: "failed", problem: "Nothing was sent." }), L.moveResultLine(plan, null)],
+    [{ kind: "done", text: "Moved 0.05 wETH (bridge v5) to 7wx3U7…LznR, in block 28512." }, { kind: "problem", text: "Nothing was sent." }, { kind: "", text: "" }]);
+  // Every press gives feedback at once (the button's own words), and the screen ends in one plain result.
+  check("move: Review says Checking the fee… at once", /label: moveScreen\.checking \? "Checking the fee…" : "Review"/.test(qml), true);
+  check("move: Approve says Moving… at once", /label: moveScreen\.sending \? "Moving…"/.test(qml), true);
+  check("move: the result line is the shared status line", /StatusLine \{ visible: moveScreen\.result\.text !== ""; kind: moveScreen\.result\.kind; text: moveScreen\.result\.text \}/.test(qml), true);
+  check("move: offered only with the module's feature", /readonly property bool moveCan: namesNet === "0\.4" && moduleFeatures\.indexOf\("bridge_token_send"\) >= 0/.test(qml), true);
+  check("move: the old 'isn't in the wallet yet' line only without the feature", /text: root\.moveCan \? "Move beside a wrapped token/.test(qml), true);
+}
+
+// Review 2026-11-19 (1, 2, 3): no second send from a late answer; a name's account pinned at the check; a sent move never said failed plainly.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  const busy = "The wallet is busy; still working.", none = "No answer from the wallet yet: it may still be working on it. Look before trying again.";
+  check("move start failure: busy is a safe retry, no answer may have been taken, anything else a refusal",
+    [L.moveStartFailure(busy, busy, none), L.moveStartFailure(none, busy, none), L.moveStartFailure("That account has never been used", busy, none)], ["busy", "unclear", "refused"]);
+  check("move: an unclear start drops the review (no Approve again) and looks for the job", /if \(how === "unclear"\) \{[\s\S]{0,200}moveTurn\+\+\n\s*moveCheck = null[\s\S]{0,300}moveLookForSend\(plan, moveTurn\)/.test(qml), true);
+  check("move: the look follows a running bridge_send job, else reloads the balances", /busy\.kind === "bridge_send" && busy\.id[\s\S]{0,300}moveFollowSoon\(\)[\s\S]{0,300}loadBridgeNet\(\)/.test(qml), true);
+  const plan = { amount_shown: "0.5", symbol: "wETH", bridge_label: "bridge v5", to: "alice", to_name: "alice" };
+  const acct = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+  const check0 = { args: ["B", "D", "0.5", "Public/F", "alice"], plan: plan, to_account: "", forwarded_to: "" };
+  check("move: a name with no resolved account isn't sent", L.moveSendArgs(check0), null);
+  check("move: sent to the account the check resolved, never the name", L.moveSendArgs(Object.assign({}, check0, { to_account: acct })), ["B", "D", "0.5", "Public/F", acct]);
+  check("move: an account recipient goes as it was", L.moveSendArgs({ args: ["B", "D", "0.5", "Public/F", acct], plan: { to: acct } }), ["B", "D", "0.5", "Public/F", acct]);
+  check("move: the sheet shows the account a name pays, and its forward", [L.moveToLine(plan, check0), L.moveToLine(plan, Object.assign({}, check0, { to_account: acct })), L.moveToLine(plan, Object.assign({}, check0, { to_account: acct, forwarded_to: "bob" }))],
+    ["alice's public account (checking which…)", "alice's public account 7wx3U7…LznR", "alice's public account 7wx3U7…LznR: alice forwards to bob, so this pays bob"]);
+  check("move: the result names the account paid", L.moveResultLine(Object.assign({}, plan, { paid: acct }), { state: "done", block: 9 }).text, "Moved 0.5 wETH (bridge v5) to alice's public account 7wx3U7…LznR, in block 9.");
+  check("move: a sent but unconfirmed move is a wait, with its hash", L.moveResultLine(plan, { state: "unclear", problem: "The move was sent but isn't confirmed yet.", tx: "ab12" }), { kind: "waiting", text: "The move was sent but isn't confirmed yet. Its transaction: ab12." });
+  check("move: Approve needs the resolved account", /enabledNow: root\.moveCheck !== null && root\.moveCheck\.state === "ready" && !moveScreen\.sending && Logic\.moveSendArgs\(root\.moveCheck\) !== null/.test(qml), true);
+}
+
+// Roadmap 9: the signed withdraw-to code's line on step 2.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("signature line: signed / not signed / an older bridge module / nothing yet",
+    [L.signatureLine({ signed: true }), L.signatureLine({ signed: false }), L.signatureLine({ words_text: "a · b · c · d" }), L.signatureLine(null)],
+    [{ kind: "done", text: "Signed by this address on the bridge page. Still compare the four words." }, { kind: "", text: "Not signed: compare the four words." }, { kind: "", text: "" }, { kind: "", text: "" }]);
+  check("signature line: the module's own text is never shown (fixed words)", L.signatureLine({ signed: true, signature_line: "<b>x</b>" }).text, L.SIGNED_LINE);
+  const signed = "logoswd1qgqqqqqqqz4rdfa0hhceys6wnzytkg76umedzhh2vfrw6yrnluqczgjkarl95rrs7jk58am87gggjfsqht535d6mq4tkkf5zs4z4c03fwcyc7gyk9al6rl2784y0kuqyjsjx5e85ddvtkw89vjrfret5skh5wpew2mgaxaqrrdxnurahgfu6sjsm4xcna0";
+  check("a signed code (198 characters) is taken whole from the box, a link or chat text", [L.sendBackCode(signed), L.sendBackCode("https://nameswallet.app/bridge/#" + signed.substr(0, 90) + "\n" + signed.substr(90)), L.addressBoxKey(" " + signed.toUpperCase() + " ")], [signed, signed, signed]);
+  check("signature line: under the four words, as a status line", /StatusLine \{ readonly property var sig: Logic\.signatureLine\(root\.sbCheck\)/.test(qml), true);
+}
+
+// The UI issues of 2026-11-18 (item C).
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  const notice = "This account was imported. Its bridge secrets come from this wallet's recovery phrase, so the phrase can finish a withdrawal; the account's own key is still needed to move what stays in it.";
+  check("imported notice: in the card, plain, once", [L.importedNoticeLine({ account_notice: notice }), L.importedNoticeLine({ account_notice: "a\u202eb\n c" }), L.importedNoticeLine({}), L.importedNoticeLine(null)], [notice, "a b c", "", ""]);
+  check("imported notice: shown in the card, not only under Details", /StatusLine \{ visible: text !== ""; kind: ""; text: Logic\.importedNoticeLine\(receiveScreen\.result\) \}/.test(qml) && !/receiveScreen\.result\.account_notice\) : ""/.test(qml), true);
+  check("deposit secret: said once and truly", [L.receiveSecretLine({ account_notice: notice }).indexOf("recovery phrase") > 0 && L.receiveSecretLine({ account_notice: notice }).indexOf("own key") < 0, L.receiveSecretLine({}).indexOf("own key") > 0 && L.receiveSecretLine({}).indexOf("recovery phrase") < 0], [true, true]);
+  check("the accounts are read again when Bridge to Ethereum or Move opens", /function openSendBack\(account, asset, focusId\) \{\n        walletView = "sendback"\n[^\n]*\n        loadAccounts\(\)/.test(qml) && /loadBackupStatus\(\)\n        loadAccounts\(\)\n        walletView = "bridgemove"/.test(qml), true);
+  check("Bridge to Ethereum step 1: another bridge's balance said beside private accounts too", /visible: \(root\.sbSources\.length > 0 \|\| root\.sbPrivateSources\.length > 0\) && root\.sbElsewhere !== ""/.test(qml), true);
+}
+
+// E: the LEZ Bridge module's text on the bridge and claim screens is cleaned and drawn as plain text
+// (LP0001 job B report: Hints default to AutoText, so markup in a remote message could render).
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("bridge text: hidden characters gone, markup left as text", L.clean("<b>bad</b>\u202e\u200b ok"), "<b>bad</b> ok");
+  const hints = qml.split("\n").filter((l) => /Hint \{/.test(l) && /\.message|\.error\b|\.note\b|\.notice|\.reason|claimLine/.test(l));
+  check("bridge text: every hint showing a module's message, error, note, notice or reason is plain text", hints.filter((l) => !/textFormat: Text\.PlainText/.test(l)).length, 0);
+  check("bridge text: no raw String(…message) left in a hint", hints.filter((l) => /String\([^)]*\.(message|note|notice|reason) \|\| ""\)/.test(l)).length, 0);
+  check("bridge text: the send-back check and plan errors are cleaned", /sbCheckError = e\.message \? sentence\(Logic\.clean\(e\.message\)\)/.test(qml) && /sbError = e\.message \? sentence\(Logic\.clean\(e\.message\)\)/.test(qml), true);
+  check("bridge text: the claim's phases are plain and cleaned", /textFormat: Text\.PlainText\n[^\n]*\n[^\n]*\n[^\n]*Logic\.clean\(modelData\.hint\)/.test(qml), true);
+}
+
+// F: another app's burn shows a CHECKED Ethereum address when the names module could open its exit.
+{
+  const L = await import("./qml/logic.mjs");
+  const checked = { burn_opening: { v: 1, checked: true, recipient: "0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2", recipient_halves: ["0xb0275f9e94b2a437c834", "bf7dea5699f0b8707ec2"], words_text: "a · b · c · d" } };
+  check("burn address: checked", L.burnAddressLine(checked), "Ethereum address: 0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2, checked by this wallet against the burn's exit commitment, with the token and amount burned. Its four words: a · b · c · d. Compare them on the bridge page with that Ethereum wallet connected.");
+  check("burn address: the relay fee is shown (review 2026-11-19)", [L.burnAddressLine({ burn_opening: Object.assign({}, checked.burn_opening, { max_relay_fee: "2000000000000000", max_relay_fee_text: "0.002 wETH", at_least_text: "0.998 wETH" }) }).endsWith(" A relay may keep up to 0.002 wETH; the address gets at least 0.998 wETH (less the vault's own fee)."),
+    L.burnAddressLine({ burn_opening: Object.assign({}, checked.burn_opening, { max_relay_fee: "0", max_relay_fee_text: "0 wETH", at_least_text: "0.01 wETH" }) }).endsWith(" No relay fee: the address gets the whole 0.01 wETH (less the vault's own fee).")], [true, true]);
+  check("burn address: halves only when checked", [L.burnAddressHalves(checked), L.burnAddressHalves({ burn_opening: { checked: false } }), L.burnAddressHalves({})], [["0xb0275f9e94b2a437c834", "bf7dea5699f0b8707ec2"], [], []]);
+  check("burn address: unchecked says so, the module's why cleaned", L.burnAddressLine({ burn_opening: { v: 1, checked: false, why: "No opening.\u202e" } }), "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. No opening.");
+  check("burn address: an older request keeps the sheet's own line", [L.burnAddressLine({}), L.burnAddressLine(null)], ["", ""]);
+}
+
+// D: Import account.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("import: the result line", [L.importResultLine({ account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", label: "Shop", notice: "Imported. Keep its key." }),
+    L.importResultLine({ account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", notice: "" }), L.importResultLine(null)],
+    ["Imported Shop (7wx3U7…LznR). Imported. Keep its key.", "Imported public account 7wx3U7…LznR. ", "Imported."]);
+  check("import: the key field shows dots and is emptied as the import starts", /Field \{ id: importKeyField;[^}]*secret: true/.test(qml) && /try \{ importKeyField\.text = "" \} catch \(e\) \{\}\n        accountChange\("cli_account_import"/.test(qml), true);
+  check("import: nothing pasted is logged by the app", /console\.log\([^)]*(importKeyField|asked|textOrFile)/.test(qml), false);
+  check("import: the press says Importing… at once", /label: root\.accountsBusy \? "Importing…" : "Import it"/.test(qml), true);
+  check("import: the warning and the recovery-phrase line are fixed words", [L.IMPORT_WARNING.indexOf("Anyone who sees it") > 0, L.IMPORT_COVER_LINE.indexOf("recovery phrase won't bring") > 0], [true, true]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
