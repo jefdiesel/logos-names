@@ -3338,6 +3338,14 @@ export function receiveDepositSteps(symbol, tokens) {
             "Approve exactly the amount there, then deposit (your Ethereum wallet asks twice). Then come back here and press Check now."]
 }
 
+/// A private send-back source's chip: "2if1EJ…6HUC · 0.1 wETH · private", or with no balance
+/// listed "2if1EJ…6HUC · USDT · private" (one chip per token, so the token is always named).
+export function privateSourceLabel(row) {
+    if (!row) return ""
+    var amount = String(row.amount || "")
+    return idShort(row.account) + " · " + (amount !== "" ? amount + " " : "") + String(row.symbol || "") + " · private"
+}
+
 /// privateSendBackSources with the chosen bridge's tokens: a row per private account and token it
 /// holds (token_source_holdings), else, when the wallet lists nothing for it, a row per token with
 /// every amount (the wallet's simulation checks the balance when it proves the burn).

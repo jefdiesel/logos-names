@@ -11684,8 +11684,8 @@ Item {
                                 model: root.sbPrivateSources
                                 Choice {
                                     required property var modelData
-                                    label: Logic.idShort(modelData.account) + (modelData.amount !== "" ? " · " + modelData.amount + " " + modelData.symbol : "") + " · private"
-                                    chosen: root.sbAsset !== null && root.sbAccount === modelData.account
+                                    label: Logic.privateSourceLabel(modelData)
+                                    chosen: root.sbAsset !== null && root.sbAccount === modelData.account && root.sbAsset.symbol === modelData.symbol
                                     onPressed: root.sbPick(modelData)
                                 }
                             }

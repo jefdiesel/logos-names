@@ -1537,6 +1537,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [/tokens: bridgeTokenTable \} : null/.test(qml2), /Logic\.sendBackSymbol\(sbAsset\.symbol, bridgeTokenTable\)/.test(qml2), /Logic\.sendBackAmounts\(receiveRegistry, sbAsset, bridgeTokenTable\)/.test(qml2),
      /Logic\.privateSendBackSources\(cliAccounts, bridgedHoldings, bridgeTokenTable\)/.test(qml2), /Logic\.bridgeNetRows\([^\n]*, bridgeTokenTable\)/.test(qml2)], [true, true, true, true, true]);
   check("screen: the deposit steps come from receiveDepositSteps", (qml2.match(/Logic\.receiveDepositSteps\(/g) || []).length, 2);
+  const rows2 = L.privateSendBackSources(accts2, [], fromDep);
+  check("private chips name their token, and only one is chosen at a time", [L.privateSourceLabel(rows2[1]), L.privateSourceLabel(L.privateSendBackSources(accts2, held2, fromDep)[0]),
+    /label: Logic\.privateSourceLabel\(modelData\)\n\s*chosen: root\.sbAsset !== null && root\.sbAccount === modelData\.account && root\.sbAsset\.symbol === modelData\.symbol/.test(qml2)],
+    ["yGrPEb…fe4Z · USDT · private", "yGrPEb…fe4Z · 0.1 wETH · private", true]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
