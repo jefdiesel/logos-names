@@ -16927,6 +16927,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&config);
     }
 
+    /// Our own LEZ 0.4 lists Logos's NFT program (the one LNS name deeds are minted on) built in:
+    /// listed, not removable; LEZ 0.3 and a custom network don't have it built in.
+    #[test]
+    fn our_lez04_lists_the_deed_nft_program_built_in() {
+        let config = config_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(&config).unwrap();
+        let mut names = Names::default();
+        let listed = parsed(&names.nft_programs());
+        assert!(listed["value"].as_array().unwrap().iter().any(|p| p["program"] == registry::DEED_NFT_PROGRAM && p["built_in"] == true), "{listed}");
+        assert!(names.nft_listed(registry::DEED_NFT_PROGRAM).is_ok());
+        let removed = parsed(&names.nft_program_remove(registry::DEED_NFT_PROGRAM.into()));
+        assert!(removed["error"].as_str().unwrap_or_default().contains("built into this network"), "{removed}");
+        names.custom = json!({ "chain_id": "c7".repeat(32) });
+        assert!(names.nft_built_in().is_empty(), "a custom network's come from its file");
+        names.custom = Value::Null;
+        names.net = Net::Lez03;
+        assert!(names.nft_built_in().is_empty());
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
     /// Our own LEZ 0.4's chain id with no published file (404): the built-in ids stand. Another
     /// chain needs its file.
     #[test]

@@ -1587,6 +1587,7 @@ for _name, _js, _mock in [
     ("deed-claiming", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.claimDeed("turing") })', {"names_network": "lez-0.4"}),
     ("deed-claimed", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.deedLineName = "grace"; root.deedLine = "grace\'s NFT is yours: its card is in Collectibles. It moves with the name when you transfer it." })', {"names_network": "lez-0.4", "deeds": {"grace": _DEED}}),
     ("deed-collectibles", _ON04 % ('root.openCollectibles(); root.againAfter(150, function() { ' + _LONG + ' })'), {"names_network": "lez-0.4", "deeds": {"turing": _DEED, "grace": _DEED}}),
+    ("deed-card-long", _ON04 % ('root.openCollectibles(); root.againAfter(400, function() { ' + _LONG + ' })'), {"names_network": "lez-0.4", "deeds": {"turing": _DEED}}),
     ("deed-collectibles-none", _ON04 % 'root.openCollectibles()', {"names_network": "lez-0.4"}),
     ("deed-transfer", _ON04 % 'root.openWallet("names"); root.againAfter(150, function() { root.openTransfer("grace"); transferToField.text = "Public/%s"; root.transferConfirm = true })' % BOB, {"names_network": "lez-0.4", "deeds": {"grace": _DEED}}),
 ]:

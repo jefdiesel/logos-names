@@ -7609,6 +7609,8 @@ Item {
             delete all[name]
             nameDeeds = all
             loadDeeds()
+            // A read of the name kept from before the claim lasts 30 s at most: read once more after.
+            againAfter(31000, loadDeeds)
             loadActivity()
         }, name)
     }
