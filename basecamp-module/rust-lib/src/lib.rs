@@ -8392,6 +8392,12 @@ impl Names {
         if request["resigns"].as_u64().unwrap_or(0) >= provider_public::MAX_RESIGNS {
             return Err(again(provider_public::ASK_AGAIN.replace("{why}", "it was signed again 3 times already")));
         }
+        // The signature binds no chain (rc3): after a reset of the bridge test network seen since
+        // the call was asked, a new build is on a chain the person never saw it on.
+        let reset_at = config_dir().and_then(|dir| bridge_net::reset_seen(&dir, now()));
+        if let Some(why) = provider_public::reset_refusal(reset_at, request["created"].as_u64().unwrap_or(decided)) {
+            return Err(again(provider_public::ASK_AGAIN.replace("{why}", &why)));
+        }
         self.asked_here(&request).map_err(again)?;
         if self.net != Net::Lez04 {
             return Err(refused("the wallet is on LEZ 0.3 now; it signs relayed calls on LEZ 0.4 only".to_owned()));
@@ -13294,7 +13300,16 @@ mod tests {
         // One line in the History for it.
         let lines: Vec<Value> = activity::all(&config_dir().unwrap()).into_iter().filter(|e| e["kind"] == "resign").collect();
         assert_eq!((lines.len(), lines[0]["app"].as_str(), lines[0]["payer_nonce"].as_str()), (1, Some("lez_bridge"), Some("42")), "{lines:?}");
+        // The bridge test network seen reset since the call was asked (bridge-net.json): no re-sign
+        // without the person, nothing signed. A reset seen an hour before it was asked doesn't stop it.
+        let net_state = config_dir().unwrap().join("bridge-net.json");
+        std::fs::write(&net_state, json!({ "channel": "c1", "height": 2, "reset_at": now(), "bridges": [] }).to_string()).unwrap();
         rebuilt("43", "3", &"e0".repeat(32), &|_| {});
+        let _ = std::fs::remove_file(dir.join("sign-in.json"));
+        let after_reset = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!((after_reset["code"].as_str(), after_reset["error"].as_str().unwrap().contains("was reset since this call was asked")), (Some("ask_again"), true), "{after_reset}");
+        assert!(!dir.join("sign-in.json").exists(), "nothing was signed after the reset");
+        std::fs::write(&net_state, json!({ "channel": "c1", "height": 2, "reset_at": now() - 3600, "bridges": [] }).to_string()).unwrap();
         assert_eq!(parsed(&names.resign_relayed_call(id.clone()))["value"]["resigns"], 2);
         rebuilt("44", "3", &"e1".repeat(32), &|_| {});
         assert_eq!(parsed(&names.resign_relayed_call(id.clone()))["value"]["resigns"], 3);

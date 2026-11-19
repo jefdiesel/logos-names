@@ -534,7 +534,9 @@ afterwards.
    (at most 3 times, within 10 minutes of the approval). A refusal's `code` says what to do:
    `unchanged` (the payer's nonce hasn't moved; send what you have), `landed_or_used` (your
    account's nonce moved: the call may have landed; check the chain first), `ask_again` (propose
-   it again) or `refused`.
+   it again) or `refused`. A re-sign is also `ask_again` when the wallet has seen the bridge test
+   network reset since 10 minutes before the call was asked (`bridge-net.json`'s `reset_at`): a
+   new build after a reset is on a chain the person never saw the call on.
 
 **What the account's signature covers (LEZ v0.4.0-rc3).** The SHA-256 of the whole borsh message
 under `/LEE/v0.3/Message/Public/`: the declared actors and signing accounts, the root call and its
@@ -544,7 +546,17 @@ byte or another actor without breaking the account's signature. It names the acc
 nonce, so on this chain it lands at most once and dies with the account's next transaction. rc3
 binds no chain id and carries no validity window: after a reset of the test network, or on another
 LEZ 0.4 chain where the account's nonce comes back to what it was when it signed, the payer could
-submit it again. The request itself expires after 10 minutes like every request. Checked by the names CLI's test `a_half_signed_call_verifies_and_binds_its_payer`
+submit it again. The request itself expires after 10 minutes like every request.
+
+**What stays unbound, and why.** The wallet refuses a re-sign after a reset it has seen (step 6).
+It can't do more on rc3, because the signature carries no chain id: (1) a transaction already
+signed and handed back stays good on any LEZ 0.4 chain where both signers' nonces match, and the
+wallet can't take a signature back; (2) the wallet knows of a reset only once it has read the
+bridge test network since (its balances read, at most every 30 s, while asked for), so a reset no
+read has seen yet doesn't stop a re-sign (the account-nonce rule still does when the new chain's
+nonce differs); (3) the reset record follows the bridge test network's endpoint, not the zone a
+call was asked in (`asked_here` checks the zone and its configured channel); (4) a missing or
+unreadable record means no reset known. Binding the chain into what is signed waits for LEZ. Checked by the names CLI's test `a_half_signed_call_verifies_and_binds_its_payer`
 (vector `cli/tests/vectors/public-call-v1.json`). The full argument, statement by statement with
 its test, is in [basecamp-module/rust-lib/SIGNING.md](../../basecamp-module/rust-lib/SIGNING.md).
 

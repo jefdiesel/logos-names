@@ -818,6 +818,14 @@ pub fn was_reset(saved: &Value, channel: &str, height: u64) -> bool {
     }
 }
 
+/// When a read last saw the bridge test network reset (`reset_at` in the state file in `dir`,
+/// seconds), if that was less than a day before `now` (seconds; a read tells a reset for
+/// `RESET_TOLD_S`). None with no file, an unreadable one, or no reset told: the file is this
+/// module's own (written whole, mode 600), and it knows of a reset only once a read has run since.
+pub fn reset_seen(dir: &Path, now: u64) -> Option<u64> {
+    load_state(dir)["reset_at"].as_u64().filter(|at| now.saturating_sub(*at) < RESET_TOLD_S)
+}
+
 /// Reads the bridge test network at `url` for `accounts`, with the tokens of every bridge in
 /// `programs` (at most `MAX_BRIDGES`), remembering in `dir` what it saw (the chain, each
 /// bridge's token list). `now` is in seconds. The answer:
@@ -1314,6 +1322,7 @@ mod tests {
         let dir = scratch("reset");
         let first = network(CHANNEL, &HEIGHT, true);
         assert!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_000).unwrap()["reset_at"].is_null());
+        assert_eq!(reset_seen(&dir, 1_000), None, "no reset in the state file");
         // The same chain, later: no reset.
         HEIGHT.store(600, std::sync::atomic::Ordering::SeqCst);
         assert!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_100).unwrap()["reset_at"].is_null());
@@ -1322,10 +1331,16 @@ mod tests {
         assert_eq!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_200).unwrap()["reset_at"].as_u64(), Some(1_200));
         HEIGHT.store(9, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_300).unwrap()["reset_at"].as_u64(), Some(1_200));
+        // What a re-sign reads (`reset_seen`): the reset, from the file, for a day after it was seen,
+        // even when no read has run since.
+        assert_eq!((reset_seen(&dir, 1_300), reset_seen(&dir, 1_200 + RESET_TOLD_S - 1), reset_seen(&dir, 1_200 + RESET_TOLD_S)), (Some(1_200), Some(1_200), None));
         assert!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_200 + RESET_TOLD_S).unwrap()["reset_at"].is_null());
         // Another channel: reset.
         let other = network("ab".repeat(32).leak(), &HEIGHT, true);
         assert_eq!(read(&other, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 200_000).unwrap()["reset_at"].as_u64(), Some(200_000));
+        // A file that isn't the state (written by hand, cut short): no reset known.
+        std::fs::write(dir.join(STATE_FILE), "{\"reset_at\": 2").unwrap();
+        assert_eq!(reset_seen(&dir, 200_000), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
