@@ -13,6 +13,27 @@
 //! rc3 binds no chain id: after a reset of the bridge test network, or on another LEZ 0.4 chain
 //! where the account's nonce comes back to what it was, the payer could submit it again (a known
 //! limit, upstream).
+//!
+//! What the wallet does about it, and what stays unbound:
+//! - A re-sign without the person (`resign_relayed_call`) is refused when the bridge test
+//!   network was seen reset since 30 s before the call was asked (`reset_refusal`, from
+//!   `bridge-net.json`'s `reset_at`): a new build after a reset is a transaction on a chain the
+//!   person never saw the call on.
+//! - Still unbound, because the signature itself carries no chain id on rc3 and the wallet can't
+//!   add one: a transaction already signed and handed back stays good on any LEZ 0.4 chain where
+//!   both signers' nonces match (after a reset, on a copy of the chain, on another deployment).
+//!   The wallet can't take a signature back.
+//! - `bridge-net.json` knows of a reset only once the Wallet has read the bridge test network
+//!   since (its balances read, at most every 30 s, while it is asked for). A reset that no read
+//!   has seen yet doesn't stop a re-sign; the account-nonce rule (`resign_check`) still does when
+//!   the new chain's nonce differs from the approved one.
+//! - The file tracks the bridge test network's endpoint (`lez04.sequencer`, or
+//!   `LOGOS_NAMES_BRIDGE_RPC` in a trial). Zones are LEZ 0.3's (LEZ 0.4 has its home only), and
+//!   switching zones never moves that endpoint, so a zone switch never stamps a reset (test
+//!   `a_zone_switch_never_moves_the_bridge_network_the_reset_record_follows`). Changing
+//!   `lez04.sequencer` to another chain does stamp one, on the next read.
+//! - A missing or unreadable file means "no reset known": the re-sign goes on to the other rules.
+//!   Binding the chain id into what is signed waits for LEZ (rc4 or later).
 
 use crate::provider::{self, account_ref, account_written};
 use crate::registry::{self, AccountId};
@@ -52,6 +73,21 @@ pub const RESIGN_WINDOW_MS: u64 = 10 * 60 * 1000;
 pub const MAX_RESIGNS: u64 = 3;
 /// What a refused re-sign says; `{why}` is filled in.
 pub const ASK_AGAIN: &str = "{why}: the wallet won't sign it again without the person. Propose it again (propose_relayed_call).";
+/// How long before a call was asked a reset of the bridge test network still stops its re-sign
+/// (ms): a read stamps `reset_at` with the time it started (in whole seconds) and may take its
+/// whole budget (`bridge_net` READ_BUDGET, 25 s) before it sees the new chain, so a call asked
+/// up to that long before the stamp may have been built on the old chain. A call asked later was
+/// built on the new one and is re-signed as usual.
+pub const RESET_MARGIN_MS: u64 = 30_000;
+
+/// Why a re-sign of a call asked at `created` (ms) is refused, if it is, because the bridge test
+/// network was seen reset (`reset_at`, seconds, `bridge_net::reset_seen`) since `RESET_MARGIN_MS`
+/// before then. The words go in `ASK_AGAIN`'s `{why}`.
+pub fn reset_refusal(reset_at: Option<u64>, created: u64) -> Option<String> {
+    let at_ms = reset_at?.saturating_mul(1000);
+    (at_ms >= created.saturating_sub(RESET_MARGIN_MS)).then(|| "the bridge test network was reset since this call was asked, so a new signature could be good on a chain you never saw it on".to_owned())
+}
+
 /// Why a re-sign was refused, as a code an app can act on without reading the words:
 /// `unchanged` (the payer's nonce hasn't moved: send the transaction you already have),
 /// `landed_or_used` (the account's nonce moved: the call may have landed; check first) or
@@ -891,6 +927,28 @@ pub(crate) mod tests {
         let mut third = built("42", "3", &"bb".repeat(32));
         third["nonces"]["x"] = json!("1");
         assert!(resign_check(&approved, None, &third).unwrap_err().text().contains("signers"));
+    }
+
+    /// A re-sign after a reset of the bridge test network: refused when the reset was seen at or
+    /// after 30 s before the call was asked (seconds against milliseconds), not for one
+    /// seen earlier or none.
+    #[test]
+    fn a_reset_seen_since_the_call_was_asked_stops_its_re_sign() {
+        let created = 1_800_000_000_000_u64;
+        assert_eq!(reset_refusal(None, created), None, "no reset known");
+        assert!(reset_refusal(Some(created / 1000 + 60), created).unwrap().contains("was reset"), "after it was asked");
+        assert!(reset_refusal(Some(created / 1000), created).is_some(), "the same second");
+        assert!(reset_refusal(Some((created - RESET_MARGIN_MS) / 1000), created).is_some(), "just inside the margin");
+        assert_eq!(reset_refusal(Some((created - RESET_MARGIN_MS) / 1000 - 1), created), None, "before the margin");
+        // Review 2026-11-19, finding 5: the margin covers only how early a read stamps a reset (its
+        // whole budget, 25 s, and the second it is cut to): a call asked a minute after the reset was
+        // seen was built on the new chain, and is re-signed.
+        assert!(RESET_MARGIN_MS <= 30_000, "{RESET_MARGIN_MS}");
+        assert_eq!(reset_refusal(Some(created / 1000 - 60), created), None, "seen a minute before the call was asked");
+        assert!(reset_refusal(Some(created / 1000 - 20), created).is_some(), "seen 20 s before: the read may have stamped it early");
+        assert_eq!(reset_refusal(Some(1_000), created), None, "long before");
+        let said = ASK_AGAIN.replace("{why}", &reset_refusal(Some(created / 1000), created).unwrap());
+        assert!(said.starts_with("the bridge test network was reset") && said.ends_with("Propose it again (propose_relayed_call)."), "{said}");
     }
 
     /// A1: the wallet's own Names registry (either network's) and its token program are never

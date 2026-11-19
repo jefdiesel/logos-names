@@ -610,7 +610,7 @@ pub fn decode_definition_name(bytes: &[u8]) -> Option<String> {
         return None;
     }
     let name = std::str::from_utf8(r.take(length).ok()?).ok()?;
-    let cleaned = crate::text::clean_text(name, 64);
+    let cleaned = crate::text::clean_remote(name, 64);
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
@@ -763,7 +763,7 @@ pub fn faucet_call(url: &str, method: &str, params: Value, wait: Duration) -> Re
     let reply: Value = serde_json::from_str(&body).map_err(|_| "the bridge test network's faucet reply isn't JSON".to_owned())?;
     if let Some(error) = reply.get("error").filter(|e| !e.is_null()) {
         let message = error["message"].as_str().unwrap_or("refused");
-        return Err(format!("the bridge test network refused {method}: {}", crate::text::clean_text(message, 160)));
+        return Err(format!("the bridge test network refused {method}: {}", crate::text::clean_remote(message, 160)));
     }
     Ok(reply["result"].clone())
 }
@@ -772,7 +772,7 @@ pub fn faucet_call(url: &str, method: &str, params: Value, wait: Duration) -> Re
 /// reason}` for the info; `{ok, tx, block, amount, account}` or `{ok: false, code, reason, retry}`
 /// for a claim. Text the endpoint sends is cleaned for showing.
 pub fn faucet_shown(value: &Value) -> Value {
-    let text = |key: &str| value[key].as_str().map(|t| crate::text::clean_text(t, 200));
+    let text = |key: &str| value[key].as_str().map(|t| crate::text::clean_remote(t, 200));
     let mut out = serde_json::Map::new();
     for key in ["ok", "available", "retry"] {
         if let Some(flag) = value[key].as_bool() {
@@ -816,6 +816,15 @@ pub fn was_reset(saved: &Value, channel: &str, height: u64) -> bool {
         Some(_) => saved["height"].as_u64().is_some_and(|before| height < before),
         None => false,
     }
+}
+
+/// When a read last saw the bridge test network reset (`reset_at` in the state file in `dir`,
+/// seconds), if that was less than a day before `now` (seconds; a read tells a reset for
+/// `RESET_TOLD_S`). None with no file, an unreadable one, or no reset told: the file is this
+/// module's own (written whole, mode 600), and it knows of a reset only once a read has run since.
+pub fn reset_seen(dir: &Path, now: u64) -> Option<u64> {
+    // A stamp later than now (the clock was set back) isn't taken as a recent reset.
+    load_state(dir)["reset_at"].as_u64().filter(|at| *at <= now && now - *at < RESET_TOLD_S)
 }
 
 /// Reads the bridge test network at `url` for `accounts`, with the tokens of every bridge in
@@ -1314,6 +1323,7 @@ mod tests {
         let dir = scratch("reset");
         let first = network(CHANNEL, &HEIGHT, true);
         assert!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_000).unwrap()["reset_at"].is_null());
+        assert_eq!(reset_seen(&dir, 1_000), None, "no reset in the state file");
         // The same chain, later: no reset.
         HEIGHT.store(600, std::sync::atomic::Ordering::SeqCst);
         assert!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_100).unwrap()["reset_at"].is_null());
@@ -1322,10 +1332,19 @@ mod tests {
         assert_eq!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_200).unwrap()["reset_at"].as_u64(), Some(1_200));
         HEIGHT.store(9, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_300).unwrap()["reset_at"].as_u64(), Some(1_200));
+        // What a re-sign reads (`reset_seen`): the reset, from the file, for a day after it was seen,
+        // even when no read has run since.
+        assert_eq!((reset_seen(&dir, 1_300), reset_seen(&dir, 1_200 + RESET_TOLD_S - 1), reset_seen(&dir, 1_200 + RESET_TOLD_S)), (Some(1_200), Some(1_200), None));
         assert!(read(&first, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 1_200 + RESET_TOLD_S).unwrap()["reset_at"].is_null());
         // Another channel: reset.
         let other = network("ab".repeat(32).leak(), &HEIGHT, true);
         assert_eq!(read(&other, &[id(DEFAULT_BRIDGE_PROGRAM)], &[id(OWNER)], &dir, 200_000).unwrap()["reset_at"].as_u64(), Some(200_000));
+        // A reset stamped later than now (the clock was set back): not taken as recent.
+        save_state(&dir, &json!({ "channel": CHANNEL, "height": 5, "reset_at": 300_000, "bridges": [] }));
+        assert_eq!(reset_seen(&dir, 200_000), None, "a reset_at in the future");
+        // A file that isn't the state (written by hand, cut short): no reset known.
+        std::fs::write(dir.join(STATE_FILE), "{\"reset_at\": 2").unwrap();
+        assert_eq!(reset_seen(&dir, 200_000), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

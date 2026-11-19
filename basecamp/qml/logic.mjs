@@ -140,9 +140,10 @@ export function feePaid(fee) {
 /// ("2: Connection refused (os error 61)", transfer-failure-text-is-last-cause-line).
 export function jobProblem(job, lead) {
     var value = job || {}
+    // The module's problem and the CLI's log carry the chain's own words: cleaned before they show.
     if (value.problem)
-        return String(value.problem)
-    var lines = String(value.log_tail || "").split("\n").map(function(line) { return line.trim() }).filter(function(line) { return line !== "" })
+        return clean(value.problem)
+    var lines = String(value.log_tail || "").split("\n").map(function(line) { return clean(line).trim() }).filter(function(line) { return line !== "" })
     var error = lines.filter(function(line) { return /^Error:/.test(line) })[0]
     var why = error !== undefined ? error.replace(/^Error:\s*/, "") : lines.length > 0 ? lines[lines.length - 1] : ""
     return lead + ": " + (why !== "" ? why : "it stopped without saying why")
@@ -1128,9 +1129,18 @@ export function bridgedGroups(sources) {
 // ── Untrusted text (from lez-program-registry/registry_browser/qml/logic.mjs, tested there) ──
 
 /// Text an app or a chain wrote, safe to show as one plain line: line breaks become ⏎, and
-/// control, bidi, zero-width and other invisible characters are dropped.
+/// control, bidi, zero-width and other invisible characters are dropped, and so are `<`, `>` and
+/// `&`, so nothing in it can be read as markup (the text components draw plain text too).
 export function clean(s) {
-    return String(s === undefined || s === null ? "" : s).replace(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/g, "\u23CE").replace(/[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uDB40[\uDC00-\uDC7F]/g, "")
+    return String(s === undefined || s === null ? "" : s).replace(/\r\n|[\n\r\u000B\u000C\u0085\u2028\u2029]/g, "\u23CE").replace(/[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB<>&]|\uDB40[\uDC00-\uDC7F]/g, "")
+}
+
+/// Words the LEZ Bridge module (or its relay, or the bridge network behind it) wrote, as the
+/// screen shows them: `clean`, then cut to `max` characters (300) with an ellipsis.
+export function bridgeText(s, max) {
+    var limit = max === undefined ? 300 : max
+    var text = clean(s)
+    return text.length > limit ? text.substr(0, limit - 1) + "…" : text
 }
 
 /// The lines of a relayed call's sheet, each cleaned: `{lines, warnings, privacy, after, says, why}`.
@@ -1139,6 +1149,128 @@ export function relayedSheet(sheet) {
     var list = function(a) { return (Array.isArray(a) ? a : []).map(clean) }
     return { lines: list(s.lines), warnings: list(s.warnings), privacy: clean(s.privacy), after: clean(s.after),
              says: s.app_says ? clean(s.app_says) : "", why: list(s.why), refused: s.refused === true, hash: clean(s.hash) }
+}
+
+/// The burn a relayed call's sheet decoded (`sheet.burn`, provider_public.rs `burn_sheet`), or null.
+function decodedBurn(request) {
+    return request && request.kind === "relayed_call" && request.sheet && request.sheet.burn && typeof request.sheet.burn === "object" ? request.sheet.burn : null
+}
+
+/// Whether a request is a burn the wallet decoded.
+export function isDecodedBurn(request) {
+    return decodedBurn(request) !== null
+}
+
+/// Whether a decoded burn, asked by the LEZ Bridge, is for the send-back `focus` (the LEZ Bridge
+/// names a send-back `sb-` and the first 16 hex digits of its exit commitment E). Only such a burn
+/// is drawn inline on Bridge to Ethereum; any other is the sheet over the page.
+export function burnMatchesSendBack(request, focus) {
+    var burn = decodedBurn(request)
+    if (!burn || request.app !== "lez_bridge")
+        return false
+    var e = String(burn.exit || "").toLowerCase().replace(/^0x/, "")
+    return /^[0-9a-f]{64}$/.test(e) && focus === "sb-" + e.substr(0, 16)
+}
+
+/// Whether a decoded burn is this wallet's own send-back, the one case with no tick: drawn inline
+/// on Bridge to Ethereum (`here`: {inline, view, focus, recorded, shown}) for the send-back in
+/// focus (burnMatchesSendBack), which THIS wallet planned with the address read back and ticked at
+/// step 2 (`recorded`, kept by Names when it planned it), and the address drawn above the sheet
+/// (`shown`, the LEZ Bridge's row) is that one. A send-back the LEZ Bridge lists that this wallet
+/// didn't plan and tick (another app's, or one from before Names was restarted) needs the tick.
+export function burnIsOwnSendBack(request, here) {
+    var h = here || {}
+    if (h.inline !== true || h.view !== "sendback" || !burnMatchesSendBack(request, h.focus))
+        return false
+    var recorded = String(h.recorded || "").toLowerCase(), shown = String(h.shown || "").toLowerCase()
+    return recorded !== "" && recorded === shown
+}
+
+/// Whether the sheet's request needs the second, deliberate tick. An app whose publisher check
+/// failed may be a fake, whatever it asks (M-2). A decoded burn that isn't refused: only when it
+/// isn't this app's own send-back (`ownSendBack`, burnIsOwnSendBack): another app's burn shows no
+/// address the wallet checked. A call, private call, relayed call or declaration: when its sheet
+/// warns; a token transfer: when it warns.
+export function requestRisky(request, publisherFailed, ownSendBack) {
+    if (!request)
+        return false
+    if (publisherFailed)
+        return true
+    // Exit keys for an Ethereum address the person hasn't approved for this app: always the tick.
+    if (isExitAsk(request))
+        return true
+    if (decodedBurn(request) && request.sheet.refused !== true)
+        return ownSendBack !== true
+    if (request.kind === "private_call" || request.kind === "relayed_call" || request.kind === "programs")
+        return !!request.sheet && (request.sheet.warnings || []).length > 0
+    var token = request.kind === "transfer" && request.asset_kind === "token"
+    return (request.kind === "call" || token) && (request.warnings || []).length > 0
+}
+
+/// Where a decoded burn goes, as far as the wallet can say: who asks, the bridge (label and
+/// program), the amount out of which account, and that the Ethereum address is sealed in the exit
+/// commitment (the call carries only E), so the wallet can neither show it nor check it. Each line
+/// cleaned. [] when it isn't a decoded burn. `bridgeRecord`: an address is drawn above the sheet
+/// from the LEZ Bridge's record of the send-back (not ticked in this wallet); the last line says so.
+export function burnDestination(request, bridgeRecord) {
+    var burn = decodedBurn(request)
+    if (!burn)
+        return []
+    var e = clean(burn.exit)
+    var exitShort = e.length > 14 ? e.substr(0, 10) + "…" + e.substr(e.length - 4) : e
+    return [
+        "Asked by " + clean(request.app) + ".",
+        "Bridge: " + clean(burn.bridge_label || idShort(burn.bridge)) + " (" + clean(burn.bridge) + ").",
+        "Amount: " + clean(burn.amount_text) + " " + clean(burn.symbol) + ", out of your account " + idShort(clean(request.account)) + ".",
+        bridgeRecord === true
+            ? "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + "; the address above is the LEZ Bridge's record of it, not checked by this wallet."
+            : "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + ", which the wallet can't open, so the wallet can't show or check it.",
+    ]
+}
+
+/// Whether a request asks for exit keys (`RFP022/exit`) for an Ethereum address the person hasn't
+/// approved for that app and account (the module adds `exit`, exit_recipient.rs).
+export function isExitAsk(request) {
+    return !!request && request.kind === "secret" && !!request.exit && typeof request.exit === "object" && typeof request.exit.recipient === "string"
+}
+
+/// What the sheet shows of such an ask, made by the module from the context it decoded:
+/// `{halves, words, why, bridge}` (the address in two halves, the four words or why there are
+/// none, the bridge and its vault), each cleaned.
+export function exitShown(request) {
+    if (!isExitAsk(request))
+        return { halves: [], words: "", why: "", bridge: "" }
+    var e = request.exit
+    var bridge = e.bridge_label
+        ? "Bridge: " + clean(e.bridge_label) + " (vault " + clean(e.vault) + ", Ethereum chain " + clean(e.chain_id) + ")."
+        : "Bridge: one this wallet doesn't know (configuration " + clean(String(e.cfg_id || "").substr(0, 14)) + "…)."
+    return { halves: addressHalves(clean(e.recipient)), words: e.words_text ? clean(e.words_text) : "", why: e.words_why ? clean(e.words_why) : "", bridge: bridge }
+}
+
+/// The tick of an exit ask.
+export function exitTickText(request) {
+    var words = isExitAsk(request) && !!request.exit.words_text
+    return "This is my Ethereum address: I compared it" + (words ? ", and its four words," : "") + " with where I'm sending to. Tokens sent back to it can't be taken back."
+}
+
+/// Whether `recipient` is approved for `account` in `approved` (`exit_recipients`: {account:
+/// ["0x…"]}); accounts compared without their Public/ or Private/ mark, addresses in any case.
+export function recipientApproved(approved, account, recipient) {
+    var bare = function(a) { return String(a || "").replace(/^(Public|Private)\//, "") }
+    var want = String(recipient || "").toLowerCase()
+    if (want === "" || !approved || typeof approved !== "object")
+        return false
+    return Object.keys(approved).some(function(key) {
+        return bare(key) === bare(account) && Array.isArray(approved[key]) && approved[key].some(function(r) { return String(r).toLowerCase() === want })
+    })
+}
+
+/// The tick of a burn that isn't this app's own send-back. `bridgeRecord`: as in burnDestination.
+export function burnTickText(request, bridgeRecord) {
+    if (bridgeRecord === true)
+        return "The address above is the LEZ Bridge's record of this send-back; this wallet didn't read it back or tick it. Tick only if it is your address; the burn can't be undone."
+    var app = request && request.app === "lez_bridge" ? "the LEZ Bridge" : clean(request ? request.app : "")
+    return "The wallet can't check the Ethereum address. Tick only if you started this send-back in " + app + " and checked the address there; the burn can't be undone."
 }
 
 
@@ -1159,17 +1291,18 @@ export function bridgeReply(reply) {
         try { r = JSON.parse(r) } catch (e) { return { ok: false, kind: "error", error: "The LEZ Bridge module answered something that isn't JSON." } }
     }
     if (r && typeof r === "object" && "success" in r)
-        return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: String(r.error || "The LEZ Bridge module did not say why.") }
+        return r.success ? { ok: true, value: r.value } : { ok: false, kind: "error", error: bridgeText(r.error || "The LEZ Bridge module did not say why.") }
+    // Classified on the module's own words, shown cleaned and cut (bridgeText).
     var said = r && typeof r === "object" ? String(r.error || "") : String(r)
     if (/auth token|unauthori[sz]ed/i.test(said))
         return { ok: false, kind: "stale", error: "Close the Names tab and open Names again to reconnect to the bridge." }
     if (/timeout/i.test(said))
         return { ok: false, kind: "busy", error: "The LEZ Bridge module is still answering an earlier call." }
     if (/method not found|unknown_method|no such (module|method)|module not found|not installed/i.test(said))
-        return { ok: false, kind: "missing", error: said }
+        return { ok: false, kind: "missing", error: bridgeText(said) }
     if (/not connected|not reachable|unavailable|waiting for replica|crashed/i.test(said))
-        return { ok: false, kind: "starting", error: said }
-    return { ok: false, kind: "error", error: said }
+        return { ok: false, kind: "starting", error: bridgeText(said) }
+    return { ok: false, kind: "error", error: bridgeText(said) }
 }
 
 /// What the claim screen shows, from what it knows. One of: "missing" (no LEZ Bridge package),

@@ -66,7 +66,7 @@ pub fn problem(method: &str, error: &str) -> String {
     if lower.contains("no transaction found") {
         return "Your node has no record of that transaction, and it wasn't sent from the Names app: check the hash.".to_owned();
     }
-    format!("the Logos Blockchain node refused {method}: {error}")
+    format!("the Logos Blockchain node refused {method}: {}", crate::text::clean_remote(error, 300))
 }
 
 /// A JSON number or decimal text, as the node writes values.
@@ -347,6 +347,26 @@ mod tests {
         // A reply that arrives as JSON text is read the same.
         let text = json!(r#"{"success":true,"value":"5"}"#);
         assert_eq!(balance_of(&unwrap("wallet_get_balance", text).unwrap()), 5);
+    }
+
+    #[test]
+    fn a_long_module_refusal_is_still_read_as_advice() {
+        // Review 2026-11-19, finding 6: the words that make the advice may come after 300 characters.
+        let long = format!(r#"{{"code":"dispatch_failed","message":"{}: Wallet does not have enough funds, available=5","origin":"blockchain_module"}}"#, "x".repeat(400));
+        let why = match crate::peer::classify_message(&long) {
+            crate::peer::Failure::Refused(text) => text,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(problem("transfer_funds", &why), "That key doesn't hold enough for this and its fee.");
+        let down = format!(r#"{{"code":"dispatch_failed","message":"{}: node is not running","origin":"blockchain_module"}}"#, "y".repeat(400));
+        let crate::peer::Failure::Refused(text) = crate::peer::classify_message(&down) else { panic!() };
+        assert!(problem("send", &text).contains("isn't running"));
+    }
+
+    #[test]
+    fn a_node_error_is_cleaned_before_it_is_shown() {
+        assert_eq!(problem("send", "refused\u{202E}gnihtemos\n\u{200B}x"), "the Logos Blockchain node refused send: refused gnihtemos x");
+        assert!(problem("send", &"z".repeat(3000)).chars().count() < 400, "cut");
     }
 
     #[test]

@@ -62,6 +62,14 @@ pub fn clean_text(text: &str, max: usize) -> String {
 
 }
 
+/// Text from outside (a sequencer, a faucet, a node, another module) for a person to read:
+/// `clean_text`, with `<`, `>` and `&` taken out first, so nothing in it can be read as markup
+/// wherever it is drawn. (The CLI includes this file too and doesn't use it.)
+#[allow(dead_code)]
+pub fn clean_remote(text: &str, max: usize) -> String {
+    clean_text(&text.replace(['<', '>', '&'], ""), max)
+}
+
 #[cfg(test)]
 mod clean_tests {
     use super::clean_text;
@@ -73,5 +81,12 @@ mod clean_tests {
     fn invisible_characters_are_hidden_as_in_the_registry_browser() {
         assert_eq!(clean_text("a\u{00AD}b\u{180E}c\u{2061}d\u{206B}e\u{FFFA}f\u{E0041}g", 80), "a b c d e f g");
         assert_eq!(clean_text("1.0\u{202E}(unproven)\u{200B}\u{2066}x\u{2069}\n", 80), "1.0 (unproven) x");
+    }
+
+    /// Text from outside (a sequencer, a faucet, a node, another module): no markup survives either.
+    #[test]
+    fn remote_text_loses_markup_too() {
+        assert_eq!(super::clean_remote("<b>locked</b>\n<br>send &amp; \u{202E}pay", 80), "blocked/b brsend amp; pay");
+        assert_eq!(super::clean_remote(&"<".repeat(50), 10), "");
     }
 }

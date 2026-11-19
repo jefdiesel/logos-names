@@ -43,6 +43,7 @@ mod chain_inscribe;
 mod changes;
 mod cli;
 mod deposit;
+mod exit_recipient;
 mod page_view;
 mod peer;
 mod app_secret;
@@ -1163,6 +1164,15 @@ pub trait NamesModule: Send + 'static {
 
     /// The secret grants: `[{app, account, scope, since}]`. Names app only.
     fn secret_grants(&mut self) -> String;
+
+    /// The Ethereum addresses the person approved for `app`'s exit secrets (`RFP022/exit`), by
+    /// account: `{account: ["0x…"]}`. Names app only.
+    fn exit_recipients(&mut self, app: String) -> String;
+
+    /// Keeps `recipient` (an Ethereum address) as approved for `app`'s exit secrets from
+    /// `account`: what the Names app does once the person read it back and ticked it on Bridge to
+    /// Ethereum. `{approved: true}`. Names app only.
+    fn approve_exit_recipient(&mut self, app: String, account: String, recipient: String) -> String;
 
     /// Takes back one secret grant. `{revoked}`. Names app only.
     fn revoke_secret(&mut self, app: String, account: String, scope: String) -> String;
@@ -7632,6 +7642,26 @@ impl NamesModule for Names {
         reply(Ok(Value::from(list)))
     }
 
+    fn exit_recipients(&mut self, app: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(Ok(self.wallet_dir_of(self.net).map_or_else(|| json!({}), |dir| exit_recipient::approved_of(&dir, app.trim()))))
+    }
+
+    fn approve_exit_recipient(&mut self, app: String, account: String, recipient: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let app = provider::app_name(app.trim())?;
+            let (private, id) = provider::account_ref(&account)?;
+            let dir = self.wallet_dir_of(self.net).ok_or("there is no wallet folder to keep the approved address in")?;
+            exit_recipient::approve(&dir, &app, &provider::account_written(private, &id), &recipient)?;
+            Ok(json!({ "approved": true }))
+        })())
+    }
+
     fn revoke_secret(&mut self, app: String, account: String, scope: String) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -8150,7 +8180,7 @@ impl Names {
                 Some(state) if state["state"] == "done" => Some((true, String::new())),
                 Some(state) if state["state"] == "failed" => {
                     let log = state["log_tail"].as_str().unwrap_or_default();
-                    Some((false, provider::clean_text(&cli::failure_cause(log), 300)))
+                    Some((false, crate::text::clean_remote(&cli::failure_cause(log), 300)))
                 }
                 _ => None,
             };
@@ -8347,18 +8377,31 @@ impl Names {
         let count = u64::try_from(count).map_err(|_| "the count is 1 to 64".to_owned())?;
         let ask = app_secret::Ask::new(&app, scope.trim(), context, tag.trim(), first, count)?;
         let now = provider::now_ms();
+        // An exit's values say where tokens go on Ethereum: the context is read (a context that
+        // doesn't read is refused, never granted), and an address the person hasn't approved for
+        // this app and account asks them first, with the address shown (exit_recipient.rs).
+        let exit = if ask.scope == exit_recipient::EXIT_SCOPE { Some(exit_recipient::decode(&ask.context)?) } else { None };
+        let wallet_dir = self.wallet_dir_of(self.net);
+        let exit_new = exit.as_ref().filter(|e| {
+            !wallet_dir.as_deref().is_some_and(|dir| exit_recipient::is_approved(dir, &app, &account, &exit_recipient::address_text(&e.recipient)))
+        });
         let store = self.store();
         if !store.granted(&app).contains(&account) {
             return Err(format!("{account} wasn't given to this app; ask for it with request_access"));
         }
-        if !store.private.has_secret(&app, &account, &ask.scope) {
+        if !store.private.has_secret(&app, &account, &ask.scope) || exit_new.is_some() {
+            let recipient = exit_new.map(|e| exit_recipient::address_text(&e.recipient));
             let waiting = store.requests.iter().find(|r| {
                 r["kind"] == provider::SECRET && r["state"] == "pending" && r["app"] == app.as_str() && r["account"] == account.as_str() && r["scope"] == ask.scope.as_str()
+                    && r["exit"]["recipient"].as_str() == recipient.as_deref()
             });
             if let Some(waiting) = waiting {
                 return Ok(json!({ "granted": false, "request": provider::app_view(waiting) }));
             }
             let mut request = provider_private::secret_request(&app, &account, &ask.scope, "", now)?;
+            if let Some(exit) = exit_new {
+                request["exit"] = exit_recipient::sheet(exit);
+            }
             // An imported account: said once, on the first secret request for it from any app.
             if self.account_imported(&account) == Some(true) {
                 let store = self.store();
@@ -8474,7 +8517,7 @@ impl Names {
                 }
                 Err(why) => {
                     request["check"] = json!("failed");
-                    request["check_problem"] = json!(provider::clean_text(&why, 400));
+                    request["check_problem"] = json!(crate::text::clean_remote(&why, 400));
                 }
             }
             changed = true;
@@ -8516,6 +8559,11 @@ impl Names {
             provider::SECRET => {
                 let scope = request["scope"].as_str().unwrap_or_default().to_owned();
                 let account = request["account"].as_str().unwrap_or_default().to_owned();
+                // An exit's Ethereum address, approved on this sheet: kept for (app, account).
+                if let Some(recipient) = request["exit"]["recipient"].as_str() {
+                    let dir = self.wallet_dir_of(self.net).ok_or("there is no wallet folder to keep the approved address in; nothing was approved")?;
+                    exit_recipient::approve(&dir, &app, &account, recipient)?;
+                }
                 self.store().private.grant_secret(&app, &account, &scope, now)?;
                 outcome["state"] = json!("approved");
             }
@@ -8677,6 +8725,12 @@ impl Names {
         }
         if request["resigns"].as_u64().unwrap_or(0) >= provider_public::MAX_RESIGNS {
             return Err(again(provider_public::ASK_AGAIN.replace("{why}", "it was signed again 3 times already")));
+        }
+        // The signature binds no chain (rc3): after a reset of the bridge test network seen since
+        // the call was asked, a new build is on a chain the person never saw it on.
+        let reset_at = config_dir().and_then(|dir| bridge_net::reset_seen(&dir, now / 1000));
+        if let Some(why) = provider_public::reset_refusal(reset_at, request["created"].as_u64().unwrap_or(decided)) {
+            return Err(again(provider_public::ASK_AGAIN.replace("{why}", &why)));
         }
         self.asked_here(&request).map_err(again)?;
         if self.net != Net::Lez04 {
@@ -13530,6 +13584,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// An exit secret names where tokens go on Ethereum (exit_recipient.rs): a context that
+    /// doesn't read is refused; an address not approved for this app and account asks the person,
+    /// with the address, the bridge and the four words; the review's attack (another module has
+    /// the LEZ Bridge plan a send-back to its own address) meets that sheet, and nothing is
+    /// derived. An address the Names app's own step 2 ticked is approved without a second sheet,
+    /// and the approvals outlive taking the grant back.
+    #[test]
+    fn an_exit_secret_for_an_address_not_approved_asks_the_person_with_the_address() {
+        use exit_recipient::tests::{context, V4_CFG};
+        let values = format!("[\"{}\"]", "ab".repeat(32));
+        let tail = format!(
+            "case \"$*\" in\n\
+             *\"module account-scheme\"*) echo '{{\"account\":\"Private/{PRIVATE}\",\"scheme\":\"phrase\"}}' ;;\n\
+             *\"module app-secret\"*) cat > \"$(dirname \"$0\")/secret-in.json\"; echo '{{\"account\":\"Private/{PRIVATE}\",\"values\":{values},\"scheme\":\"phrase\"}}' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("provider-exit-recipient", &tail);
+        let account = format!("Private/{PRIVATE}");
+        connect(&mut names, "lez_bridge", &account);
+        let mine: [u8; 20] = [0x3c, 0x2f, 0x2c, 0x4b, 0xae, 0xc7, 0x08, 0xae, 0xe2, 0x32, 0x37, 0x9e, 0xb0, 0x0e, 0x9e, 0xcf, 0xa1, 0xb3, 0x51, 0xf8];
+        let theirs = [0xee; 20];
+        let ticked = [0x77; 20];
+        let ctx = |to: [u8; 20]| registry::hex(&context(V4_CFG, [0; 20], 10_000_000_000_000_000, to, 0));
+        let ask = |names: &mut Names, context: String| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), context, "RFP022/ek".into(), 0, 1));
+        let pending_of = |names: &mut Names, id: &str| {
+            as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+            let pending = parsed(&names.pending_requests())["value"].clone();
+            pending.as_array().unwrap().iter().find(|r| r["id"] == id).cloned().unwrap()
+        };
+        as_caller(app("lez_bridge"));
+        // A context that doesn't read is refused, and nothing is asked or derived.
+        assert!(ask(&mut names, "abcd".into())["error"].as_str().unwrap().contains("136 bytes"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert!(!parsed(&names.pending_requests())["value"].as_array().unwrap().iter().any(|r| r["kind"] == "secret"));
+        // The first exit for an address: the person sees the address, the bridge and the words.
+        as_caller(app("lez_bridge"));
+        let first = ask(&mut names, ctx(mine))["value"].clone();
+        assert_eq!(first["granted"], false, "{first}");
+        let id = first["request"]["request"].as_str().unwrap().to_owned();
+        let shown = pending_of(&mut names, &id);
+        assert_eq!(shown["exit"]["recipient"], "0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8", "{shown}");
+        assert_eq!((shown["exit"]["bridge_label"].as_str(), shown["exit"]["words_text"].as_str()), (Some("bridge v4"), Some("myth \u{b7} nerve \u{b7} session \u{b7} until")));
+        assert!(!dir.join("secret-in.json").exists(), "nothing derived before the person approves");
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        assert_eq!(ask(&mut names, ctx(mine))["value"]["granted"], true);
+        // The attack: the LEZ Bridge asked for an exit to another address (another module had it
+        // plan a send-back to its own). The grant is there, but the address isn't approved: a sheet.
+        let _ = std::fs::remove_file(dir.join("secret-in.json"));
+        let attack = ask(&mut names, ctx(theirs))["value"].clone();
+        assert_eq!(attack["granted"], false, "{attack}");
+        assert!(attack.get("values").is_none_or(Value::is_null) && !dir.join("secret-in.json").exists(), "nothing derived for it");
+        let attack_id = attack["request"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(pending_of(&mut names, &attack_id)["exit"]["recipient"], format!("0x{}", "ee".repeat(20)));
+        // Asked again: the same sheet, not a second one; the person rejects it.
+        as_caller(app("lez_bridge"));
+        assert_eq!(ask(&mut names, ctx(theirs))["value"]["request"]["request"], attack_id.as_str());
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        parsed(&names.reject_request(attack_id.clone()));
+        // The Names app's own step 2 (read back and ticked): approved without a second sheet.
+        as_caller(app("lez_bridge"));
+        assert!(parsed(&names.approve_exit_recipient("lez_bridge".into(), account.clone(), format!("0x{}", "77".repeat(20))))["error"].as_str().unwrap().contains("only the Names app"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.approve_exit_recipient("lez_bridge".into(), account.clone(), format!("0x{}", "77".repeat(20))))["value"]["approved"], true);
+        as_caller(app("lez_bridge"));
+        assert_eq!(ask(&mut names, ctx(ticked))["value"]["granted"], true);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let kept = parsed(&names.exit_recipients("lez_bridge".into()))["value"].clone();
+        assert_eq!(kept[account.as_str()], json!(["0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8", format!("0x{}", "77".repeat(20))]), "{kept}");
+        // Taking the grant back asks for the grant again, but the approved address stays approved.
+        parsed(&names.revoke_secret("lez_bridge".into(), account.clone(), "RFP022/exit".into()));
+        as_caller(app("lez_bridge"));
+        let again = ask(&mut names, ctx(mine))["value"].clone();
+        assert_eq!(again["granted"], false);
+        assert!(pending_of(&mut names, again["request"]["request"].as_str().unwrap())["exit"].is_null(), "the address isn't asked again");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// An imported account (rfp-022 `proposal/IMPORTED-ACCOUNTS-DESIGN.md`): the first secret card
     /// for it says so once (and, for a private one, the restore limit), the values carry
     /// `imported`, a tool that names no scheme is refused for it, and no tool text reaches the app.
@@ -13548,7 +13681,9 @@ mod tests {
             connect(&mut names, "lez_bridge", &account);
             (names, dir)
         };
-        let ask = |names: &mut Names, scope: &str| parsed(&names.app_secret(account.clone(), scope.into(), "abcd".into(), "RFP022/ck".into(), 0, 1));
+        // An exit's context is the fixed layout (exit_recipient.rs); a deposit's is free here.
+        let exit_ctx = registry::hex(&exit_recipient::tests::context(exit_recipient::tests::V4_CFG, [0; 20], 1, [0x3c; 20], 0));
+        let ask = |names: &mut Names, scope: &str| parsed(&names.app_secret(account.clone(), scope.into(), if scope == "RFP022/exit" { exit_ctx.clone() } else { "abcd".into() }, "RFP022/ck".into(), 0, 1));
         let shown = |names: &mut Names, id: &str| {
             as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
             let pending = parsed(&names.pending_requests())["value"].clone();
@@ -14152,7 +14287,16 @@ mod tests {
         // One line in the History for it.
         let lines: Vec<Value> = activity::all(&config_dir().unwrap()).into_iter().filter(|e| e["kind"] == "resign").collect();
         assert_eq!((lines.len(), lines[0]["app"].as_str(), lines[0]["payer_nonce"].as_str()), (1, Some("lez_bridge"), Some("42")), "{lines:?}");
+        // The bridge test network seen reset since the call was asked (bridge-net.json): no re-sign
+        // without the person, nothing signed. A reset seen an hour before it was asked doesn't stop it.
+        let net_state = config_dir().unwrap().join("bridge-net.json");
+        std::fs::write(&net_state, json!({ "channel": "c1", "height": 2, "reset_at": now(), "bridges": [] }).to_string()).unwrap();
         rebuilt("43", "3", &"e0".repeat(32), &|_| {});
+        let _ = std::fs::remove_file(dir.join("sign-in.json"));
+        let after_reset = parsed(&names.resign_relayed_call(id.clone()));
+        assert_eq!((after_reset["code"].as_str(), after_reset["error"].as_str().unwrap().contains("was reset since this call was asked")), (Some("ask_again"), true), "{after_reset}");
+        assert!(!dir.join("sign-in.json").exists(), "nothing was signed after the reset");
+        std::fs::write(&net_state, json!({ "channel": "c1", "height": 2, "reset_at": now() - 3600, "bridges": [] }).to_string()).unwrap();
         assert_eq!(parsed(&names.resign_relayed_call(id.clone()))["value"]["resigns"], 2);
         rebuilt("44", "3", &"e1".repeat(32), &|_| {});
         assert_eq!(parsed(&names.resign_relayed_call(id.clone()))["value"]["resigns"], 3);
@@ -14795,6 +14939,19 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(config_dir().unwrap());
+    }
+
+    /// Review 2026-11-19, finding 5 (its disputed half): a zone switch never moves the bridge test
+    /// network the reset record (bridge-net.json) follows, so it can't stamp a reset. Zones are
+    /// LEZ 0.3's; the bridge network is the configured LEZ 0.4 one.
+    #[test]
+    fn a_zone_switch_never_moves_the_bridge_network_the_reset_record_follows() {
+        let (mut names, dir, second) = with_two_zones("zones-bridge-net", "exit 0");
+        let before = names.lez04_rpc();
+        use_zone(&mut names, &second);
+        assert_eq!(names.lez04_rpc(), before);
+        assert_ne!(names.lez04_rpc(), ZONE_B);
+        zone_test_end(dir);
     }
 
     #[test]

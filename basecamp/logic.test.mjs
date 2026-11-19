@@ -67,7 +67,10 @@ const ok = (problem) => problem === "";
 const downLog = "Error: failed to read the account from the sequencer\n\nCaused by:\n    0: client error (Connect)\n    1: tcp connect error\n    2: Connection refused (os error 61)\n";
 check("jobProblem", [jobProblem({ problem: "The payment didn't go through: boom", log_tail: downLog }, "x"), jobProblem({ log_tail: downLog }, "It didn't go through"), jobProblem({ log_tail: "killed\n" }, "It didn't go through"), jobProblem({}, "It didn't go through")],
   ["The payment didn't go through: boom", "It didn't go through: failed to read the account from the sequencer", "It didn't go through: killed", "It didn't go through: it stopped without saying why"]);
-const id = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
+// The CLI's log and the module's problem carry the chain's own words: cleaned before they show.
+check("jobProblem cleans what the CLI printed", [jobProblem({ log_tail: "Error: paid ‮eman​ x\n" }, "It didn't go through"), jobProblem({ problem: "Failed: ⁦a⁩\u0007" }, "x"), jobProblem({ log_tail: "last ‮line" }, "y")],
+  ["It didn't go through: paid eman x", "Failed: a", "y: last line"]);
+const id ="CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk";
 check("tokenTo good", ["ada", "Jef.lez", "@ada", "Public/" + id, "Private/" + id].map((t) => ok(tokenToProblem(t))), [true, true, true, true, true]);
 check("tokenTo bad", ["", id, "Public/nope", "Public/" + id + "/x", "a b", "$(id)"].map((t) => ok(tokenToProblem(t))), [false, false, false, false, false, false]);
 check("tokenTo bare id says how", tokenToProblem(id).includes("Public/"), true);
@@ -165,6 +168,9 @@ check("cli status same network", mergeCliStatus(onNet({ wallet: true, public: "P
   check("bridge reply error", bridgeReply(twice({ success: false, value: null, error: "no" })).kind, "error");
   check("bridge reply kinds", ["{\"error\":\"timeout\"}", "{\"error\":\"Module not connected\"}", "{\"error\":\"Method not found\"}", "", undefined].map((r) => bridgeReply(r).kind),
     ["busy", "starting", "missing", "busy", "busy"]);
+  // Review finding 4: the module's error words are classified raw, then cleaned and cut.
+  check("bridge reply error cleaned", bridgeReply(twice({ success: false, value: null, error: "no\u202E <b>way</b>" })).error, "no bway/b");
+  check("bridge reply missing, cleaned and still missing", ((r) => [r.kind, r.error])(bridgeReply(JSON.stringify({ error: "Method not found\u200B<i>" + "y".repeat(500) }))), ["missing", "Method not foundi" + "y".repeat(282) + "…"]);
   const V2 = "JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", V3 = "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr";
   const labels = [[V2, "bridge v2"], [V3, "bridge v3"]];
   const ok = { ok: true, id: "rc-1", deposit: { account: "Public/A", leaf_index: 7, leaves: 9, amount_text: "0.1 ETH" }, call: { program: V3 }, checks: [] };
@@ -545,9 +551,122 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("clean drops bidi, zero-width, controls; a break shows as ⏎", clean("1.0\u202E(unproven)\u200B\u2066x\u2069\n"), "1.0(unproven)x⏎");
   check("invisible characters dropped", clean("a\u00ADb\u180Ec\u2061d\u206Be\uFFFAf\uDB40\uDC41g"), "abcdefg");
   check("clean of nothing", [clean(null), clean(undefined)], ["", ""]);
+  // Review finding 3: markup never survives the cleaner (and Hint & co. draw plain text, below).
+  check("clean drops < > &", clean("<b>bold</b> &amp; <img src='x'>"), "bbold/b amp; img src='x'");
+  // Finding 4: the LEZ Bridge's and its relay's words: cleaned and cut.
+  const { bridgeText } = await import("./qml/logic.mjs");
+  check("bridgeText: bidi, markup, breaks", bridgeText("paid \u202E000,01<br><font color='green'>Claim sent</font>\nnow"), "paid 000,01brfont color='green'Claim sent/font⏎now");
+  check("bridgeText: 200 kB cut to 300", [bridgeText("x".repeat(200000)).length, bridgeText("x".repeat(200000)).endsWith("…")], [300, true]);
+  check("bridgeText: nothing", [bridgeText(null), bridgeText(undefined), bridgeText("")], ["", "", ""]);
+  check("bridgeText: a shorter cut", bridgeText("abcdef", 4), "abc…");
   const sheet = relayedSheet({ lines: ["lez_bridge asks\u202E", "Network: LEZ 0.4 · bridge test network"], warnings: [], privacy: "A public claim publishes the claim secret and links the Sepolia deposit to this account.", after: "x", app_says: "Claim\nnow\u200B", refused: false, hash: "ab" });
   check("relayedSheet cleans every line", [sheet.lines[0], sheet.says, sheet.refused], ["lez_bridge asks", "Claim⏎now", false]);
   check("relayedSheet of nothing", relayedSheet(null).lines, []);
+
+  // A burn the wallet decoded (sheet.burn), toward each bridge it signs burns for (v4 to v7).
+  // Only the burn this app's own Bridge to Ethereum screen shows, for the send-back on it (whose
+  // address and words were read back and ticked at step 2), goes without a tick; any other app's
+  // burn, or the LEZ Bridge's away from that screen, needs the tick, and shows where it goes.
+  const { requestRisky, burnIsOwnSendBack, burnDestination, burnTickText } = await import("./qml/logic.mjs");
+  const E = "0xe2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5";
+  const bridges = [["bridge v4", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf"], ["bridge v5", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"],
+                   ["bridge v6", "4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed"], ["bridge v7", "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"]];
+  const burnOf = (app, label, program) => ({ id: "r9", kind: "relayed_call", app, account: "Public/5DNyon1w3jf4Ai2ANzLz1bYnrkeFwuoNRmTL48FTGGb7",
+    sheet: { warnings: ["This destroys the wrapped tokens on Logos and can't be undone; the ETH is released on Ethereum after the bridge's steps."], refused: false,
+             burn: { bridge: program, bridge_label: label, amount_text: "0.01", symbol: "wETH", exit: E } } });
+  // `recorded`: the address this wallet read back and ticked at step 2 for that send-back (kept by
+  // Names itself when it planned it); `shown`: the address the LEZ Bridge's row draws above the sheet.
+  const ADDR = "0xE2C4857976b346F8F9b3a7be714Cd92d0bF68680";
+  const own = { inline: true, view: "sendback", focus: "sb-e2ba7765d0fbf247", recorded: ADDR, shown: ADDR };
+  for (const [label, program] of bridges) {
+    const theirs = burnOf("other_app", label, program), bridgeAway = burnOf("lez_bridge", label, program), ours = burnOf("lez_bridge", label, program);
+    check(`burn to ${label}: another app's needs the tick`, requestRisky(theirs, false, burnIsOwnSendBack(theirs, own)), true);
+    check(`burn to ${label}: the LEZ Bridge's, away from Bridge to Ethereum, needs the tick`, requestRisky(bridgeAway, false, burnIsOwnSendBack(bridgeAway, { inline: false, view: "home", focus: "" })), true);
+    check(`burn to ${label}: the one on this app's own Bridge to Ethereum screen goes without`, requestRisky(ours, false, burnIsOwnSendBack(ours, own)), false);
+    check(`burn to ${label}: its destination is shown`, burnDestination(theirs), [
+      "Asked by other_app.",
+      `Bridge: ${label} (${program}).`,
+      "Amount: 0.01 wETH, out of your account 5DNyon…GGb7.",
+      "Ethereum address: not in the call. It is sealed in the exit commitment 0xe2ba7765…dfd5, which the wallet can't open, so the wallet can't show or check it."]);
+  }
+  const ours = burnOf("lez_bridge", "bridge v7", bridges[3][1]);
+  check("own screen, another send-back on it: the tick", requestRisky(ours, false, burnIsOwnSendBack(ours, { ...own, focus: "sb-0000000000000000" })), true);
+  check("own screen, not drawn there (a sheet over it): the tick", burnIsOwnSendBack(ours, { ...own, inline: false }), false);
+  check("own screen, its address not drawn above (send-back row not read): the tick", burnIsOwnSendBack(ours, { ...own, shown: "" }), false);
+  // Review 2026-11-19, finding 1: a send-back the LEZ Bridge lists but this wallet never planned
+  // and ticked (another app planned it, to its own address), or one whose drawn address isn't the
+  // one ticked, needs the tick.
+  check("own screen, focus and address match but this wallet never ticked it: the tick", burnIsOwnSendBack(ours, { ...own, recorded: "" }), false);
+  check("own screen, ticked another address than the one drawn: the tick", burnIsOwnSendBack(ours, { ...own, recorded: "0x68b5000000000000000000000000000000000975d" }), false);
+  check("own screen, the same address in other case: no tick", burnIsOwnSendBack(ours, { ...own, recorded: ADDR.toLowerCase() }), true);
+  check("own screen, no record object at all: the tick", burnIsOwnSendBack(ours, { inline: true, view: "sendback", focus: "sb-e2ba7765d0fbf247", address: true }), false);
+  // Finding 2: whether a burn is the send-back in focus at all (decides inline vs the sheet over it).
+  const { burnMatchesSendBack, isDecodedBurn } = await import("./qml/logic.mjs");
+  check("burnMatchesSendBack", [burnMatchesSendBack(ours, "sb-e2ba7765d0fbf247"), burnMatchesSendBack(ours, "sb-0000000000000000"), burnMatchesSendBack(ours, ""), burnMatchesSendBack(burnOf("other_app", "bridge v7", bridges[3][1]), "sb-e2ba7765d0fbf247"), burnMatchesSendBack({ kind: "connect", app: "lez_bridge" }, "sb-e2ba7765d0fbf247")],
+    [true, false, false, false, false]);
+  check("isDecodedBurn", [isDecodedBurn(ours), isDecodedBurn({ kind: "relayed_call", sheet: {} }), isDecodedBurn(null)], [true, false, false]);
+  // Exit keys for an address not approved (the module's sheet data, exit_recipient.rs).
+  const { isExitAsk, exitShown, exitTickText, recipientApproved } = await import("./qml/logic.mjs");
+  const exitAsk = { id: "r5", kind: "secret", app: "lez_bridge", account: "Private/AAA", scope: "RFP022/exit",
+    exit: { recipient: "0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8", bridge_label: "bridge v4", vault: "0xc2c6a059eab928966b24fa5549d441a3b17b54ed", chain_id: 11155111, words_text: "myth · nerve · session · until", words_why: null } };
+  check("an exit ask always needs the tick", [requestRisky(exitAsk, false, false), isExitAsk(exitAsk), isExitAsk({ kind: "secret", scope: "RFP022/exit" })], [true, true, false]);
+  check("an exit ask shows the address, words and bridge", exitShown(exitAsk), { halves: ["0x3c2f2c4baec708aee232", "379eb00e9ecfa1b351f8"], words: "myth · nerve · session · until", why: "",
+    bridge: "Bridge: bridge v4 (vault 0xc2c6a059eab928966b24fa5549d441a3b17b54ed, Ethereum chain 11155111)." });
+  check("an exit ask for an unknown bridge, no words", ((s) => [s.words, s.bridge])(exitShown({ ...exitAsk, exit: { recipient: exitAsk.exit.recipient, cfg_id: "0x1111111111111111111111", words_text: null, words_why: "can't make the four words" } })),
+    ["", "Bridge: one this wallet doesn't know (configuration 0x111111111111…)."]);
+  check("exit tick", [exitTickText(exitAsk), exitTickText({ ...exitAsk, exit: { ...exitAsk.exit, words_text: null } })],
+    ["This is my Ethereum address: I compared it, and its four words, with where I'm sending to. Tokens sent back to it can't be taken back.",
+     "This is my Ethereum address: I compared it with where I'm sending to. Tokens sent back to it can't be taken back."]);
+  check("recipientApproved", [recipientApproved({ "Private/AAA": ["0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8"] }, "AAA", "0x3C2F2C4BAEC708AEE232379EB00E9ECFA1B351F8"),
+    recipientApproved({ "Private/AAA": ["0x3c"] }, "Private/BBB", "0x3c"), recipientApproved({}, "AAA", "0x3c"), recipientApproved(null, "AAA", "0x3c"), recipientApproved({ "Public/AAA": ["0x3c"] }, "Public/AAA", "")],
+    [true, false, false, false, false]);
+  // A focus-matching burn this wallet didn't tick: the address above is the LEZ Bridge's record, said so.
+  check("the tick when the address above is the bridge's record", burnTickText(ours, true),
+    "The address above is the LEZ Bridge's record of this send-back; this wallet didn't read it back or tick it. Tick only if it is your address; the burn can't be undone.");
+  check("destination when the address above is the bridge's record", burnDestination(ours, true)[3],
+    "Ethereum address: not in the call. It is sealed in the exit commitment 0xe2ba7765…dfd5; the address above is the LEZ Bridge's record of it, not checked by this wallet.");
+  check("own screen, another app with the same exit: the tick", burnIsOwnSendBack(burnOf("other_app", "bridge v7", bridges[3][1]), own), false);
+  check("an exit that isn't 32 bytes of hex matches no send-back", burnIsOwnSendBack({ ...ours, sheet: { ...ours.sheet, burn: { ...ours.sheet.burn, exit: "0xe2ba7765d0fbf247" } } }, own), false);
+  check("a refused burn is no burn: its warnings decide", requestRisky({ ...ours, sheet: { ...ours.sheet, refused: true } }, false, true), true);
+  check("a publisher check that failed always ticks", requestRisky(ours, true, true), true);
+  check("the rest as before: an undecoded relayed call with a warning / a call without / a token with one / a payment",
+    [requestRisky({ kind: "relayed_call", sheet: { warnings: ["can't decode"] } }, false, false), requestRisky({ kind: "call", warnings: [] }, false, false),
+     requestRisky({ kind: "transfer", asset_kind: "token", warnings: ["no name"] }, false, false), requestRisky({ kind: "transfer", warnings: ["x"] }, false, false), requestRisky(null, false, false)],
+    [true, false, true, false, false]);
+  check("the tick names the app and says it can't be undone", burnTickText(burnOf("other_app", "bridge v6", bridges[2][1])),
+    "The wallet can't check the Ethereum address. Tick only if you started this send-back in other_app and checked the address there; the burn can't be undone.");
+  check("the bridge's own words for the tick", burnTickText(bridgeAwayOf()), "The wallet can't check the Ethereum address. Tick only if you started this send-back in the LEZ Bridge and checked the address there; the burn can't be undone.");
+  function bridgeAwayOf() { return burnOf("lez_bridge", "bridge v4", bridges[0][1]) }
+  check("destination text from the module is cleaned", burnDestination(burnOf("evil‮app", "bridge v4​", "BKXe\nx")).slice(0, 2), ["Asked by evilapp.", "Bridge: bridge v4 (BKXe⏎x)."]);
+  check("no burn, no destination", [burnDestination(null), burnDestination({ kind: "relayed_call", sheet: {} })], [[], []]);
+  // The sheet uses these rules, not a copy of its own.
+  const sheetQml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("Main.qml: appRequestRisky is Logic.requestRisky", /function appRequestRisky\(request\) \{\s*return Logic\.requestRisky\(/.test(sheetQml), true);
+  check("Main.qml: the short sheet shows Logic.burnDestination", sheetQml.includes("Logic.burnDestination(sheetBody.request"), true);
+  // Review finding 3: no text the app draws is read as markup unless it says so. The text
+  // components default to plain text, and every Text element in Main.qml names its format.
+  const blockOf = (src, at) => { let depth = 0, i = src.indexOf("{", at); const start = i; for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break } return src.slice(start, i + 1) };
+  for (const name of ["Hint", "NumberLine", "Part", "WhyLine"]) {
+    const at = sheetQml.indexOf("component " + name + ": Text {");
+    check(`Main.qml: ${name} draws plain text`, at >= 0 && /textFormat: Text\.PlainText/.test(blockOf(sheetQml, at)), true);
+  }
+  const bare = [...sheetQml.matchAll(/(^|[^\w.])Text \{/gm)].map((m) => ({ line: sheetQml.slice(0, m.index + m[0].indexOf("Text")).split("\n").length, block: blockOf(sheetQml, m.index) }))
+    // The address step's words (names-roadmap-2 changes that line; its plain format is in the
+    // marked patch for that branch, LP0001-JOB-B-ROADMAP2.patch).
+    .filter((t) => !/textFormat:/.test(t.block) && !t.block.includes("root.sbCheck.words_text")).map((t) => t.line);
+  check("Main.qml: every Text element names its format", bare, []);
+  // Finding 1: Names keeps the address it ticked for each send-back it planned, and the exemption reads it.
+  check("Main.qml: sbPlan records the ticked address", /plans\[id\] = ticked\s*sbOwnPlans = plans/.test(sheetQml), true);
+  check("Main.qml: appBurnOwn passes the record", /recorded: sbOwnPlans\[sbFocus\]/.test(sheetQml), true);
+  // The record outlives a restart: an address approved on the exit sheet or ticked at step 2 is
+  // kept by the names module (exit_recipients), and step 2 approves it before the plan.
+  check("Main.qml: appBurnOwn reads the kept approvals", sheetQml.includes("Logic.recipientApproved(sbApproved, sbFocusRow.account, sbFocusRow.recipient)"), true);
+  check("Main.qml: step 2 approves the ticked address before the plan", /function sbContinue\(\)[\s\S]{0,600}approve_exit_recipient[\s\S]{0,400}sbPlan\(\)/.test(sheetQml), true);
+  check("Main.qml: the short sheet shows an exit ask's address", sheetQml.includes("Logic.exitShown(sheetBody.request)"), true);
+  // Finding 2: a burn for another send-back than the one in focus is never drawn inline under its address.
+  check("Main.qml: appInline on Bridge to Ethereum needs the burn to match the focus", sheetQml.includes("!Logic.isDecodedBurn(appRequest) || Logic.burnMatchesSendBack(appRequest, sbFocus)"), true);
+  check("Main.qml: the address block above the sheet is the burn's own", sheetQml.includes("visible: sendBackScreen.burning && root.sbFocusRow !== null && (!Logic.isDecodedBurn(root.appRequest) || Logic.burnMatchesSendBack(root.appRequest, root.sbFocus))"), true);
+
   check("activityLine for a re-sign",
     ((l) => [l.title, l.sub])(activityLine({ kind: "resign", chain: "lez", zone: "bridge-0.4", app: "lez_bridge", payer_nonce: "42", resigns: 1, state: "done", at: 1 }, 2000)),
     ["Signed again for lez_bridge", "on LEZ 0.4, without asking: only the payer's nonce had moved (payer nonce 42, re-sign 1 of 3)"]);

@@ -897,6 +897,49 @@ for _name, _js, _mock in [
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
 
+# A decoded burn that is NOT this app's own send-back: another app's (to bridge v7 here), and the
+# LEZ Bridge's while Names is on its wallet page. Each needs the tick and shows where it goes.
+SB_BURN_SHEET_BRIDGE = SB_BURN_SHEET.replace('"bridge_label": "bridge v4"', '"bridge": "%s", "bridge_label": "bridge v4"' % V4)
+SB_BURN_SHEET_OTHER = (SB_BURN_SHEET_BRIDGE.replace('"app": "lez_bridge"', '"app": "other_app"').replace("lez_bridge asks your wallet", "other_app asks your wallet")
+                       .replace("bridge v4", "bridge v7").replace(V4, "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"))
+for _name, _js in [
+    ("approve-burn-other-app", SB_CARD % ('root.againAfter(150, function() { %s })' % SB_BURN_SHEET_OTHER)),
+    ("approve-burn-other-app-ticked", SB_CARD % ('root.againAfter(150, function() { %s; root.appChosenFor = "r9"; root.appUnderstood = true })' % SB_BURN_SHEET_OTHER)),
+    ("approve-burn-bridge-away", SB_CARD % ('root.againAfter(150, function() { %s })' % SB_BURN_SHEET_BRIDGE)),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = sb_mock()
+# Exit keys for an Ethereum address not approved yet (exit_recipient.rs): the address in full, the
+# four words this wallet made, the bridge; the tick. And one for a bridge it doesn't know (no words).
+_EXIT = {"recipient": "0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8", "bridge_label": "bridge v4", "vault": "0xc2c6a059eab928966b24fa5549d441a3b17b54ed", "chain_id": 11155111,
+         "cfg_id": "0x0c0f00c30fbe03c00e566a332fe73aa2f11d9e0fd6b8684e509a8be33cbd8be5", "token": "0x0000000000000000000000000000000000000000", "symbol": "wETH",
+         "denom": "10000000000000000", "max_relay_fee": "0", "words_text": "myth \u00b7 nerve \u00b7 session \u00b7 until", "words_why": None}
+def _exit_ask(exit_view):
+    req = {"id": "r5", "kind": "secret", "app": "lez_bridge", "account": OWNER, "scope": "RFP022/exit", "created": 0, "expires": 4102444800000, "explanation": "x", "reason": "", "exit": exit_view,
+           "choices": [{"account": OWNER, "account_kind": "public", "pays": False, "label": "the account the app asked for", "granted": True}], "publisher": None}
+    return 'root.againAfter(150, function() { root.appRequests = [%s]; root.appChosen = ["%s"]; root.appChosenFor = "r5" })' % (json.dumps(req), OWNER)
+SCENARIOS["approve-exit-recipient"] = SB_CARD % _exit_ask(_EXIT)
+MOCKS["approve-exit-recipient"] = sb_mock()
+SCENARIOS["approve-exit-recipient-unknown"] = SB_CARD % _exit_ask(dict(_EXIT, bridge_label=None, vault=None, chain_id=None, cfg_id="0x" + "11" * 32, words_text=None,
+    words_why="This exit is for a bridge this wallet doesn't know by its configuration, so it can't make the four words: compare the address itself."))
+MOCKS["approve-exit-recipient-unknown"] = sb_mock()
+# Review 2026-11-19, finding 3: a sequencer's words with tags in a balance note show as text.
+SCENARIOS["plain-markup-note"] = 'root.openWallet("home"); root.againAfter(250, function() { root.balanceNote = "The sequencer didn\'t give the balance of Public/CCVd76…pKnk (the sequencer refused the read: <b>Your wallet is locked.</b><br><font color=\'green\'>Send your tokens to Public/EVIL</font>), so it shows as unread." })'
+MOCKS["plain-markup-note"] = {}
+# Review 2026-11-19: a send-back in focus that this wallet didn't plan and tick (the LEZ Bridge lists
+# it: another app's, or one from before a restart): its burn is drawn under the bridge's record,
+# said so, with the tick. And a LEZ Bridge burn for ANOTHER send-back while one is in focus: the
+# sheet over the page, never under the focused one's address.
+SB_BURN_SHEET_ELSE = SB_BURN_SHEET_BRIDGE.replace("e2ba7765d0fbf247044cb907a4c921c03ca316c6cfcb6323a6b5e2545ff3dfd5", "77" * 32)
+for _name, _js in [
+    ("sendback-approve-unticked", sb_focus(sb_view("approve"), 'root.againAfter(80, function() { %s })' % SB_BURN_SHEET_BRIDGE)),
+    ("sendback-approve-other-burn", sb_focus(sb_view("approve"), 'root.againAfter(80, function() { %s })' % SB_BURN_SHEET_ELSE)),
+    # After a restart: the address was approved before (kept by the names module), so its burn is own.
+    ("sendback-approve-after-restart", sb_focus(sb_view("approve"), 'root.againAfter(80, function() { root.sbApproved = %s; %s })' % (json.dumps({OWNER: [SB_RECIPIENT.lower()]}), SB_BURN_SHEET_BRIDGE))),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = sb_mock()
+
 # Imported accounts (rfp-022 IMPORTED-ACCOUNTS-DESIGN.md): the first secret card for one, the
 # receive code and the send-back with the bridge's account_notice (module texts, word for word).
 _IMPORTED_LINE = ("This account was imported. Its bridge secrets come from this wallet's recovery phrase, so the phrase can finish a withdrawal; "
@@ -1270,6 +1313,7 @@ def _ago(text):
     return _re.sub(r'"@AGO:(\d+)@"', lambda m: str(int(_time.time() * 1000) - int(m.group(1)) * 1000), text)
 HEIGHTS = {name: 2100 for name in ("claim-private-approve", "claim-private-simulating", "claim-private-check-failed", "sendback-private-approve")}
 HEIGHTS.update({"card-private-proving": 1500, "card-arriving-private": 1500})
+HEIGHTS.update({name: 1500 for name in ("approve-burn-other-app", "approve-burn-other-app-ticked", "approve-burn-bridge-away", "sendback-approve-unticked", "sendback-approve-other-burn", "plain-markup-note", "approve-exit-recipient", "approve-exit-recipient-unknown", "sendback-approve-after-restart")})
 HEIGHTS.update({name: 1700 for name, _j, _m in WALLET_NEXT if name.startswith("sendback-address") or name.startswith("sendback-approve")})
 HEIGHTS.update({name: 1800 for name, _j, _m in WALLET_NEXT if name.startswith("card-remove")})
 

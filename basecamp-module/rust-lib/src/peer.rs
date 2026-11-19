@@ -267,12 +267,16 @@ pub fn classify(error: &logos_rust_sdk::LogosError) -> Failure {
 pub fn classify_message(message: &str) -> Failure {
     let parsed = serde_json::from_str::<Value>(message).ok();
     let code = parsed.as_ref().and_then(|value| value["code"].as_str()).unwrap_or_default().to_owned();
-    let text = parsed.as_ref().and_then(|value| value["message"].as_str()).unwrap_or(message).to_owned();
+    let raw = parsed.as_ref().and_then(|value| value["message"].as_str()).unwrap_or(message);
+    // Another module's words: classified as they are, carried cleaned and NOT cut short (only a
+    // bound against a flood): `chain::problem` reads advice from words anywhere in it, then cuts
+    // what it shows.
+    let text = crate::text::clean_remote(raw, 4096);
     if ["dispatch_failed", "invalid_args", "unknown_method", "unauthorized"].contains(&code.as_str()) {
         return Failure::Refused(text);
     }
     // The SDK's own argument checks, as a provider's dispatch words them.
-    let lower = text.to_ascii_lowercase();
+    let lower = raw.to_ascii_lowercase();
     let unreachable = ["unavailable", "acquire", "timed out", "timeout", "not loaded", "transport", "unreachable", "no listener"];
     let refusal = ["expected ", "unknown method", "invalid arg", "wrong number of arg"];
     if code.is_empty() && !unreachable.iter().any(|word| lower.contains(word)) && refusal.iter().any(|word| lower.contains(word)) {
@@ -806,6 +810,15 @@ mod tests {
         assert!(matches!(classify_message("call blockchain_module.get_time_info timed out after 15000 ms"), Failure::NoAnswer(_)));
         assert!(matches!(classify_message(r#"{"code":"unknown_method","message":"no such method","origin":"x"}"#), Failure::Refused(_)));
         assert!(matches!(classify_message("expected string at arg0, got number"), Failure::Refused(_)));
+        // Its words are another module's: cleaned (after they are classified).
+        match classify_message(r#"{"code":"unknown_method","message":"no such\u202e method\n","origin":"x"}"#) {
+            Failure::Refused(text) => assert_eq!(text, "no such method"),
+            other => panic!("{other:?}"),
+        }
+        match classify_message("timed out\u{200B}\u{202E} here") {
+            Failure::NoAnswer(text) => assert_eq!(text, "timed out here"),
+            other => panic!("{other:?}"),
+        }
         let client = logos_rust_sdk::LogosError::Other("Failed to create protocol client for blockchain_module".into());
         assert!(matches!(classify(&client), Failure::NoAnswer(_)));
     }

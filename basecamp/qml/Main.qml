@@ -1884,7 +1884,20 @@ Item {
     function sbContinue() {
         if (!sbAddressNow.canContinue || sbCheck === null || sbCheck.key !== Logic.addressBoxKey(sbCodeInput))
             return
-        sbPlan()
+        // The address was read back and ticked here: the names module keeps it as approved for the
+        // LEZ Bridge's exits from this account, so the plan's exit keys ask nothing more. If that
+        // fails (an older module), the plan goes on and the wallet's exit sheet asks instead.
+        var recipient = String(sbCheck.recipient || "")
+        sbAsking = true
+        askLater("approve_exit_recipient", ["lez_bridge", sbAccount, recipient], function() {
+            sbAsking = false
+            loadExitRecipients()
+            sbPlan()
+        }, function(message) {
+            sbAsking = false
+            console.log("names_ui: approve_exit_recipient:", message)
+            sbPlan()
+        })
     }
     /// "Save to my addresses": a short name for the address this send-back went to (kept by the
     /// bridge on this computer; never on chain).
@@ -1947,6 +1960,21 @@ Item {
     property var sbExtras: []
     property string sbError: ""
     property string sbFocus: ""            // the send-back on the screen
+    // The send-backs this wallet planned (sbPlan) with the Ethereum address read back and ticked at
+    // step 2: id -> that address. Kept in memory for this run of Names: a send-back from before a
+    // restart, or one another app planned through the LEZ Bridge, isn't here and its burn gets the tick.
+    property var sbOwnPlans: ({})
+    // The Ethereum addresses the names module keeps as approved for the LEZ Bridge's exits, by
+    // account (`exit_recipients`): approved on the exit sheet or ticked at step 2, kept in the
+    // wallet folder, so a send-back is still this wallet's own after a restart.
+    property var sbApproved: ({})
+    function loadExitRecipients() {
+        askLater("exit_recipients", ["lez_bridge"], function(value) {
+            sbApproved = value && typeof value === "object" ? value : ({})
+        }, function(message) {
+            console.log("names_ui: exit_recipients:", message)
+        })
+    }
     property var sbStatuses: ({})          // id → send_back_status
     property var sendBacks: []             // Logic.sendBacksFrom rows
     property bool sendBacksLoaded: false
@@ -2182,6 +2210,14 @@ Item {
                 return
             }
             var id = String(value.id)
+            // Kept for the burn's sheet (sbOwnPlans): only when the LEZ Bridge planned it to the very
+            // address read back and ticked in the box (a box changed meanwhile matches nothing).
+            var ticked = sbTicked && sbCheck !== null ? String(sbCheck.recipient || "") : ""
+            if (ticked !== "" && String(value.recipient || "").toLowerCase() === ticked.toLowerCase()) {
+                var plans = sbOwnPlans
+                plans[id] = ticked
+                sbOwnPlans = plans
+            }
             var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), kind: String(value.kind || ""), notice: String(value.account_notice || "") }
             sendBacks = [row].concat(sendBacks.filter(function(x) { return x.id !== id }))
             var all = sbStatuses
@@ -6942,7 +6978,9 @@ Item {
     readonly property bool appInline: appPrivateHere || appRequest !== null && appSheetCompact && appRequest.app === "lez_bridge" && section === "wallet"
         && ((walletView === "claim" && ["asking", "needs", "running", "uncertain"].indexOf(claimStageNow) >= 0)
             || (walletView === "ethreceive" && receiveNeeds !== null)
-            || (walletView === "sendback" && (sbNeeds !== null || (sbFocusStatus !== null && sbFocusStatus.stage === "approve"))))
+            || (walletView === "sendback" && (sbNeeds !== null || (sbFocusStatus !== null && sbFocusStatus.stage === "approve"))
+                // A burn is drawn here only for the send-back in focus; any other is the sheet over the page.
+                && (!Logic.isDecodedBurn(appRequest) || Logic.burnMatchesSendBack(appRequest, sbFocus))))
     function appSheetTitle(request) {
         if (request === null)
             return ""
@@ -6958,6 +6996,9 @@ Item {
             return bridge ? "Let the bridge see this account?" : request.app + " asks to see an account"
         if (request.kind === "programs")
             return bridge ? "Allow the bridge's programs?" : request.app + " asks to allow its programs"
+        // Exit keys for an Ethereum address not approved yet: the address is the question.
+        if (Logic.isExitAsk(request))
+            return bridge ? "Let the bridge send back to this Ethereum address?" : request.app + " asks to send back to this Ethereum address"
         if (request.kind === "secret")
             return bridge ? (String(request.scope || "") === "RFP022/exit" ? "Allow the bridge's exit keys?" : "Allow the bridge's deposit keys?") : request.app + " asks for keys of its own"
         return appRequestTitle(request)
@@ -7006,9 +7047,13 @@ Item {
         // unreadable.
         if (request.kind === "programs")
             return "Allow " + (request.app === "lez_bridge" ? "the LEZ Bridge's" : request.app + "'s") + " programs to ask this wallet to sign claims. Only allow programs you trust."
-        // A burn the wallet decoded: its one warning (it can't be undone).
-        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && (request.sheet.warnings || []).length > 0)
-            return String(request.sheet.warnings[0])
+        // A burn the wallet decoded that isn't this app's own send-back: the address can't be checked.
+        // One the wallet refuses keeps the sheet's own warning (Approve stays dim anyway).
+        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
+            return request.sheet.refused !== true ? Logic.burnTickText(request, appBurnUnderRecord(request)) : (request.sheet.warnings || []).length > 0 ? String(request.sheet.warnings[0]) : ""
+        // Exit keys for an address not approved yet: the person says it is theirs.
+        if (Logic.isExitAsk(request))
+            return Logic.exitTickText(request)
         return "The wallet can't decode this call; it shows only its hash. Tick to approve it anyway, if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
     }
     property bool appBusy: false          // an answer is on its way to the module
@@ -7057,6 +7102,9 @@ Item {
     function loadAppRequests() {
         askLater("pending_requests", [], function(value) {
             appRequests = Array.isArray(value) ? value : []
+            // A burn's sheet reads which addresses are this wallet's own (kept by the module).
+            if (appRequests.some(function(r) { return Logic.isDecodedBurn(r) }))
+                loadExitRecipients()
             var request = appRequest
             if (request === null) {
                 appChosenFor = ""
@@ -7121,18 +7169,22 @@ Item {
     }
 
     /// A program call, or a token transfer, with warnings: its program's
-    /// source isn't verified, it goes to the Names registry, the token has no name.
+    /// source isn't verified, it goes to the Names registry, the token has no name. A burn the
+    /// wallet decoded needs the tick unless it is this app's own send-back (Logic.requestRisky).
     function appRequestRisky(request) {
-        // An app whose publisher check failed may be a fake, whatever it asks (M-2).
-        if (appPublisherFailed(request))
-            return true
-        // A burn the wallet decoded (it says what it burns): its one warning is a line, not a tick.
-        if (request.kind === "relayed_call" && request.sheet && request.sheet.burn && request.sheet.refused !== true)
-            return false
-        // A declaration of a program the Program Registry doesn't vouch for needs the tick too.
-        if (request.kind === "private_call" || request.kind === "relayed_call" || request.kind === "programs")
-            return !!request.sheet && (request.sheet.warnings || []).length > 0
-        return (request.kind === "call" || appIsToken(request)) && ((request.warnings || []).length > 0)
+        return Logic.requestRisky(request, appPublisherFailed(request), appBurnOwn(request))
+    }
+
+    /// Whether a decoded burn is this wallet's own send-back on Bridge to Ethereum: the one in focus,
+    /// planned in this wallet with the address read back and ticked at step 2 (`sbOwnPlans`), and
+    /// that address is the one drawn above the sheet (Logic.burnIsOwnSendBack).
+    function appBurnOwn(request) {
+        return Logic.burnIsOwnSendBack(request, { inline: appInline, view: walletView, focus: sbFocus, recorded: sbOwnPlans[sbFocus] || (sbFocusRow !== null && Logic.recipientApproved(sbApproved, sbFocusRow.account, sbFocusRow.recipient) ? String(sbFocusRow.recipient) : ""), shown: sbFocusRow !== null ? String(sbFocusRow.recipient || "") : "" })
+    }
+    /// A decoded burn drawn inline under the LEZ Bridge's record of its send-back's address, which
+    /// this wallet didn't tick (not appBurnOwn): the sheet says the address above is that record.
+    function appBurnUnderRecord(request) {
+        return appInline && walletView === "sendback" && Logic.burnMatchesSendBack(request, sbFocus) && !appBurnOwn(request)
     }
 
     /// Whether the app claims a publisher that doesn't vouch for it.
@@ -7461,6 +7513,7 @@ Item {
             }
         }
         Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             visible: seal.letter !== "" && seal.width >= 60
             text: seal.letter.toUpperCase()
@@ -7496,6 +7549,7 @@ Item {
         Keys.onReturnPressed: if (live) action.pressed()
         Keys.onSpacePressed: if (live) action.pressed()
         Text {
+            textFormat: Text.PlainText
             id: actionText
             anchors.centerIn: parent
             text: action.label
@@ -7594,6 +7648,7 @@ Item {
         property string count: ""
         Layout.fillWidth: true
         Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: parent.label
             color: root.ink
@@ -7602,6 +7657,7 @@ Item {
             font.weight: Font.Bold
         }
         Text {
+            textFormat: Text.PlainText
             text: parent.count
             color: root.dim
             font.family: root.sans
@@ -7620,6 +7676,7 @@ Item {
         implicitWidth: bare.implicitWidth + suffix.implicitWidth
         implicitHeight: bare.implicitHeight
         Text {
+            textFormat: Text.PlainText
             id: bare
             width: Math.min(implicitWidth, Math.max(0, label.width - suffix.implicitWidth))
             text: label.name
@@ -7630,6 +7687,7 @@ Item {
             elide: Text.ElideRight
         }
         Text {
+            textFormat: Text.PlainText
             id: suffix
             anchors.left: bare.right
             anchors.baseline: bare.baseline
@@ -7644,6 +7702,7 @@ Item {
 
     /// A quiet text button, for the small things beside the main actions.
     component Link: Text {
+        textFormat: Text.PlainText
         id: link
         signal pressed()
         color: linkArea.containsMouse ? root.brass : root.ink
@@ -7701,6 +7760,7 @@ Item {
         RegularExpressionValidator { id: digits; regularExpression: /[0-9]{0,15}/ }
         RegularExpressionValidator { id: longDigits; regularExpression: /[0-9]{0,39}/ }
         Text {
+            textFormat: Text.PlainText
             anchors.fill: input
             verticalAlignment: Text.AlignVCenter
             visible: input.text === ""
@@ -7744,6 +7804,7 @@ Item {
             }
         }
         Text {
+            textFormat: Text.PlainText
             anchors.fill: parent
             anchors.margins: 12
             visible: areaInput.text === ""
@@ -7771,6 +7832,7 @@ Item {
             anchors.margins: 18
             spacing: 12
             Text {
+                textFormat: Text.PlainText
                 text: parent.parent.title
                 color: root.ink
                 font.family: root.sans
@@ -7793,6 +7855,7 @@ Item {
         border.width: 1
         border.color: root.line
         Text {
+            textFormat: Text.PlainText
             id: chipText
             anchors.centerIn: parent
             text: chip.label
@@ -7858,11 +7921,11 @@ Item {
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 1
-                Text { Layout.fillWidth: true; text: pick.title; elide: Text.ElideRight; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: pick.current ? Font.DemiBold : Font.Normal }
-                Text { Layout.fillWidth: true; visible: pick.sub !== ""; text: pick.sub; elide: Text.ElideRight; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: pick.title; elide: Text.ElideRight; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: pick.current ? Font.DemiBold : Font.Normal }
+                Text { textFormat: Text.PlainText; Layout.fillWidth: true; visible: pick.sub !== ""; text: pick.sub; elide: Text.ElideRight; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
             }
-            Text { visible: pick.amount !== ""; text: pick.amount; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
-            Text { visible: pick.dropdown; text: "›"; rotation: pick.open ? 270 : 90; color: root.dim; font.family: root.sans; font.pixelSize: root.px(20) }
+            Text { textFormat: Text.PlainText; visible: pick.amount !== ""; text: pick.amount; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+            Text { textFormat: Text.PlainText; visible: pick.dropdown; text: "›"; rotation: pick.open ? 270 : 90; color: root.dim; font.family: root.sans; font.pixelSize: root.px(20) }
         }
         MouseArea {
             id: pickArea
@@ -7888,6 +7951,7 @@ Item {
         Layout.bottomMargin: root.px(act.small ? 4 : 6)
         spacing: root.px(10)
         Text {
+            textFormat: Text.PlainText
             Layout.preferredWidth: root.px(18)
             horizontalAlignment: Text.AlignHCenter
             text: act.line.sign === "+" ? "↓" : act.line.sign === "-" ? "↑" : "⇄"
@@ -7898,7 +7962,7 @@ Item {
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 1
-            Text { Layout.fillWidth: true; text: act.line.title; elide: Text.ElideRight; color: root.ink; font.family: root.sans; font.pixelSize: root.px(act.small ? 14 : 15) }
+            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: act.line.title; elide: Text.ElideRight; color: root.ink; font.family: root.sans; font.pixelSize: root.px(act.small ? 14 : 15) }
             // The line wraps rather than being cut: its accounts are already shortened, and
             // cutting its middle took "into Public" out of it (activity-bridge-subtitle-elided-mid-text).
             Text {
@@ -7917,6 +7981,7 @@ Item {
             spacing: 1
             Layout.maximumWidth: root.px(240)
             Text {
+                textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignRight
                 visible: act.line.amount !== ""
                 text: root.walletHidden ? "••••••" : act.line.sign + act.line.amount
@@ -7926,6 +7991,7 @@ Item {
                 font.pixelSize: root.px(act.small ? 14 : 15)
             }
             Text {
+                textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignRight
                 Layout.maximumWidth: root.px(240)
                 visible: act.line.state !== ""
@@ -7978,9 +8044,9 @@ Item {
                             border.width: 2
                             border.color: choiceRow.ticked ? root.brass : root.dim
                         }
-                        Text { text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
-                        Text { text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
-                        Text { visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                        Text { textFormat: Text.PlainText; text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
+                        Text { textFormat: Text.PlainText; text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
+                        Text { textFormat: Text.PlainText; visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                     }
                     MouseArea {
                         anchors.fill: parent
@@ -8011,6 +8077,29 @@ Item {
             wrapMode: Text.WordWrap
         }
         Hint { visible: root.appSheetCompact; color: root.ink; textFormat: Text.PlainText; text: root.appSheetLine(sheetBody.request) }
+        // Another app's decoded burn (or the LEZ Bridge's away from Bridge to Ethereum): where it
+        // goes, as far as the wallet can say, before its tick.
+        Repeater {
+            model: root.appSheetCompact && sheetBody.request !== null && !root.appBurnOwn(sheetBody.request) ? Logic.burnDestination(sheetBody.request, root.appBurnUnderRecord(sheetBody.request)) : []
+            Hint { required property var modelData; color: root.ink; textFormat: Text.PlainText; text: modelData }
+        }
+        // Exit keys for an Ethereum address not approved yet: the address in full, the four words
+        // the wallet made itself, the bridge; then the tick.
+        ColumnLayout {
+            readonly property var e: Logic.exitShown(sheetBody.request)
+            visible: root.appSheetCompact && Logic.isExitAsk(sheetBody.request)
+            Layout.fillWidth: true
+            spacing: 4
+            Hint { color: root.ink; textFormat: Text.PlainText; text: "To this Ethereum address:" }
+            Repeater {
+                model: parent.e.halves
+                Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+            }
+            Text { visible: parent.e.words !== ""; Layout.fillWidth: true; text: parent.e.words; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(24); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+            Hint { visible: parent.e.words !== ""; textFormat: Text.PlainText; font.pixelSize: root.px(15); text: "Its four words, made by this wallet: they match the ones on the bridge page for the same address." }
+            Hint { visible: parent.e.why !== ""; textFormat: Text.PlainText; color: root.ink; text: parent.e.why }
+            Hint { textFormat: Text.PlainText; text: parent.e.bridge }
+        }
         Hint { visible: root.appSheetCompact && root.publisherChecking(sheetBody.request); font.pixelSize: root.px(15); text: root.publisherShown(sheetBody.request) !== null ? root.publisherShown(sheetBody.request).text : "" }
         Tick {
             visible: root.appSheetCompact && root.appSheetWarning(sheetBody.request) !== ""
@@ -8442,7 +8531,7 @@ Item {
                 required property var modelData
                 required property int index
                 spacing: 6
-                Text { visible: stepCell.index > 0; anchors.verticalCenter: parent.verticalCenter; text: "›"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(16) }
+                Text { textFormat: Text.PlainText; visible: stepCell.index > 0; anchors.verticalCenter: parent.verticalCenter; text: "›"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(16) }
                 Rectangle {
                     readonly property bool now: stepCell.modelData.state === "now"
                     implicitWidth: stepLabel.implicitWidth + 22
@@ -8454,6 +8543,7 @@ Item {
                     border.width: now ? 2 : 1
                     border.color: now ? root.ink : root.line
                     Text {
+                        textFormat: Text.PlainText
                         id: stepLabel
                         anchors.centerIn: parent
                         text: (stepCell.modelData.state === "done" ? "✓ " : stepCell.modelData.n + " ") + stepCell.modelData.short
@@ -8529,7 +8619,7 @@ Item {
             visible: waitPanel.view !== null && waitPanel.view.running
             spacing: 12
             Action { readonly property var b: Logic.checkButton(waitPanel.polling, false); label: b.label; enabledNow: b.enabled; onPressed: waitPanel.checkNow() }
-            Text { text: Logic.receiveCheckLine(waitPanel.polling, waitPanel.checkedAt, 0, root.privateNow, waitPanel.failed); visible: text !== "" && text !== "Checking…"; color: waitPanel.failed && !waitPanel.polling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+            Text { textFormat: Text.PlainText; text: Logic.receiveCheckLine(waitPanel.polling, waitPanel.checkedAt, 0, root.privateNow, waitPanel.failed); visible: text !== "" && text !== "Checking…"; color: waitPanel.failed && !waitPanel.polling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
         }
     }
     /// Check now (a button: "Checking…" at once, then the answer) and "Checked just now", with
@@ -8537,12 +8627,12 @@ Item {
     component ReceiveCheckLine: RowLayout {
         spacing: 12
         Action { readonly property var b: Logic.checkButton(root.receivePolling, root.receiveAskNow); label: b.label; enabledNow: b.enabled; onPressed: root.receiveCheckNow() }
-        Text { text: root.receiveCheckLine; visible: text !== "" && text !== "Checking…"; color: root.receiveCheckFailed && !root.receivePolling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+        Text { textFormat: Text.PlainText; text: root.receiveCheckLine; visible: text !== "" && text !== "Checking…"; color: root.receiveCheckFailed && !root.receivePolling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
     }
     component SendBackCheckLine: RowLayout {
         spacing: 12
         Action { readonly property var b: Logic.checkButton(root.sbPolling, root.sbAskNow); label: b.label; enabledNow: b.enabled && !root.sbAsking; onPressed: root.sbCheckNow() }
-        Text { text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextShown, root.receiveNow, root.sbCheckFailed); visible: text !== "" && text !== "Checking…"; color: root.sbCheckFailed && !root.sbPolling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+        Text { textFormat: Text.PlainText; text: Logic.receiveCheckLine(root.sbPolling, root.sbCheckedAt, root.sbNextShown, root.receiveNow, root.sbCheckFailed); visible: text !== "" && text !== "Checking…"; color: root.sbCheckFailed && !root.sbPolling ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
     }
 
     component BridgeSetupBox: RowLayout {
@@ -8604,6 +8694,7 @@ Item {
         radius: 8
         color: tab.current ? root.raised : tabArea.containsMouse ? root.hover : "transparent"
         Text {
+            textFormat: Text.PlainText
             id: tabText
             anchors.verticalCenter: parent.verticalCenter
             anchors.horizontalCenter: tab.alignLeft ? undefined : parent.horizontalCenter
@@ -8637,9 +8728,9 @@ Item {
             implicitHeight: root.px(30)
             radius: height / 2
             color: stepHead.done ? root.good : root.brass
-            Text { anchors.centerIn: parent; text: stepHead.done ? "✓" : String(stepHead.number); color: root.slate; font.family: root.sans; font.pixelSize: root.px(15); font.weight: Font.DemiBold }
+            Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: stepHead.done ? "✓" : String(stepHead.number); color: root.slate; font.family: root.sans; font.pixelSize: root.px(15); font.weight: Font.DemiBold }
         }
-        Text { text: stepHead.title; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+        Text { textFormat: Text.PlainText; text: stepHead.title; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
     }
 
     component Card: Rectangle {
@@ -8683,6 +8774,7 @@ Item {
                     border.width: stepRow.now || stepRow.done ? 0 : 1
                     border.color: root.line
                     Text {
+                        textFormat: Text.PlainText
                         anchors.centerIn: parent
                         text: stepRow.done ? "✓" : String(stepRow.index + 1)
                         color: stepRow.now || stepRow.done ? root.slate : root.dim
@@ -8695,6 +8787,7 @@ Item {
                     Layout.fillWidth: true
                     spacing: 2
                     Text {
+                        textFormat: Text.PlainText
                         Layout.fillWidth: true
                         text: stepRow.modelData.title + "  ·  " + (stepRow.now && steps.note !== "" ? steps.note : stepRow.modelData.time)
                         color: stepRow.now ? root.waitTone : root.ink
@@ -8704,6 +8797,7 @@ Item {
                         wrapMode: Text.Wrap
                     }
                     Text {
+                        textFormat: Text.PlainText
                         Layout.fillWidth: true
                         text: stepRow.modelData.why
                         color: root.faint
@@ -8722,9 +8816,9 @@ Item {
         property string value: ""
         property string note: ""
         spacing: 4
-        Text { text: parent.label; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
-        Text { text: parent.value; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
-        Text { visible: parent.note !== ""; Layout.fillWidth: true; text: parent.note; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14); wrapMode: Text.Wrap }
+        Text { textFormat: Text.PlainText; text: parent.label; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+        Text { textFormat: Text.PlainText; text: parent.value; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
+        Text { textFormat: Text.PlainText; visible: parent.note !== ""; Layout.fillWidth: true; text: parent.note; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14); wrapMode: Text.Wrap }
     }
 
     /// A line of explanation under a control.
@@ -8780,8 +8874,8 @@ Item {
                         anchors.left: parent.left
                         anchors.leftMargin: root.px(14)
                         spacing: 1
-                        Text { text: netChoice.modelData.version; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: netChoice.current ? Font.DemiBold : Font.Normal }
-                        Text { text: netChoice.modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
+                        Text { textFormat: Text.PlainText; text: netChoice.modelData.version; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: netChoice.current ? Font.DemiBold : Font.Normal }
+                        Text { textFormat: Text.PlainText; text: netChoice.modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(13) }
                     }
                     MouseArea {
                         id: netChoiceArea
@@ -8942,6 +9036,7 @@ Item {
         Keys.onReturnPressed: back.pressed()
         Keys.onSpacePressed: back.pressed()
         Text {
+            textFormat: Text.PlainText
             id: backText
             anchors.centerIn: parent
             text: "‹  " + back.label
@@ -8971,6 +9066,7 @@ Item {
         spacing: 10
         BackButton { label: pageHeader.backLabel; onPressed: pageHeader.back() }
         Text {
+            textFormat: Text.PlainText
             Layout.topMargin: 4
             Layout.fillWidth: true
             text: pageHeader.title
@@ -8998,6 +9094,7 @@ Item {
         spacing: 12
         StepRow { steps: stepHeader.steps }
         Text {
+            textFormat: Text.PlainText
             visible: stepHeader.current !== null
             Layout.fillWidth: true
             text: stepHeader.current === null ? "" : "Step " + stepHeader.current.n + " of " + stepHeader.current.total + " · " + stepHeader.current.title
@@ -9029,6 +9126,7 @@ Item {
         Keys.onReturnPressed: choice.pressed()
         Keys.onSpacePressed: choice.pressed()
         Text {
+            textFormat: Text.PlainText
             id: choiceText
             anchors.centerIn: parent
             text: (choice.chosen ? "● " : "") + choice.label
@@ -9065,7 +9163,7 @@ Item {
             color: tick.checked ? (tick.caution ? root.cautionTone : root.brass) : "transparent"
             border.width: 2
             border.color: tick.caution ? root.cautionTone : tick.checked ? root.brass : root.dim
-            Text { anchors.centerIn: parent; visible: tick.checked; text: "✓"; color: root.slate; font.family: root.sans; font.pixelSize: root.px(14); font.weight: Font.Bold }
+            Text { textFormat: Text.PlainText; anchors.centerIn: parent; visible: tick.checked; text: "✓"; color: root.slate; font.family: root.sans; font.pixelSize: root.px(14); font.weight: Font.Bold }
             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: tick.toggled() }
         }
         StatusMark { visible: tick.caution; kind: "caution"; Layout.alignment: Qt.AlignTop; Layout.topMargin: root.px(3); Layout.preferredWidth: root.px(16); Layout.preferredHeight: root.px(16) }
@@ -9084,6 +9182,7 @@ Item {
     }
 
     component Hint: Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
         color: root.dim
         font.family: root.sans
@@ -9095,6 +9194,7 @@ Item {
 
     /// One numbered thing to do, in order ("1. Copy the link …"): ink, a size above a hint.
     component NumberLine: Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
         color: root.ink
         font.family: root.sans
@@ -9106,6 +9206,7 @@ Item {
 
     /// The heading of one part of the edit panel.
     component Part: Text {
+        textFormat: Text.PlainText
         Layout.topMargin: 10
         color: root.ink
         font.family: root.sans
@@ -9145,12 +9246,14 @@ Item {
                         owner: accountRow.modelData.account
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: root.shorten(accountRow.modelData.account)
                         color: root.ink
                         font.family: root.mono
                         font.pixelSize: root.px(17)
                     }
                     Text {
+                        textFormat: Text.PlainText
                         visible: !!accountRow.modelData.isPrivate
                         text: "Private"
                         color: root.dim
@@ -9158,6 +9261,7 @@ Item {
                         font.pixelSize: root.px(16)
                     }
                     Text {
+                        textFormat: Text.PlainText
                         visible: !!accountRow.modelData.name
                         text: accountRow.modelData.name ? accountRow.modelData.name : ""
                         color: root.dim
@@ -9166,6 +9270,7 @@ Item {
                     }
                     Item { Layout.fillWidth: true }
                     Text {
+                        textFormat: Text.PlainText
                         text: root.grouped(accountRow.modelData.balance)
                         color: root.dim
                         font.family: root.sans
@@ -9196,6 +9301,7 @@ Item {
         Layout.fillWidth: true
         spacing: 12
         Text {
+            textFormat: Text.PlainText
             Layout.preferredWidth: 120
             text: fact.label
             color: root.dim
@@ -9340,6 +9446,7 @@ Item {
                             elide: Text.ElideRight
                         }
                         Text {
+                            textFormat: Text.PlainText
                             visible: root.mainName !== ""
                             text: "main name"
                             color: root.faint
@@ -9392,7 +9499,7 @@ Item {
                 y: 48
                 width: Math.min(parent.width - 112, 640)
                 spacing: 18
-                Text { text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(36); font.weight: Font.DemiBold }
+                Text { textFormat: Text.PlainText; text: "Welcome"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(36); font.weight: Font.DemiBold }
                 Hint { font.pixelSize: root.px(18); text: "Get a name, then post, pay and be paid as it. " + (root.namesNet === "0.4" ? "Three" : "Four") + " steps, all here." }
                 // Which network these steps are for: switchable here, before anything else, so a
                 // wallet-less start on LEZ 0.3 never hides LEZ 0.4.
@@ -9459,6 +9566,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 8
                             Text {
+                                textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 text: "curl -fsSL https://logos-names.wrapit.workers.dev/install.sh | sh && names setup"
                                 color: root.dim
@@ -9647,7 +9755,7 @@ Item {
                 spacing: 8
                 RowLayout {
                     Layout.fillWidth: true
-                    Text { text: "Activity"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Text { textFormat: Text.PlainText; text: "Activity"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     Item { Layout.fillWidth: true }
                     Link { text: "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: { root.loadActivity(); root.loadCliBalance(); root.loadChain() } }
                 }
@@ -9687,9 +9795,10 @@ Item {
                 spacing: 14
                 RowLayout {
                     Layout.fillWidth: true
-                    Text { text: "Messages"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                    Text { textFormat: Text.PlainText; text: "Messages"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                     Item { Layout.fillWidth: true }
                     Text {
+                        textFormat: Text.PlainText
                         text: root.chatState === "" ? "" : "Network: " + root.chatState
                         color: root.faint
                         font.family: root.sans
@@ -9708,7 +9817,7 @@ Item {
                         id: chatDown
                         x: 14; y: 12
                         width: parent.width - 28
-                        Text { Layout.fillWidth: true; text: "Messaging isn't running yet. Open the Chat app once, then come back."; color: root.ink; font.family: root.sans; font.pixelSize: root.px(15); wrapMode: Text.Wrap }
+                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: "Messaging isn't running yet. Open the Chat app once, then come back."; color: root.ink; font.family: root.sans; font.pixelSize: root.px(15); wrapMode: Text.Wrap }
                         Action { label: "Open Chat"; onPressed: if (logos.request) logos.request("basecamp.apps.launch", { app: "chat_ui" }, function() { root.chatLoad() }) }
                     }
                 }
@@ -9726,6 +9835,7 @@ Item {
                         x: 14; y: 12
                         width: parent.width - 28
                         Text {
+                            textFormat: Text.PlainText
                             Layout.fillWidth: true
                             text: "People can't message " + root.mainName + " yet. Turning it on adds this computer's chat address to " + root.mainName + "'s profile, so anyone who looks the name up can start a DM."
                             color: root.dim
@@ -9794,7 +9904,7 @@ Item {
                                     x: 12; y: 7
                                     width: parent.width - 24
                                     spacing: 2
-                                    Text { Layout.fillWidth: true; text: (/group/.test(String(convoRow.modelData.kind)) ? "# " : "") + root.chatLabel(convoRow.modelData.convo_id); color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; elide: Text.ElideRight }
+                                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: (/group/.test(String(convoRow.modelData.kind)) ? "# " : "") + root.chatLabel(convoRow.modelData.convo_id); color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; elide: Text.ElideRight }
                                     Text {
                                         Layout.fillWidth: true
                                         text: convoRow.modelData.preview ? convoRow.modelData.preview : convoRow.modelData.message_count + " messages" + (convoRow.modelData.last_activity_ms ? " · " + root.boardAgo(convoRow.modelData.last_activity_ms) : "")
@@ -9821,6 +9931,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 6
                             Text {
+                                textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 text: "# " + root.chatLabel(root.chatOpenId) + "  ·  " + root.chatMembers.length + " member" + (root.chatMembers.length === 1 ? "" : "s")
                                     + (root.chatMembers.length > 0 ? ": " + root.chatMembers.map(function(m) { return root.chatWho(m.address) + (m.pending ? " (invited)" : "") }).join(", ") : "")
@@ -9840,7 +9951,7 @@ Item {
                             visible: root.chatOpenId !== "" && root.dmNames[root.chatOpenId] === undefined && !root.chatIsGroup(root.chatOpenId)
                             Layout.fillWidth: true
                             spacing: 6
-                            Text { text: "Who is this?"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                            Text { textFormat: Text.PlainText; text: "Who is this?"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                             Field { id: dmLabel; Layout.fillWidth: true; size: 15; hint: "Their name, if you know it" }
                             Action {
                                 label: "Save"
@@ -9871,6 +9982,7 @@ Item {
                                     radius: 12
                                     color: bubbleRow.modelData.from_self ? root.ownBubble : root.raised
                                     Text {
+                                        textFormat: Text.PlainText
                                         id: senderText
                                         visible: bubble.named
                                         x: 14; y: 8
@@ -9930,7 +10042,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
-                        Text { text: "Wallet"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
+                        Text { textFormat: Text.PlainText; text: "Wallet"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.DemiBold }
                         Item { Layout.fillWidth: true }
                         Link { text: root.chainReading || root.cliBalance === undefined ? "Reading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.walletRefresh() }
                         // Show or hide every amount, as wallets do for a screen others can see.
@@ -10017,8 +10129,8 @@ Item {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 10
-                            Text { Layout.fillWidth: true; text: "Bridge test network"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
-                            Text { text: "LEZ 0.4"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: "Bridge test network"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                            Text { textFormat: Text.PlainText; text: "LEZ 0.4"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                         }
                         Hint { font.pixelSize: root.px(15); text: "Our own chain for the bridge, where bridged Sepolia tokens arrive. It is reset now and then." }
                         // The card's one yellow button: Receive, unless a receive has arrived (its
@@ -10039,7 +10151,7 @@ Item {
                                 : { rows: root.receives.map(function(x) { return { id: x.id, symbol: x.symbol, amount: x.amount, account: x.account, progress: { stage: "old", card: "The LEZ Bridge here can't follow it: update it.", tone: "plain", claim: false } } }), hidden: 0 }
                             readonly property bool anyClaim: view.rows.some(function(x) { return x.progress.claim })
                             visible: view.rows.length > 0 || view.hidden > 0
-                            Text { text: "Arriving from Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            Text { textFormat: Text.PlainText; text: "Arriving from Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
                             Repeater {
                                 model: arrivingPanel.view.rows
                                 ColumnLayout {
@@ -10059,7 +10171,7 @@ Item {
                                             RowLayout {
                                                 spacing: 10
                                                 Text { text: arrivingRow.modelData.amount + " " + arrivingRow.modelData.symbol; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
-                                                Text { Layout.alignment: Qt.AlignBaseline; text: "into " + Logic.idShort(arrivingRow.modelData.account) + (arrivingRow.modelData.where ? " · " + arrivingRow.modelData.where : ""); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                                                Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignBaseline; text: "into " + Logic.idShort(arrivingRow.modelData.account) + (arrivingRow.modelData.where ? " · " + arrivingRow.modelData.where : ""); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                                             }
                                             StatusLine {
                                                 readonly property var pj: Logic.privateJob(root.privateClaimJobs[arrivingRow.modelData.id] || null, "claim")
@@ -10101,7 +10213,7 @@ Item {
                         // large. A row opens Send back at its stage.
                         UnderwayPanel {
                             visible: root.sbRowsNow.length > 0
-                            Text { text: "Bridging to Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            Text { textFormat: Text.PlainText; text: "Bridging to Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
                             Repeater {
                                 model: root.sbRowsNow
                                 ColumnLayout {
@@ -10121,7 +10233,7 @@ Item {
                                             RowLayout {
                                                 spacing: 10
                                                 Text { text: backRow.modelData.amount; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
-                                                Text { Layout.alignment: Qt.AlignBaseline; text: "from " + Logic.idShort(backRow.modelData.account) + " to " + Logic.idShort(backRow.modelData.recipient); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                                                Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignBaseline; text: "from " + Logic.idShort(backRow.modelData.account) + " to " + Logic.idShort(backRow.modelData.recipient); color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                                             }
                                             StatusLine {
                                                 readonly property var pj: Logic.privateJob(root.sbJobs[backRow.modelData.id] || null, "burn")
@@ -10203,6 +10315,7 @@ Item {
                                         }
                                         Item { Layout.fillWidth: true }
                                         Text {
+                                            textFormat: Text.PlainText
                                             text: root.walletHidden ? "••••••" : netAsset.modelData.amount
                                             color: root.ink
                                             font.family: root.sans
@@ -10362,13 +10475,14 @@ Item {
                                             implicitHeight: root.px(42)
                                             radius: height / 2
                                             color: groupCard.modelData.id === "chain" ? root.orange : groupCard.modelData.id === "lez" ? root.brass : root.raised
-                                            Text { anchors.centerIn: parent; text: groupCard.modelData.letter; color: groupCard.modelData.id === "tokens" ? root.ink : root.slate; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.Bold }
+                                            Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: groupCard.modelData.letter; color: groupCard.modelData.id === "tokens" ? root.ink : root.slate; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.Bold }
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true
                                             spacing: 2
-                                            Text { text: groupCard.modelData.title; color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.DemiBold }
+                                            Text { textFormat: Text.PlainText; text: groupCard.modelData.title; color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.DemiBold }
                                             Text {
+                                                textFormat: Text.PlainText
                                                 Layout.fillWidth: true
                                                 elide: Text.ElideRight
                                                 text: groupCard.modelData.note
@@ -10378,6 +10492,7 @@ Item {
                                             }
                                         }
                                         Text {
+                                            textFormat: Text.PlainText
                                             // Different tokens don't add up to one total.
                                             visible: groupCard.modelData.id !== "tokens"
                                             text: root.amountShown(groupCard.modelData.total)
@@ -10388,6 +10503,7 @@ Item {
                                         }
                                         // Press the card to open or close it.
                                         Text {
+                                            textFormat: Text.PlainText
                                             text: "›"
                                             rotation: groupCard.open ? 90 : 0
                                             color: root.ink
@@ -10475,7 +10591,7 @@ Item {
                                                 color: root.raised
                                                 border.width: 2
                                                 border.color: addressRow.modelData.kind === "chain" ? root.orange : addressRow.modelData.fromPrivate ? root.brass : root.line
-                                                Text { anchors.centerIn: parent; text: addressRow.modelData.title.charAt(0).toUpperCase(); color: root.ink; font.family: root.sans; font.pixelSize: root.px(14); font.weight: Font.Bold }
+                                                Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: addressRow.modelData.title.charAt(0).toUpperCase(); color: root.ink; font.family: root.sans; font.pixelSize: root.px(14); font.weight: Font.Bold }
                                             }
                                             ColumnLayout {
                                                 Layout.fillWidth: true
@@ -10501,7 +10617,7 @@ Item {
                                                 border.width: 1
                                                 border.color: root.line
                                                 Accessible.name: "Copy the address"
-                                                Text { anchors.centerIn: parent; text: "⧉"; color: root.dim; font.pixelSize: root.px(17) }
+                                                Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: "⧉"; color: root.dim; font.pixelSize: root.px(17) }
                                                 MouseArea {
                                                     id: copyArea
                                                     anchors.fill: parent
@@ -10511,6 +10627,7 @@ Item {
                                                 }
                                             }
                                             Text {
+                                                textFormat: Text.PlainText
                                                 text: root.amountShown(addressRow.modelData.balance)
                                                 color: root.ink
                                                 font.family: root.sans
@@ -10519,7 +10636,7 @@ Item {
                                                 horizontalAlignment: Text.AlignRight
                                                 Layout.minimumWidth: root.px(150)
                                             }
-                                            Text { text: "›"; color: root.dim; font.pixelSize: root.px(20); Layout.preferredWidth: root.px(16) }
+                                            Text { textFormat: Text.PlainText; text: "›"; color: root.dim; font.pixelSize: root.px(20); Layout.preferredWidth: root.px(16) }
                                         }
                                         }
                                     }
@@ -10677,7 +10794,7 @@ Item {
                     Card {
                         visible: root.sendReviewing && (root.sendKind !== "chain" || root.chainPlan !== null)
                         Layout.fillWidth: true
-                        Text { text: "Check it, then send"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                        Text { textFormat: Text.PlainText; text: "Check it, then send"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
                         Fact {
                             label: "To"
                             value: root.sendKind === "chain" && root.chainPlan !== null
@@ -10727,8 +10844,8 @@ Item {
                             RowLayout {
                                 required property var modelData
                                 spacing: 14
-                                Text { text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.Bold }
-                                Text { visible: modelData.name === root.mainName; text: "main"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { textFormat: Text.PlainText; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.Bold }
+                                Text { textFormat: Text.PlainText; visible: modelData.name === root.mainName; text: "main"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                                 Link { text: "Copy"; onPressed: root.copy(modelData.name, "Your name") }
                             }
                         }
@@ -10742,6 +10859,7 @@ Item {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "Your public account" }
                         Text {
+                            textFormat: Text.PlainText
                             Layout.fillWidth: true
                             text: root.cliPublic !== null ? "Public/" + root.cliPublic.account : ""
                             color: root.ink
@@ -10762,6 +10880,7 @@ Item {
                             Layout.fillWidth: true
                             Part { Layout.topMargin: 0; text: "Your node's key" }
                             Text {
+                                textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 text: keyCard.modelData.key
                                 color: root.ink
@@ -10846,6 +10965,7 @@ Item {
                                             border.color: root.orange
                                         }
                                         Text {
+                                            textFormat: Text.PlainText
                                             Layout.fillWidth: true
                                             text: modelData.label
                                             color: modelData.dot === "full" ? root.orange : modelData.dot === "" ? root.dim : root.ink
@@ -10853,7 +10973,7 @@ Item {
                                             font.pixelSize: root.px(16)
                                             font.weight: modelData.dot === "full" ? Font.DemiBold : Font.Normal
                                         }
-                                        Text { text: root.amountShown(modelData.value); color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                        Text { textFormat: Text.PlainText; text: root.amountShown(modelData.value); color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
                                     }
                                 }
                             }
@@ -10862,8 +10982,9 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.margins: root.px(18)
                                 spacing: 12
-                                Text { Layout.fillWidth: true; text: "Rewards to claim"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16) }
+                                Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: "Rewards to claim"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16) }
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: stakePage.table === null || stakePage.table.vouchers === 0 ? "None yet"
                                         : root.amountShown(stakePage.table.claimable) + " from " + stakePage.table.vouchers + (stakePage.table.vouchers === 1 ? " block" : " blocks")
                                     color: stakePage.table !== null && stakePage.table.vouchers > 0 ? root.ink : root.dim
@@ -10927,7 +11048,7 @@ Item {
                                     y: root.px(16)
                                     width: parent.width - root.px(32)
                                     spacing: 10
-                                    Text { text: "Send to a key outside this node"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                                    Text { textFormat: Text.PlainText; text: "Send to a key outside this node"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
                                     Hint { font.pixelSize: root.px(14); text: "Stays on the Logos Blockchain. Sending to one of this node's own keys keeps it staked." }
                                     Action {
                                         label: "Send…"
@@ -10953,7 +11074,7 @@ Item {
                                     y: root.px(16)
                                     width: parent.width - root.px(32)
                                     spacing: 10
-                                    Text { text: "Bridge to LEZ"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                                    Text { textFormat: Text.PlainText; text: "Bridge to LEZ"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
                                     Hint { font.pixelSize: root.px(14); color: root.ink; text: "One way for now: LEZ can't send back to the Logos Blockchain yet. Arrives in about 12 hours." }
                                     Action { label: "Bridge…"; onPressed: root.openGetTokens() }
                                 }
@@ -11017,15 +11138,17 @@ Item {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 14
-                                Text { text: myName.modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
-                                Text { visible: myName.modelData.name === root.mainName; text: "main"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { textFormat: Text.PlainText; text: myName.modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
+                                Text { textFormat: Text.PlainText; visible: myName.modelData.name === root.mainName; text: "main"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: myName.modelData["private"] === false ? "Public" : "Private"
                                     color: myName.modelData["private"] === false ? root.dim : root.dim
                                     font.family: root.sans
                                     font.pixelSize: root.px(14)
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     Layout.fillWidth: true
                                     text: myName.modelData.state || ""
                                     color: myName.modelData.lapsed ? root.alarm : root.dim
@@ -11051,8 +11174,8 @@ Item {
                             RowLayout {
                                 required property var modelData
                                 spacing: 14
-                                Text { text: modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
-                                Text { text: modelData.failed ? "didn't register" : "registering"; color: modelData.failed ? root.alarm : root.waitTone; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { textFormat: Text.PlainText; text: modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
+                                Text { textFormat: Text.PlainText; text: modelData.failed ? "didn't register" : "registering"; color: modelData.failed ? root.alarm : root.waitTone; font.family: root.sans; font.pixelSize: root.px(14) }
                             }
                         }
                         // A name this wallet holds that isn't listed (handed to it, or registered
@@ -11359,7 +11482,7 @@ Item {
                         visible: pclaimScreen.row !== null
                         spacing: 10
                         Text { text: pclaimScreen.row !== null ? pclaimScreen.row.amount + " " + pclaimScreen.row.symbol : ""; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(28); font.weight: Font.Bold }
-                        Text { Layout.alignment: Qt.AlignBaseline; text: pclaimScreen.row !== null ? "into " + Logic.idShort(pclaimScreen.row.account) + " · private" : ""; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                        Text { textFormat: Text.PlainText; Layout.alignment: Qt.AlignBaseline; text: pclaimScreen.row !== null ? "into " + Logic.idShort(pclaimScreen.row.account) + " · private" : ""; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
                     }
                     StatusLine { visible: pclaimScreen.stage === "looking"; kind: "working"; text: "Looking for a claim already with your wallet…" }
 
@@ -11473,6 +11596,7 @@ Item {
                     }
                     // A receive opened again (or on its way when Receive opened): said first.
                     Text {
+                        textFormat: Text.PlainText
                         visible: receiveScreen.shows && root.receiveFocus !== "" && receiveScreen.result === null
                         Layout.fillWidth: true
                         text: Logic.receiveOnItsWay(root.receiveFocusRow, root.receiveStatuses[root.receiveFocus])
@@ -11580,6 +11704,7 @@ Item {
                         Action { label: root.receiveLinkCopied ? "Copied." : "Copy the link"; strong: true; onPressed: root.copyDepositLink(receiveScreen.result.request_url) }
                         NumberLine { text: "2. " + Logic.compareLine(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
                         Text {
+                            textFormat: Text.PlainText
                             visible: text !== ""
                             Layout.fillWidth: true
                             text: Logic.compareWords(receiveScreen.result !== null ? receiveScreen.result.compare : null)
@@ -11885,15 +12010,17 @@ Item {
                     // The burn's approval: where it goes first (the burn carries only a commitment, so
                     // the wallet's own sheet can't show the address), then the approval itself.
                     ColumnLayout {
-                        visible: sendBackScreen.burning && root.sbFocusRow !== null
+                        visible: sendBackScreen.burning && root.sbFocusRow !== null && (!Logic.isDecodedBurn(root.appRequest) || Logic.burnMatchesSendBack(root.appRequest, root.sbFocus))
                         Layout.fillWidth: true
                         spacing: 6
+                        // Not ticked in this wallet: the address is the LEZ Bridge's record, said so (the sheet asks for the tick).
+                        Hint { visible: root.appRequest !== null && root.appBurnUnderRecord(root.appRequest); color: root.ink; text: "The LEZ Bridge's record of this send-back; this wallet didn't read this address back or tick it:" }
                         Hint { color: root.ink; text: root.sbFocusRow !== null ? root.sbFocusRow.amount + " to this Ethereum address" + (sendBackScreen.st !== null && sendBackScreen.st.receive_text ? " (you receive " + sendBackScreen.st.receive_text + "):" : ":") : "" }
                         Repeater {
                             model: root.sbFocusRow !== null ? Logic.addressHalves(root.sbFocusRow.recipient) : []
                             Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(18); font.weight: Font.DemiBold }
                         }
-                        Text { Layout.fillWidth: true; text: root.sbFocusRow !== null ? root.sbFocusRow.words : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(24); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: root.sbFocusRow !== null ? root.sbFocusRow.words : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(24); font.weight: Font.Bold; wrapMode: Text.WordWrap }
                         // The address was checked on step 2; what comes now is the burn.
                         StatusLine { Layout.topMargin: 6; kind: ""; text: Logic.ADDRESS_BURN_NEXT }
                     }
@@ -12100,8 +12227,8 @@ Item {
                     RowLayout {
                         visible: root.tokenProgram !== "" && !root.tokenProgramEditing
                         spacing: 10
-                        Text { text: "Token program"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
-                        Text { text: root.shorten(root.tokenProgram); color: root.ink; font.family: root.mono; font.pixelSize: root.px(15) }
+                        Text { textFormat: Text.PlainText; text: "Token program"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
+                        Text { textFormat: Text.PlainText; text: root.shorten(root.tokenProgram); color: root.ink; font.family: root.mono; font.pixelSize: root.px(15) }
                         Link { text: "Change"; font.pixelSize: root.px(15); onPressed: { addProgramField.text = root.tokenProgram; root.tokenProgramEditing = true } }
                     }
                     Action {
@@ -12128,7 +12255,7 @@ Item {
                                 font.pixelSize: root.px(17)
                                 font.weight: Font.DemiBold
                             }
-                            Text { text: root.shorten(watchedRow.modelData); color: root.dim; font.family: root.mono; font.pixelSize: root.px(14) }
+                            Text { textFormat: Text.PlainText; text: root.shorten(watchedRow.modelData); color: root.dim; font.family: root.mono; font.pixelSize: root.px(14) }
                             Item { Layout.fillWidth: true }
                             Link { text: "Remove"; font.pixelSize: root.px(15); onPressed: root.removeToken(watchedRow.modelData) }
                         }
@@ -12166,12 +12293,12 @@ Item {
                             color: root.raised
                             border.width: 2
                             border.color: accountPage.row === null ? root.line : accountPage.row.kind === "chain" ? root.orange : accountPage.row.fromPrivate ? root.brass : root.line
-                            Text { anchors.centerIn: parent; text: accountPage.row ? accountPage.row.title.charAt(0).toUpperCase() : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.Bold }
+                            Text { textFormat: Text.PlainText; anchors.centerIn: parent; text: accountPage.row ? accountPage.row.title.charAt(0).toUpperCase() : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.Bold }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 2
-                            Text { text: accountPage.row ? accountPage.row.title : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.DemiBold }
+                            Text { textFormat: Text.PlainText; text: accountPage.row ? accountPage.row.title : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(26); font.weight: Font.DemiBold }
                             Text {
                                 Layout.fillWidth: true
                                 elide: Text.ElideRight
@@ -12183,6 +12310,7 @@ Item {
                             }
                         }
                         Text {
+                            textFormat: Text.PlainText
                             text: accountPage.row ? root.amountShown(accountPage.row.balance) : ""
                             color: root.ink
                             font.family: root.sans
@@ -12550,7 +12678,7 @@ Item {
                             anchors.leftMargin: root.px(14)
                             anchors.rightMargin: root.px(14)
                             spacing: 4
-                            Text { text: "Gas and minimums"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
+                            Text { textFormat: Text.PlainText; text: "Gas and minimums"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
                             Hint { font.pixelSize: root.px(14); text: "• Logos Blockchain fee: at most 100,000, paid from the key's other notes, not from the amount." }
                             Hint { font.pixelSize: root.px(14); text: "• The amount goes as one whole note. If no note holds exactly that, a split makes one first: a send from the key to itself, a fee of about 2,000, one block." }
                             Hint { font.pixelSize: root.px(13); text: "• It arrives once the Logos Blockchain block is final: expected about 12 hours on the testnet (the first deposits are still arriving)." }
@@ -12591,7 +12719,7 @@ Item {
                     }
                     Tab { visible: root.boardView !== "thread"; label: "Recent"; current: root.boardView === "all"; onPressed: root.boardShow("all") }
                     Tab { visible: root.boardView !== "thread"; label: "Following" + (root.boardFollows.length > 0 ? "  " + root.boardFollows.length : ""); current: root.boardView === "following"; onPressed: root.boardShow("following") }
-                    Text { visible: root.boardView === "thread"; text: "Thread"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
+                    Text { textFormat: Text.PlainText; visible: root.boardView === "thread"; text: "Thread"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                     Item { Layout.fillWidth: true }
                     Link { text: root.boardLoading ? "Loading…" : "Refresh"; color: root.faint; font.pixelSize: root.px(15); onPressed: root.boardLoad() }
                 }
@@ -12603,6 +12731,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 10
                         Text {
+                            textFormat: Text.PlainText
                             text: root.boardAs !== "" ? "Posting as " + root.boardAs : "No name to post as yet"
                             color: root.anonOn && root.anonReady ? root.brass : root.dim
                             font.family: root.sans
@@ -12623,6 +12752,7 @@ Item {
                         radius: 8
                         color: root.noticeFill
                         Text {
+                            textFormat: Text.PlainText
                             id: movingNote
                             x: 14
                             y: 10
@@ -12637,6 +12767,7 @@ Item {
                     }
                     // How posting as this name works, in one line, before anyone presses Post.
                     Text {
+                        textFormat: Text.PlainText
                         visible: root.boardAs !== "" && !(root.anonOn && !root.anonReady) && !root.boardAsMoving
                         Layout.fillWidth: true
                         text: root.heldPublicly(root.boardAs) ? "Public · about 30 seconds per post, a little gas"
@@ -12676,7 +12807,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         visible: root.boardReplyTo !== ""
-                        Text { Layout.fillWidth: true; text: "Replying to " + root.boardPreviewOf(root.boardReplyTo); color: root.ink; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight }
+                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: "Replying to " + root.boardPreviewOf(root.boardReplyTo); color: root.ink; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight }
                         Link { text: "Cancel"; color: root.faint; font.pixelSize: root.px(14); onPressed: root.boardReplyTo = "" }
                     }
                     Area {
@@ -12692,13 +12823,14 @@ Item {
                         visible: root.boardSpelling.length > 0
                         Layout.fillWidth: true
                         spacing: 8
-                        Text { text: "Spelling:"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14); height: 34; verticalAlignment: Text.AlignVCenter }
+                        Text { textFormat: Text.PlainText; text: "Spelling:"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14); height: 34; verticalAlignment: Text.AlignVCenter }
                         Repeater {
                             model: root.boardSpelling
                             Row {
                                 required property var modelData
                                 spacing: 4
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: modelData.word + (modelData.suggestions.length > 0 ? " →" : " (no suggestion)")
                                     color: root.ink
                                     font.family: root.sans
@@ -12738,6 +12870,7 @@ Item {
                         }
                         Item { visible: !boardCid.visible; Layout.fillWidth: true }
                         Text {
+                            textFormat: Text.PlainText
                             text: boardComposer.text.length + " / 1024"
                             color: boardComposer.text.length > 1024 ? root.alarm : root.faint
                             font.family: root.sans
@@ -12813,6 +12946,7 @@ Item {
                                         font.weight: Font.DemiBold
                                     }
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: postCard.p.name
                                         color: postCard.who.display !== "" ? root.faint : root.ink
                                         font.family: root.sans
@@ -12820,7 +12954,7 @@ Item {
                                         font.weight: postCard.who.display !== "" ? Font.Normal : Font.DemiBold
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(postCard.p.name) }
                                     }
-                                    Text { text: "· " + root.boardAgo(postCard.p.time); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                                    Text { textFormat: Text.PlainText; text: "· " + root.boardAgo(postCard.p.time); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                                     Item { Layout.fillWidth: true }
                                     Link {
                                         visible: !postCard.isMine
@@ -12831,6 +12965,7 @@ Item {
                                     }
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     visible: !!postCard.p.parent && postCard.modelData.depth === 0
                                     text: "replying to " + (postCard.p.parent ? String(postCard.p.parent).split("/")[0] : "")
                                     color: root.faint
@@ -12942,7 +13077,7 @@ Item {
                     visible: root.section === "settings" && !root.registering && !root.gettingTokens
                     Layout.fillWidth: true
                     spacing: 14
-                    Text { text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
+                    Text { textFormat: Text.PlainText; text: "Settings"; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(28) }
                     // What this build brings, three lines, after an update (until "Got it").
                     ColumnLayout {
                         visible: root.whatsNewShown
@@ -12979,8 +13114,8 @@ Item {
                             required property var modelData
                             Layout.fillWidth: true
                             spacing: 12
-                            Text { Layout.preferredWidth: 200; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
-                            Text { Layout.fillWidth: true; text: root.pendingLine(modelData); color: modelData.failed ? root.alarm : root.waitTone; font.family: root.sans; font.pixelSize: root.px(14); elide: Text.ElideRight }
+                            Text { textFormat: Text.PlainText; Layout.preferredWidth: 200; text: modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: root.pendingLine(modelData); color: modelData.failed ? root.alarm : root.waitTone; font.family: root.sans; font.pixelSize: root.px(14); elide: Text.ElideRight }
                         }
                     }
                     Repeater {
@@ -12997,6 +13132,7 @@ Item {
                                 Layout.preferredHeight: 44
                                 spacing: 12
                                 Text {
+                                    textFormat: Text.PlainText
                                     Layout.preferredWidth: 200
                                     text: nameRow.modelData.name
                                     color: root.ink
@@ -13006,6 +13142,7 @@ Item {
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.show(nameRow.modelData.name) }
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: (root.boardJob !== null && root.boardJob.kind === "make_public" && root.boardJob.name === nameRow.modelData.name ? "Becoming public…"
                                         : nameRow.privateCli ? "Private" : "Public") + (nameRow.isAnon ? " · anon" : nameRow.modelData.name === root.mainName ? " · main" : "")
                                     color: root.faint
@@ -13075,8 +13212,9 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 40
                                 spacing: 12
-                                Text { Layout.preferredWidth: 170; text: accountRow.modelData.npk && root.namesByNpk[accountRow.modelData.npk] ? root.namesByNpk[accountRow.modelData.npk].join(", ") : Logic.accountTitle(accountRow.modelData); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                                Text { textFormat: Text.PlainText; Layout.preferredWidth: 170; text: accountRow.modelData.npk && root.namesByNpk[accountRow.modelData.npk] ? root.namesByNpk[accountRow.modelData.npk].join(", ") : Logic.accountTitle(accountRow.modelData); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: root.accountShort(accountRow.modelData.account)
                                     color: root.dim
                                     font.family: root.mono
@@ -13084,12 +13222,13 @@ Item {
                                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copy(accountRow.modelData.account, "Account") }
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: accountRow.modelData.balance === null ? "?" : root.grouped(accountRow.modelData.balance)
                                     color: root.faint
                                     font.family: root.sans
                                     font.pixelSize: root.px(15)
                                 }
-                                Text { visible: accountRow.chosen; text: "Pays"; color: root.brass; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
+                                Text { textFormat: Text.PlainText; visible: accountRow.chosen; text: "Pays"; color: root.brass; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(15) }
                                 Item { Layout.fillWidth: true }
                                 // The full ID, as `Public/<id>` (shown shortened beside it).
                                 Link { text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(accountRow.modelData.account, "The full account ID") }
@@ -13325,6 +13464,7 @@ Item {
                         // The bridge in use: its name, vault, its four words (the bridge page shows the same).
                         Hint { color: root.ink; text: Logic.bridgeActiveLine(root.bridgeList) }
                         Text {
+                            textFormat: Text.PlainText
                             visible: text !== ""
                             Layout.fillWidth: true
                             text: root.bridgeList !== null && root.bridgeList.active_row && root.bridgeList.active_row.words_text ? String(root.bridgeList.active_row.words_text) : ""
@@ -13372,6 +13512,7 @@ Item {
                             // The answer: the four words to compare with the bridge's page, then the choice.
                             StatusLine { visible: bridgeAddCard.shown !== null && !root.bridgeChecking; kind: bridgeAddCard.shown !== null ? bridgeAddCard.shown.kind : ""; text: bridgeAddCard.shown !== null ? bridgeAddCard.shown.line : "" }
                             Text {
+                                textFormat: Text.PlainText
                                 visible: bridgeAddCard.shown !== null && bridgeAddCard.shown.words !== "" && !root.bridgeChecking
                                 Layout.fillWidth: true
                                 text: bridgeAddCard.shown !== null ? bridgeAddCard.shown.words : ""
@@ -13572,8 +13713,9 @@ Item {
                             required property var modelData
                             Layout.fillWidth: true
                             spacing: 12
-                            Text { Layout.preferredWidth: 200; text: grantRow.modelData.app; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                            Text { textFormat: Text.PlainText; Layout.preferredWidth: 200; text: grantRow.modelData.app; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
                             Text {
+                                textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 text: (grantRow.modelData.accounts || []).map(function(account) { return root.shorten(account) }).join(", ")
                                 color: root.dim
@@ -13600,6 +13742,7 @@ Item {
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
+                        textFormat: Text.PlainText
                         text: "Advanced"
                         color: root.ink
                         font.family: root.sans
@@ -13734,6 +13877,7 @@ Item {
                     Layout.topMargin: 60
                     spacing: 10
                     Text {
+                        textFormat: Text.PlainText
                         text: root.moduleOutdated !== "" ? "Update the names module" : !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Find someone"
                         color: root.ink
                         font.family: root.sans
@@ -13761,6 +13905,7 @@ Item {
                     Layout.topMargin: 60
                     spacing: 14
                     Text {
+                        textFormat: Text.PlainText
                         text: "Register a name"
                         color: root.ink
                         font.family: root.sans
@@ -13799,6 +13944,7 @@ Item {
                         spacing: 12
                         Rectangle { width: 10; height: 10; radius: 5; color: root.dim }
                         Text {
+                            textFormat: Text.PlainText
                             text: root.registerTaken + " is taken. Try another."
                             color: root.ink
                             font.family: root.sans
@@ -13834,6 +13980,7 @@ Item {
                         readonly property bool underway: root.registerStepOf(root.missing) > 0
                         Rectangle { width: 10; height: 10; radius: 5; color: parent.reserved ? root.dim : parent.underway ? root.waitTone : root.good }
                         Text {
+                            textFormat: Text.PlainText
                             text: parent.underway ? "Registering privately for you" : parent.reserved ? "Reserved: names of one to four characters and the reserved list are placed by the registry's admin" : "Available"
                             color: parent.underway ? root.waitTone : root.ink
                             font.family: root.sans
@@ -13850,6 +13997,7 @@ Item {
                         visible: root.registerStepOf(root.missing) > 0
                         Layout.fillWidth: true
                         Text {
+                            textFormat: Text.PlainText
                             text: "Registering " + root.missing + " privately"
                             color: root.ink
                             font.family: root.sans
@@ -13913,6 +14061,7 @@ Item {
                         visible: root.namesNet === "0.3" && root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
                         Layout.fillWidth: true
                         Text {
+                            textFormat: Text.PlainText
                             text: "Register privately"
                             color: root.ink
                             font.family: root.sans
@@ -13952,6 +14101,7 @@ Item {
                             Layout.topMargin: 4
                         }
                         Text {
+                            textFormat: Text.PlainText
                             Layout.fillWidth: true
                             text: root.cliBalance === undefined ? "Checking your private account…"
                                 : root.cliBalance === null || !root.cliBalance.account ? "No private account found. Run names setup in a terminal first."
@@ -13972,7 +14122,7 @@ Item {
                             font.pixelSize: root.px(15)
                             onPressed: root.openGetTokens()
                         }
-                        Text { Layout.topMargin: 6; text: "Then"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                        Text { textFormat: Text.PlainText; Layout.topMargin: 6; text: "Then"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                         RowLayout {
                             spacing: 6
                             Tab { label: "Keep it private"; current: !root.registerPublic; onPressed: root.registerPublic = false }
@@ -13994,6 +14144,7 @@ Item {
                         }
                         StatusLine { visible: root.notice !== "" && root.noticeAt === "register" && root.cliPath !== "" && !root.publicRegisterOpen && root.namesNet !== "0.4"; kind: root.noticeKind; text: root.notice }
                         Text {
+                            textFormat: Text.PlainText
                             text: "Testnet name: to keep it on mainnet, claim it within 30 days of launch."
                             Layout.fillWidth: true
                             wrapMode: Text.Wrap
@@ -14198,6 +14349,7 @@ Item {
                                 onPressed: root.tool = ""
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 text: "Edit"
                                 color: root.ink
                                 font.family: root.sans
@@ -14246,6 +14398,7 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Text {
+                                    textFormat: Text.PlainText
                                     Layout.preferredWidth: 110
                                     Layout.alignment: profileRow.modelData.lines ? Qt.AlignTop : Qt.AlignVCenter
                                     Layout.topMargin: profileRow.modelData.lines ? 12 : 0
@@ -14313,7 +14466,7 @@ Item {
                                     visible: shows
                                     Layout.fillWidth: true
                                     spacing: 12
-                                    Text { text: "Picture set"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
+                                    Text { textFormat: Text.PlainText; text: "Picture set"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17) }
                                     Link {
                                         text: root.cliHeld ? "Change or remove" : "Remove"
                                         font.pixelSize: root.px(16)
@@ -14325,7 +14478,7 @@ Item {
                                     visible: profileRow.modelData.key === "avatar" && root.draftText("avatar") === "" && root.profileText("avatar") !== ""
                                     Layout.fillWidth: true
                                     spacing: 12
-                                    Text { text: root.cliHeld ? "Picture removed when you save, unless you give a PNG file below" : "Picture removed when you save"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                    Text { textFormat: Text.PlainText; text: root.cliHeld ? "Picture removed when you save, unless you give a PNG file below" : "Picture removed when you save"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                     Link {
                                         text: "Undo"
                                         font.pixelSize: root.px(16)
@@ -14416,6 +14569,7 @@ Item {
                                     Layout.fillWidth: true
                                     spacing: 8
                                     Text {
+                                        textFormat: Text.PlainText
                                         Layout.preferredWidth: 96
                                         text: entry.modelData
                                         color: root.dim
@@ -14473,7 +14627,7 @@ Item {
                             Layout.maximumWidth: 340
                             Layout.alignment: Qt.AlignTop
                             spacing: 10
-                            Text { text: "How others see it"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                            Text { textFormat: Text.PlainText; text: "How others see it"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                             Card {
                                 Layout.fillWidth: true
                                 RowLayout {
@@ -14501,6 +14655,7 @@ Item {
                                             elide: Text.ElideRight
                                         }
                                         Text {
+                                            textFormat: Text.PlainText
                                             visible: root.draftText("display") !== ""
                                             text: root.record !== null ? root.shown(root.record.name) : ""
                                             color: root.draftAccent
@@ -14539,7 +14694,7 @@ Item {
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
                                 spacing: 8
-                                Text { text: "Paste your page's HTML"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                                Text { textFormat: Text.PlainText; text: "Paste your page's HTML"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                                 Area {
                                     id: pageArea
                                     Layout.fillWidth: true
@@ -14547,14 +14702,14 @@ Item {
                                     hint: "<h1>Hi</h1>\n<p>About me…</p>"
                                     onTextChanged: previewTimer.restart()
                                 }
-                                Text { Layout.fillWidth: true; wrapMode: Text.Wrap; text: "This app leaves out scripts, styles and images. In a browser, the page runs as written."; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.Wrap; text: "This app leaves out scripts, styles and images. In a browser, the page runs as written."; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
                                 spacing: 8
-                                Text { text: "Preview · how this app shows it"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                                Text { textFormat: Text.PlainText; text: "Preview · how this app shows it"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                                 Rectangle {
                                     Layout.fillWidth: true
                                     implicitHeight: 420
@@ -14581,7 +14736,7 @@ Item {
                                         }
                                     }
                                 }
-                                Text { text: "Public: anyone who knows the name can read it."; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Text { textFormat: Text.PlainText; text: "Public: anyone who knows the name can read it."; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                             }
                         }
                         Timer {
@@ -14622,9 +14777,9 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
-                                Text { text: "Transfer"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
+                                Text { textFormat: Text.PlainText; text: "Transfer"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                                 Hint { text: root.record !== null ? "Give " + root.shown(root.record.name) + " to someone else. Its profile and page are cleared for them." : "" }
-                                Text { text: "Their account"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                                Text { textFormat: Text.PlainText; text: "Their account"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                                 Field {
                                     id: newOwnerField
                                     Layout.fillWidth: true
@@ -14637,6 +14792,7 @@ Item {
                                     radius: 8
                                     color: root.noticeFill
                                     Text {
+                                        textFormat: Text.PlainText
                                         id: depositWarning
                                         x: 14
                                         y: 12
@@ -14659,7 +14815,7 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
-                                Text { text: "Release"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
+                                Text { textFormat: Text.PlainText; text: "Release"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                                 Hint { text: "Give the name up. Its profile and page are deleted and anyone can register it." }
                                 Figure {
                                     visible: root.record !== null && Logic.someAmount(root.record.deposit)
@@ -14677,6 +14833,7 @@ Item {
                                         onPressed: root.confirmingRelease = true
                                     }
                                     Text {
+                                        textFormat: Text.PlainText
                                         visible: root.confirmingRelease
                                         text: "Release it?"
                                         color: root.ink
@@ -14725,7 +14882,7 @@ Item {
                         visible: false
                         Layout.fillWidth: true
                         spacing: 10
-                        Text { text: "Posts" + (root.authorTotal > 0 ? "  " + root.authorTotal : ""); color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.Bold }
+                        Text { textFormat: Text.PlainText; text: "Posts" + (root.authorTotal > 0 ? "  " + root.authorTotal : ""); color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); font.weight: Font.Bold }
                         Hint {
                             visible: root.authorPosts.length === 0
                             font.pixelSize: root.px(15)
@@ -14738,6 +14895,7 @@ Item {
                                 required property var modelData
                                 Layout.fillWidth: true
                                 Text {
+                                    textFormat: Text.PlainText
                                     visible: !!authorCard.modelData.parent_id
                                     text: "Reply"
                                     color: root.faint
@@ -14755,7 +14913,7 @@ Item {
                                 }
                                 RowLayout {
                                     spacing: 18
-                                    Text { text: root.boardAgo(authorCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
+                                    Text { textFormat: Text.PlainText; text: root.boardAgo(authorCard.modelData.time); color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                                     Link {
                                         text: "Reply"
                                         color: root.faint
@@ -14802,6 +14960,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 12
                             Text {
+                                textFormat: Text.PlainText
                                 text: "Page"
                                 color: root.ink
                                 font.family: root.sans
@@ -14905,6 +15064,7 @@ Item {
                                 width: parent.width - 28
                                 spacing: 14
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: "Link"
                                     color: root.dim
                                     font.family: root.sans
@@ -14970,6 +15130,7 @@ Item {
 
     // The app's version, bottom right of the main screen, under any sheet.
     Text {
+        textFormat: Text.PlainText
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.rightMargin: root.px(16)
@@ -15129,7 +15290,7 @@ Item {
                                 border.color: inscribeRow.ticked ? root.brass : root.dim
                             }
                             Text { text: inscribeRow.shown.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.weight: Font.DemiBold; font.pixelSize: root.px(16); elide: Text.ElideRight; Layout.maximumWidth: root.px(260) }
-                            Text { text: inscribeRow.shown.sub; color: root.dim; font.family: root.mono; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
+                            Text { textFormat: Text.PlainText; text: inscribeRow.shown.sub; color: root.dim; font.family: root.mono; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
                         }
                         MouseArea {
                             anchors.fill: parent
@@ -15207,6 +15368,7 @@ Item {
             anchors.centerIn: parent
             width: Math.min(parent.width - root.px(64), root.px(720))
             Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: "Write down your recovery phrase"
                 color: root.ink

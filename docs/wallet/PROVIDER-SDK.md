@@ -366,6 +366,16 @@ m_i   = HKDF-SHA256(ikm = the account's key, salt = "logos-names/app-secret/v1",
 value = SHA256(tag | m_i)        for i in first .. first + count
 ```
 
+- **Scope `RFP022/exit` names an Ethereum address.** Its context must be the LEZ Bridge's exit
+  layout, `cfgId(32) | token(20) | u256(denom) | ethDest(20) | u256(maxRelayFee)` (136 bytes);
+  anything else is refused, never granted. For an `ethDest` the person hasn't approved for your app
+  and that account, the answer is `{granted: false, request}` even when the scope is granted: the
+  sheet shows the address in full, the four words the wallet makes itself (the bridge page's
+  `logos-bridge/withdraw-to/v1` words, when the relay fee is 0) and the bridge (v4 to v7 by their
+  Config), and needs a tick. Approved addresses are kept per (app, account) in the network's wallet
+  folder (`app-secret-recipients.json`, no secret), and outlive taking the grant back. The Names
+  app's own Bridge to Ethereum approves the address the person reads back and ticks at step 2
+  (`approve_exit_recipient`, Names app only), so its own send-backs ask nothing more.
 - `app` is your module's name as Basecamp gives it, never an argument: another app gets other
   values. `m_i` never leaves the wallet; you get `SHA256(tag | m_i)` for a tag of your choice
   (1-32 printable ASCII). `scope` is 1-64 printable ASCII, `context_hex` up to 256 bytes, `count`
@@ -534,7 +544,9 @@ afterwards.
    (at most 3 times, within 10 minutes of the approval). A refusal's `code` says what to do:
    `unchanged` (the payer's nonce hasn't moved; send what you have), `landed_or_used` (your
    account's nonce moved: the call may have landed; check the chain first), `ask_again` (propose
-   it again) or `refused`.
+   it again) or `refused`. A re-sign is also `ask_again` when the wallet has seen the bridge test
+   network reset since 30 s before the call was asked (`bridge-net.json`'s `reset_at`; a read stamps it up to 25 s early): a
+   new build after a reset is on a chain the person never saw the call on.
 
 **What the account's signature covers (LEZ v0.4.0-rc3).** The SHA-256 of the whole borsh message
 under `/LEE/v0.3/Message/Public/`: the declared actors and signing accounts, the root call and its
@@ -544,7 +556,17 @@ byte or another actor without breaking the account's signature. It names the acc
 nonce, so on this chain it lands at most once and dies with the account's next transaction. rc3
 binds no chain id and carries no validity window: after a reset of the test network, or on another
 LEZ 0.4 chain where the account's nonce comes back to what it was when it signed, the payer could
-submit it again. The request itself expires after 10 minutes like every request. Checked by the names CLI's test `a_half_signed_call_verifies_and_binds_its_payer`
+submit it again. The request itself expires after 10 minutes like every request.
+
+**What stays unbound, and why.** The wallet refuses a re-sign after a reset it has seen (step 6).
+It can't do more on rc3, because the signature carries no chain id: (1) a transaction already
+signed and handed back stays good on any LEZ 0.4 chain where both signers' nonces match, and the
+wallet can't take a signature back; (2) the wallet knows of a reset only once it has read the
+bridge test network since (its balances read, at most every 30 s, while asked for), so a reset no
+read has seen yet doesn't stop a re-sign (the account-nonce rule still does when the new chain's
+nonce differs); (3) the reset record follows the bridge test network's endpoint, not the zone a
+call was asked in (`asked_here` checks the zone and its configured channel); (4) a missing or
+unreadable record means no reset known. Binding the chain into what is signed waits for LEZ. Checked by the names CLI's test `a_half_signed_call_verifies_and_binds_its_payer`
 (vector `cli/tests/vectors/public-call-v1.json`). The full argument, statement by statement with
 its test, is in [basecamp-module/rust-lib/SIGNING.md](../../basecamp-module/rust-lib/SIGNING.md).
 
