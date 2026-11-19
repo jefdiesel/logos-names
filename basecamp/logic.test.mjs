@@ -1852,7 +1852,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // burn's private call ended): nothing offered yet, and the screen asks again.
   const listing = (read, rows) => [{ token_program: "T", app: "lez_bridge", definitions: ["DefEth", "DefUsdt", "DefDai"], read: read, updating: !read, error: null, holdings: rows }];
   const reading = L.privateSendBackView(accts2, listing(false, []), fromDep, burns);
-  check("a read not made yet is not \"holds none\": nothing offered, reading", [reading.rows.length, reading.reading, reading.held.map((h) => h.why)], [0, true, ["reading", "reading", "reading"]]);
+  check("a read not made yet is not \"holds none\": nothing offered, reading", [reading.rows.length, reading.reading, reading.held.map((h) => h.why), L.privateHeldLine(reading.held)], [0, true, ["reading", "reading", "reading"], "Reading what your private accounts hold…"]);
   // 3. Read: it holds no wETH (burned) and nothing else: no chip at all, no every-amount fallback.
   const none = L.privateSendBackView(accts2, listing(true, [{ account: PRIV2, definition: "DefEth", symbol: "wETH", balance: "0", decimals: 18 }]), fromDep, burns);
   check("read as holding none: nothing offered", [none.rows.length, none.reading, none.held.length], [0, false, 0]);

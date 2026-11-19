@@ -78,7 +78,7 @@ BRIDGE = r"""
                     root.mockCalls[method] = n + 1
                     answer = answer.__seq[Math.min(n, answer.__seq.length - 1)]
                 }
-                if (answer && answer.__error) return JSON.stringify(JSON.stringify({ success: false, value: null, error: answer.__error }))
+                if (answer && answer.__error) return JSON.stringify(JSON.stringify({ success: false, value: null, error: answer.__error, code: answer.__code }))
                 if (answer === undefined && method !== "config" && method !== "relayed_claims" && method !== "relayed_claim_forget" && method !== "receives") return JSON.stringify({ error: "Method not found" })
                 if (answer === undefined) answer = method === "config" ? { build: { commit: "%(shipped_build)s" }, deployment: { name: "bridge-test-network-v5", bridge_program: "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA" }, features: ["relayed_claim", "relayed_claim_check_with", "relayed_claim_build", "relayed_claim_submit", "account_hint", "receive", "deposit_code", "public_receive", "receive_status", "receives", "receive_request", "relayed_claim_check_deposit", "send_back", "send_back_settle", "bridges"], notices: { release: (%(mock)s).release || null, not_private: { title: "Not private", text: "A public claim publishes the claim secret and links the Sepolia deposit to this account, for good. A private account keeps them apart (its claim needs a proof)." } } } : method === "relayed_claims" ? [] : method === "receives" ? { receives: [] } : null
                 return JSON.stringify(JSON.stringify({ success: true, value: answer, error: null }))
@@ -1241,6 +1241,34 @@ PRIVATE_SB = [
 for _name, _js, _mock in PRIVATE_SB:
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
+# ── wallet-1120: a private holding with a burn (the M2 install of 2026-11-19) and the release
+# prover that changed (the LEZ Bridge next-1119b's "prover_changed"). ──
+PV_DEF = "DbPGo6FeRLp7NaUWxQGC1WXpJkSQe1jbAqYVMQkCuuPw"
+PV_REG_DEF = {"tokens": [dict(PV_REG["tokens"][0], definition=PV_DEF)]}
+PV_BURNED = sb_view("recorded", id="sb-p0", account=PRIV, kind="private", route="private_call", symbol="ETH")
+def pv_held_case(bridged, registry=PV_REG):
+    js_ = PV_SB_CARD % ('root.sendBacksLoaded = true; root.sendBacks = [{ id: "sb-p0", amount: "0.01 ETH", account: "%s", recipient: "%s", words: "maple · tiger · seven · lamp", stage: "recorded", symbol: "ETH" }]; root.bridgedHoldings = %s; root.againAfter(150, function() { root.openSendBack("", null) })'
+                        % (PRIV, SB_RECIPIENT, json.dumps(bridged)))
+    m = pv_mock(send_backs={"send_backs": [PV_BURNED]}, send_back_status=PV_BURNED, registry=registry)
+    m["bridged"] = bridged
+    return js_, m
+# As on the M2: the token listing not accepted, so the wallet can't read the account; its wETH
+# burned earlier is held back with a line and "Show the token listing", not offered at every amount.
+SCENARIOS["sendback-private-burned-held"], MOCKS["sendback-private-burned-held"] = pv_held_case([])
+# The listing accepted, its read not made yet: nothing offered, "reading what it holds…".
+SCENARIOS["sendback-private-reading"], MOCKS["sendback-private-reading"] = pv_held_case(
+    [{"token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "app": "lez_bridge", "definitions": [PV_DEF], "read": False, "updating": True, "error": None, "holdings": []}], PV_REG_DEF)
+# Read: the account holds none (it was burned): no chip for it.
+SCENARIOS["sendback-private-burned-read"], MOCKS["sendback-private-burned-read"] = pv_held_case(
+    [{"token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7", "app": "lez_bridge", "definitions": [PV_DEF], "read": True, "updating": False, "error": None,
+      "holdings": [{"account": PRIV, "account_kind": "private", "definition": PV_DEF, "symbol": "wETH", "balance": "0", "decimals": 18}]}], PV_REG_DEF)
+PROVER_CHANGED_WORDS = "The release prover changed since it was set (/Volumes/exos162/logos/rfp-022/v4/release-prover.sh), so this module didn't run it. If you updated it on purpose: use the release prover again from the Names app (only the Names app can set it)."
+SCENARIOS["sendback-prover-changed"] = sb_focus(sb_view("recorded", releasable_at="@HOUR@"), 'root.againAfter(50, function() { root.sbProve() })')
+MOCKS["sendback-prover-changed"] = sb_mock(sb_view("recorded"), send_back_prove={"__error": PROVER_CHANGED_WORDS, "__code": "prover_changed"})
+# "Use this prover again" pressed: set_release_prover with the bridge's path, then the proof once more.
+SCENARIOS["sendback-prover-again"] = sb_focus(sb_view("recorded", releasable_at="@HOUR@"), 'root.againAfter(50, function() { root.sbProve(); root.againAfter(250, function() { root.sbProverAgain() }) })')
+MOCKS["sendback-prover-again"] = sb_mock(sb_view("recorded"), send_back_prove={"__seq": [{"__error": PROVER_CHANGED_WORDS, "__code": "prover_changed"}, {"stage": "proving"}]},
+                                         set_release_prover={"release_prover": ["/Volumes/exos162/logos/rfp-022/v4/release-prover.sh"], "release_prover_sha256": "ab" * 32, "release_prover_files": []})
 # ── wallet-next (rfp-022 proposal/WALLET-ROADMAP.md items 1, 4, 5, 7, 8): Bridge to Ethereum's address
 # step, Save to my addresses, Remove on the card. The bridge's new calls (address_book_*, receive_remove,
 # send_back_remove) answer as docs/WALLET-NEXT-MODULE-CONTRACT.md says; nothing here is a real module. ──

@@ -3296,11 +3296,12 @@ export function privateSendBackView(accounts, holdings, tokens, burns) {
 /// The line under the private chips for what is held back, "" for nothing.
 export function privateHeldLine(held) {
     var list = Array.isArray(held) ? held : []
-    var words = { reading: "reading what it holds…", burning: "a send-back's burn from it is on its way; it's offered again once that lands.",
+    var words = { burning: "a send-back's burn from it is on its way; it's offered again once that lands.",
                   unread: "a send-back already burned from it, and Names can't read what it holds now. Accept the LEZ Bridge's token listing to see it." }
-    return list.filter(function(h) { return words[h.why] }).map(function(h) {
+    var lines = list.some(function(h) { return h.why === "reading" }) ? ["Reading what your private accounts hold…"] : []
+    return lines.concat(list.filter(function(h) { return words[h.why] }).map(function(h) {
         return idShort(h.account) + " · " + h.symbol + ": " + words[h.why]
-    }).join("\n")
+    })).join("\n")
 }
 
 /// Before a private send-back is planned: is the chosen account's token, read now, still enough

@@ -13242,7 +13242,7 @@ Item {
                         }
                         // Nothing to send back: said in one line, with the way to get some.
                         RowLayout {
-                            visible: root.sbSources.length === 0 && root.sbPrivateSources.length === 0
+                            visible: root.sbSources.length === 0 && root.sbPrivateSources.length === 0 && !root.sbPrivateView.reading
                             spacing: 14
                             StatusLine { Layout.fillWidth: false; kind: root.bridgeNet === null ? "working" : ""; text: root.bridgeNet === null ? "Reading your accounts on the bridge test network…" : root.sbElsewhere !== "" ? root.sbElsewhere : "None of your public accounts holds bridged tokens that can go back to Ethereum yet" + (root.sbChosen !== null ? " on the bridge chosen in Settings → Bridge." : " (bridge v4 or v5).") }
                             Action { visible: root.bridgeNet !== null; label: "Receive from Ethereum"; onPressed: root.openEthReceive() }

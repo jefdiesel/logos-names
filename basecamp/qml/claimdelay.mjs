@@ -30,6 +30,7 @@ export const CLAIM_DELAY_NOW_DETAIL = "You chose to claim now, without the rando
 export const CLAIM_DELAY_UNREAD = "Couldn't read this claim's planned time, so the claim waits. Try again, or claim now instead."
 export const CLAIM_DELAY_RETRY_LABEL = "Try again"
 export const CLAIM_DELAY_PUBLIC_LINE = "No wait for a public account: its claim shows which deposit it is anyway, so waiting would hide nothing."
+export const CLAIM_DELAY_CARD_DUE = "Its planned claim time has come: open it to claim privately."
 
 export function claimDelayCan(features) {
     return Array.isArray(features) && features.indexOf(CLAIM_DELAY_FEATURE) >= 0
@@ -148,4 +149,3 @@ export function claimDelayCardLine(s) {
     var when = p.day === "" ? "" : p.day === "today" || p.day === "tomorrow" ? p.day + " " : "on " + p.day + " "
     return "Planned claim " + when + "at about " + p.clock + ", to hide which deposit is yours. Open it then to claim."
 }
-export const CLAIM_DELAY_CARD_DUE = "Its planned claim time has come: open it to claim privately."
