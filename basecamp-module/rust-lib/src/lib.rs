@@ -16018,6 +16018,7 @@ mod tests {
         struct StandIn {
             tamper: bool,
             balance: u128,
+            image: [u32; 8],
         }
         impl GateClient for StandIn {
             fn prepare(&self, job: &ProofJob) -> Result<Prepared, proof::WalletError> {
@@ -16047,6 +16048,9 @@ mod tests {
                 after.insert(job.gate, idle);
                 after.insert(proof::NATIVE_TOKEN_PROGRAM, (20_000_000_u128 - 5_070_616).to_le_bytes().to_vec());
                 Ok(Prepared {
+                    gate_image: self.image,
+                    gate_immutable: true,
+                    gate_nft_program: job.nft_program,
                     reserve: 5_070_616,
                     payer_balance: self.balance,
                     expected: proof::Expected { gate: job.gate, nft_program: job.nft_program, slot, fact, secret, fee_inbox: inbox, max_fee: 8_239_751 },
@@ -16087,7 +16091,7 @@ mod tests {
         let enough_memory = proof::machine_memory().is_some_and(proof::enough_memory);
         // Happy path: checking, then (stand-in) proving, sending, the block, ready with the pass.
         let id = ask(&mut names);
-        let started = names.proof_approve(&id, &holder, std::sync::Arc::new(StandIn { tamper: false, balance: 9_000_000 })).unwrap();
+        let started = names.proof_approve(&id, &holder, std::sync::Arc::new(StandIn { tamper: false, balance: 9_000_000, image: [1, 2, 3, 4, 5, 6, 7, 8] })).unwrap();
         let ready = status(&mut names, &id);
         if enough_memory {
             assert_eq!(started["status"]["state"], "checking", "{started}");
@@ -16101,12 +16105,16 @@ mod tests {
         if enough_memory {
             // The outcome check fails closed on a tampered write: nothing proven, UNEXPECTED_OUTCOME.
             let id = ask(&mut names);
-            names.proof_approve(&id, &holder, std::sync::Arc::new(StandIn { tamper: true, balance: 9_000_000 })).unwrap();
+            names.proof_approve(&id, &holder, std::sync::Arc::new(StandIn { tamper: true, balance: 9_000_000, image: [1, 2, 3, 4, 5, 6, 7, 8] })).unwrap();
             assert_eq!(status(&mut names, &id)["code"], "UNEXPECTED_OUTCOME");
             // A payer short of the reserve: FEE_RESERVE.
             let id = ask(&mut names);
-            names.proof_approve(&id, &holder, std::sync::Arc::new(StandIn { tamper: false, balance: 5_000_000 })).unwrap();
+            names.proof_approve(&id, &holder, std::sync::Arc::new(StandIn { tamper: false, balance: 5_000_000, image: [1, 2, 3, 4, 5, 6, 7, 8] })).unwrap();
             assert_eq!(status(&mut names, &id)["code"], "FEE_RESERVE");
+            // The chain's gate isn't the pinned image: GATE_NOT_PINNED, nothing proven.
+            let id = ask(&mut names);
+            names.proof_approve(&id, &holder, std::sync::Arc::new(StandIn { tamper: false, balance: 9_000_000, image: [9; 8] })).unwrap();
+            assert_eq!(status(&mut names, &id)["code"], "GATE_NOT_PINNED");
             // The production client: no gate client, so GATE_NOT_PINNED and nothing sent.
             let id = ask(&mut names);
             names.proof_approve(&id, &holder, std::sync::Arc::new(provider_proof::NoGateClient)).unwrap();

@@ -671,6 +671,11 @@ fn started_before(wallet: &str, pin: &str) -> bool {
     started.iter().any(|(w, p, _)| w == wallet && p == pin)
 }
 
+/// A job ended (done or failed): what it was started from may be started again from a new plan.
+fn clear_started(wallet: &str) {
+    STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(w, _, _)| w != wallet);
+}
+
 fn mark_started(wallet: &str, pin: &str) {
     STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((wallet.to_owned(), pin.to_owned(), served::now_s()));
 }
@@ -861,6 +866,8 @@ impl Names {
         let payer = match (fee_payer.trim(), proven) {
             ("", true) => return Err("choose the private account that pays the fee".to_owned()),
             ("", false) => None,
+            // The signer paying for itself is the plain public case: no separate payer is passed.
+            (given, false) if action.from.as_deref() == Some(given) => None,
             (given, _) => {
                 let payer = account(given).map_err(|_| "choose an account the sheet lists to pay the fee".to_owned())?;
                 if payer.starts_with("Private/") != proven || !plan["payers"].as_array().is_some_and(|payers| payers.iter().any(|row| row["account"] == payer.as_str() && row["enough"] == true)) {
@@ -944,6 +951,10 @@ impl Names {
 
     /// After an NFT job ends: its outcome in the job's state, and what the wallet holds read again.
     pub(crate) fn nft_job_ended(&mut self, state: &mut Value, log: &str) {
+        // One wallet job at a time: once this one ended, a retry from a new plan may start.
+        if let Ok(setup) = self.cli_setup() {
+            clear_started(&setup.wallet.display().to_string());
+        }
         if let Some(fields) = outcome(log).as_object() {
             for (key, value) in fields {
                 state[key.as_str()] = value.clone();
@@ -1062,6 +1073,9 @@ mod tests {
         mark_started("w-test", "p1");
         assert!(started_before("w-test", "p1"));
         assert!(!started_before("w-other", "p1"));
+        // When the job ends (a failure included), a retry from a new plan may start.
+        clear_started("w-test");
+        assert!(!started_before("w-test", "p1"));
     }
 
     #[test]

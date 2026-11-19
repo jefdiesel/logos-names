@@ -1355,6 +1355,10 @@ for key, mock, then in [
     MOCKS[key] = {"nft": mock}
     SCENARIOS[key] = OPEN_NFT % (("Qt.callLater(function() { " + then + " })") if then else "")
     HEIGHTS[key] = 2600
+# Settings, Connected apps, with NFT capabilities (one row each, with Remove).
+MOCKS["settings-nft-grants"] = MOCKS["collectibles-passes"]
+SCENARIOS["settings-nft-grants"] = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; root.section = "settings"; root.loadAppGrants() })'
+HEIGHTS["settings-nft-grants"] = 2700
 
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]

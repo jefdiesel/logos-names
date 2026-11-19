@@ -116,8 +116,18 @@ for (const [label, text] of [["nft.mjs", source.split("\n").filter((l) => !l.sta
   check(label + ": no 'lookup' / 'official'", /\blook ?up\b|\bofficial\b/i.test(text), false);
 }
 // Every Text in the Collectibles blocks says its format (an app's or a chain's text is never markup).
-const texts = block.split(/\bText \{/).slice(1).map((t) => t.slice(0, 600));
-check("every Collectibles Text sets textFormat", texts.filter((t) => !/textFormat:/.test(t.split("\n")[0] + t)).length, 0);
+// Each Text element's own body, matched brace for brace, so a neighbour's format never counts.
+const elements = [];
+for (const m of block.matchAll(/\bText \{/g)) {
+  let depth = 0, i = m.index + m[0].length - 1, end = i;
+  for (; end < block.length; end++) {
+    if (block[end] === "{") depth++;
+    else if (block[end] === "}" && --depth === 0) break;
+  }
+  elements.push(block.slice(i, end + 1).replace(/\{[^{}]*\{[\s\S]*\}[^{}]*\}/g, ""));
+}
+check("Collectibles Text elements found", elements.length > 5, true);
+check("every Collectibles Text sets textFormat", elements.filter((body) => !/textFormat:/.test(body)).length, 0);
 const hint = main.slice(main.indexOf("    component Hint: Text {"), main.indexOf("    component Hint: Text {") + 300);
 check("Hint is plain text by default", /textFormat: Text.PlainText/.test(hint), true);
 

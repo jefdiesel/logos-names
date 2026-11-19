@@ -262,6 +262,12 @@ pub fn left_reason(state: &[u8], definition: &nft_wire::Id) -> Option<(&'static 
     }
 }
 
+/// The most public cycles a private NFT action's public part runs, as the LEZ wallet prices its
+/// reserve (`reserve_pricing(quote, cycles)`): NFT messages took 28-37k gas in Job A (§9), and a
+/// private one's public part (the definition, a public recipient) less. Job A's two figures are
+/// this rule at 0 cycles (5,070,616) and at 12,561 (5,171,104).
+pub const NFT_PUBLIC_CYCLES: u64 = 40_000;
+
 /// Whether a private payer holding `held` can pay: at least the fee at head (`about`), the least
 /// the LEZ wallet reserves.
 pub fn payer_covers(held: u128, reserve: &crate::fees::Estimate) -> bool {
@@ -571,6 +577,11 @@ impl Client {
             Readiness::NeedsHolding => bail!(nft_wire::NOT_READY),
             Readiness::Refused(why) => bail!(why),
         }
+        // The plan synced before it read the recipient; so does this, or a private recipient's
+        // note could be older than the one the sheet was planned on.
+        if reach == Reach::OwnPrivate && !sender.is_private() {
+            self.wallet.sync_to_latest_block().await.context("cannot sync the private accounts")?;
+        }
         let to_state = if reach == Reach::TheirPrivate { Vec::new() } else { self.nft_state(program, recipient.account_id()).await? };
         let action: &[u8] = if print { b"print" } else { b"send" };
         check_pin(&expect, &pin_of(program, &[("action", action), ("from", text(sender.is_private(), from).as_bytes()), ("from_state", state.as_slice()), ("to", to_text(&recipient, reach).as_bytes()), ("to_state", to_state.as_slice())]))?;
@@ -696,7 +707,7 @@ impl Client {
     /// The private fee reserve now, from the chain's fee state (`fees::private`).
     async fn nft_reserve(&self) -> Result<crate::fees::Estimate> {
         let quote = self.wallet.client().get_fee_state().await?;
-        Ok(crate::fees::private(&quote, self.wallet.config().fee_headroom_blocks))
+        Ok(crate::fees::private_running(&quote, self.wallet.config().fee_headroom_blocks, NFT_PUBLIC_CYCLES))
     }
 
     /// A private fee payer: one of this wallet's private accounts holding at least the fee at the
@@ -975,14 +986,19 @@ mod tests {
         }))
         .unwrap();
         // The LEZ wallet's default headroom is 5 blocks.
-        let reserve = crate::fees::private(&quote, 5);
-        // Job A's "~5,070,616 reserved per private action" is exactly the fee at head:
-        // (PRIVATE_VERIFY_GAS + PRIVATE_GAS_STOR) x 8 = 633,827 x 8.
-        assert_eq!(reserve.about, 5_070_616);
+        // Job A's "~5,070,616 reserved per private action" is exactly the fee at head with no public
+        // cycles: (PRIVATE_VERIFY_GAS + PRIVATE_GAS_STOR) x 8 = 633,827 x 8; its refusal's 5,171,104
+        // is the same rule at 12,561 cycles.
+        assert_eq!(crate::fees::private(&quote, 5).about, 5_070_616);
+        assert_eq!(crate::fees::private_running(&quote, 5, 12_561).about, 5_171_104);
+        // The wallet prices NFT actions with their public part's cycles, bounded at 40k.
+        let reserve = crate::fees::private_running(&quote, 5, NFT_PUBLIC_CYCLES);
+        assert_eq!(reserve.about, (633_827 + 40_000) * 8);
         // Five full blocks lift both base fees 8 -> 13: the most the wallet holds while it runs.
-        assert_eq!(reserve.at_most, 8_239_751);
-        assert!(payer_covers(5_070_616, &reserve));
-        assert!(!payer_covers(5_070_615, &reserve));
+        assert_eq!(reserve.at_most, (633_827 + 40_000) * 13);
+        assert!(payer_covers(5_390_616, &reserve));
+        // A payer at Job A's 5.17M is refused before proving rather than failing after.
+        assert!(!payer_covers(5_171_104, &reserve));
     }
 
     #[test]

@@ -43,12 +43,19 @@ pub struct ProofJob {
     pub context: Bytes32,
     pub binding: Bytes32,
     pub plan: proof::Plan,
+    /// The image the wallet pinned for this gate.
+    pub pinned_image: [u32; 8],
 }
 
 /// What the client found before proving: the reserve it needs and has, and the proven
 /// transaction's observed shape, for the module's own outcome check.
 #[derive(Debug, Clone)]
 pub struct Prepared {
+    /// What the chain says the gate is (pre-check 4 on chain): its image, its immutable flag and
+    /// the NFT program it serves.
+    pub gate_image: [u32; 8],
+    pub gate_immutable: bool,
+    pub gate_nft_program: Bytes32,
     pub reserve: u128,
     pub payer_balance: u128,
     pub expected: proof::Expected,
@@ -376,6 +383,7 @@ impl Names {
             context,
             binding: proof::binding(&nft_program, &collection, &context),
             plan,
+            pinned_image: pin.image,
         };
         // The capability is given with the first approved proof, and shown and revoked on its own.
         store.give(&app, MEMBERSHIP_PROOF, now)?;
@@ -413,6 +421,10 @@ fn run(job: ProofJob, client: std::sync::Arc<dyn GateClient>) {
             Ok(prepared) => prepared,
             Err(e) => return set_status(&id, Status::Failed(e)),
         };
+        // Pre-check 4 on chain: the gate is the pinned, immutable image serving the pinned NFT program.
+        if proof::gate_is_pinned(&prepared.gate_image, prepared.gate_immutable, &job.pinned_image, &prepared.gate_nft_program, &job.nft_program).is_err() {
+            return set_status(&id, Status::Failed(WalletError::GateNotPinned));
+        }
         if !proof::covers_reserve(prepared.payer_balance, prepared.reserve) {
             return set_status(&id, Status::Failed(WalletError::FeeReserve));
         }
@@ -461,6 +473,10 @@ fn settle(store: &mut provider_nft::Store) {
     for request in store.requests.iter_mut().filter(|r| r["kind"] == MEMBERSHIP_PROOF) {
         let Some(id) = request["id"].as_str().map(str::to_owned) else { continue };
         let Some(status) = status_of(&id) else { continue };
+        // A cancelled proof stays cancelled whatever its thread wrote last.
+        if request["state"] == "cancelled" {
+            continue;
+        }
         let view = status.view(now);
         if request["status"] != view {
             request["status"] = view;
@@ -520,6 +536,6 @@ mod tests {
         assert_eq!(Status::Proving { started_ms: 1_000 }.view(91_000), json!({ "state": "proving", "elapsed_seconds": 90 }));
         assert_eq!(Status::Failed(WalletError::NotAMember).view(0)["code"], "NOT_A_MEMBER");
         assert_eq!(Status::WaitingForBlock.view(0)["state"], "waiting-for-block");
-        assert_eq!(NoGateClient.prepare(&ProofJob { request: "x".into(), nft_program: [0; 32], gate: [0; 32], collection: [0; 32], holder: [0; 32], payer: [0; 32], context: [0; 32], binding: [0; 32], plan: proof::plan(0, 1).unwrap() }).unwrap_err(), WalletError::GateNotPinned);
+        assert_eq!(NoGateClient.prepare(&ProofJob { request: "x".into(), nft_program: [0; 32], gate: [0; 32], collection: [0; 32], holder: [0; 32], payer: [0; 32], context: [0; 32], binding: [0; 32], plan: proof::plan(0, 1).unwrap(), pinned_image: [0; 8] }).unwrap_err(), WalletError::GateNotPinned);
     }
 }
