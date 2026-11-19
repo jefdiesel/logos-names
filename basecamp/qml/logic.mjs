@@ -1054,7 +1054,7 @@ export function cliOutdatedLine(net, line) {
     return "The names tool this app uses for LEZ 0.3" + tool + " is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it above."
 }
 
-export function bridgeNetRows(read, own) {
+export function bridgeNetRows(read, own, tokens) {
     if (!read || !Array.isArray(read.accounts)) return []
     // With more than one bridge, each token row says which bridge listed it.
     var many = Array.isArray(read.bridges) && read.bridges.length > 1
@@ -1071,8 +1071,9 @@ export function bridgeNetRows(read, own) {
                 var name = t.name ? String(t.name) : "Bridged token"
                 // "bridge v2" / "bridge v3" from the module (its built-in labels), else the short ID.
                 if (many && t.bridge) name += " · " + (t.bridge_label ? String(t.bridge_label) : "bridge " + keyShown(String(t.bridge)))
-                assets.push({ symbol: String(t.symbol || ""), name: name, amount: decimalShown(t.amount, t.decimals),
-                              bridge: String(t.bridge || ""), bridgeLabel: t.bridge_label ? String(t.bridge_label) : "", base: String(t.amount || "0"), decimals: Number(t.decimals) || 0, definition: String(t.definition || "") })
+                assets.push({ symbol: cardSymbol(t, tokens), name: name, amount: decimalShown(t.amount, t.decimals),
+                              bridge: String(t.bridge || ""), bridgeLabel: t.bridge_label ? String(t.bridge_label) : "", base: String(t.amount || "0"), decimals: Number(t.decimals) || 0, definition: String(t.definition || ""),
+                              ethToken: String(t.eth_token || "") })
             })
         }
         var id = keyShown(String(a.account || "").replace(/^Public\//, ""))
@@ -1948,19 +1949,21 @@ export function claimIsWait(code) {
 
 /// The bridge test network's denominations when the bridge's registry can't be read (v3).
 export const RECEIVE_FALLBACK = [
-    { symbol: "ETH", denoms: [{ index: 0, text: "0.01" }, { index: 1, text: "0.1" }, { index: 2, text: "1" }] },
-    { symbol: "dUSDC", denoms: [{ index: 0, text: "100" }, { index: 1, text: "1,000" }, { index: 2, text: "10,000" }] }
+    { key: "0x0000000000000000000000000000000000000000", ethToken: "0x0000000000000000000000000000000000000000", symbol: "ETH", frozen: false, delisted: false,
+      denoms: [{ index: 0, text: "0.01", value: "10000000000000000" }, { index: 1, text: "0.1", value: "100000000000000000" }, { index: 2, text: "1", value: "1000000000000000000" }] },
+    { key: "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e", ethToken: "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e", symbol: "dUSDC", frozen: false, delisted: false,
+      denoms: [{ index: 0, text: "100", value: "100000000" }, { index: 1, text: "1,000", value: "1000000000" }, { index: 2, text: "10,000", value: "10000000000" }] }
 ]
 
-/// The tokens and denominations to offer, from the bridge's `registry()` value (`tokens[].denoms[]`
-/// with `index` and `text`), else RECEIVE_FALLBACK.
-export function receiveTokens(registry) {
-    var list = registry && Array.isArray(registry.tokens) ? registry.tokens : []
-    var out = list.filter(function(t) { return t && t.symbol && Array.isArray(t.denoms) && t.denoms.length > 0 }).map(function(t) {
-        return { symbol: String(t.symbol), frozen: !!(t.freeze && t.freeze.eth_deposits === true),
-                 denoms: t.denoms.map(function(d, i) { return { index: d.index !== undefined ? Number(d.index) : i, text: String(d.text || d.value || ""), value: String(d.value || "") } }) }
+/// The tokens and denominations Receive offers: a projection of bridgeTokens (the same table
+/// Bridge to Ethereum and the card read, so the lists can't differ; review-branches-3 erc20 #4):
+/// [{key, ethToken, symbol, frozen, delisted, denoms: [{index, text, value}]}]. `key` is the
+/// token's Ethereum address (lowercase): what is chosen and what is sent, never its symbol.
+export function receiveTokens(registry, deploymentTokens) {
+    return bridgeTokens(registry, deploymentTokens).map(function(t) {
+        return { key: tokenKey(t), ethToken: t.ethToken, symbol: t.symbol, frozen: t.frozen, delisted: t.delisted,
+                 denoms: t.denoms.map(function(d) { return { index: d.index, text: d.text, value: d.value } }) }
     })
-    return out.length > 0 ? out : RECEIVE_FALLBACK
 }
 
 /// The index of the smallest denomination in `list` ([{index, text, value?}]: receiveTokens'
@@ -2478,27 +2481,31 @@ export const SEND_BACK_FALLBACK = {
 /// `chosen` ({program, release}: the LEZ Bridge's config().deployment, the bridge new send-backs use,
 /// built in or added in Settings → Bridge): only a balance on that bridge is offered, since a
 /// send-back is planned on it; without it (an older bridge) the built-in v4 and v5.
+/// `chosen.tokens` (bridgeTokens of the chosen bridge, docs ERC20-PATH.md): any token it lists is
+/// offered, found by definition or Ethereum address; without it, the fixed wETH and dUSDC.
 export function sendBackOffer(asset, chosen) {
     if (!asset) return false
     if (chosen && chosen.program) {
         if (asset.bridge !== chosen.program || chosen.release !== "proof") return false
     } else if (BURN_BRIDGE_PROGRAMS.indexOf(asset.bridge) < 0) return false
-    var known = SEND_BACK_FALLBACK[asset.symbol]
-    return !!known && atLeast(String(asset.base || "0"), known.denoms[0])
+    var known = sendBackKnown(asset, chosen && chosen.tokens)
+    return !!known && known.denoms.length > 0 && atLeast(String(asset.base || "0"), smallestValue(known.denoms))
 }
 
 /// The amounts to offer for `asset` (a card asset row): one button per denomination the account
 /// holds at least once, from the bridge's `registry()` when it lists the token (`value` in base
 /// units), else SEND_BACK_FALLBACK. [{index, text, value}] in the registry's order.
-export function sendBackAmounts(registry, asset) {
+export function sendBackAmounts(registry, asset, tokens) {
     if (!asset) return []
-    var known = SEND_BACK_FALLBACK[asset.symbol]
+    var known = sendBackKnown(asset, tokens)
     if (!known) return []
-    var listed = registry && Array.isArray(registry.tokens) ? registry.tokens.filter(function(t) { return t && t.symbol === known.symbol && Array.isArray(t.denoms) })[0] : null
+    var listed = registry && Array.isArray(registry.tokens) ? registry.tokens.filter(function(t) {
+        return t && Array.isArray(t.denoms) && (known.ethToken ? sameAddress(t.eth_token, known.ethToken) : t.symbol === known.symbol)
+    })[0] : null
     var denoms = listed ? listed.denoms.map(function(d, i) { return { index: d.index !== undefined ? Number(d.index) : i, value: String(d.value || "") } })
         .filter(function(d) { return /^[0-9]+$/.test(d.value) }) : []
     if (denoms.length === 0)
-        denoms = known.denoms.map(function(v, i) { return { index: i, value: v } })
+        denoms = known.denoms.map(function(d) { return { index: d.index, value: String(d.value) } })
     return denoms.filter(function(d) { return /^[0-9]+$/.test(d.value) && (asset.anyAmount === true || atLeast(String(asset.base || "0"), d.value)) })
         .map(function(d) { return { index: d.index, value: d.value, text: withDecimals(d.value, known.decimals) } })
 }
@@ -2513,12 +2520,16 @@ export function bridgeReadBeforeClaims(readAt, claimedAt, nowMs, withinMs) {
 
 /// The denomination index the bridge's registry, as read just now, gives the amount `value` (base
 /// units) of `asset`, or -1 when it no longer lists it: what Bridge to Ethereum submits is then
-/// the amount it shows, or nothing.
-export function sendBackIndexFor(registry, asset, value) {
+/// the amount it shows, or nothing. The token is found the way sendBackAmounts finds it (names-erc20:
+/// sendBackKnown with the chosen bridge's `tokens`, by definition, then Ethereum address; the
+/// registry row by that address), so an ERC-20 is checked like wETH (merge wallet-1119).
+export function sendBackIndexFor(registry, asset, value, tokens) {
     if (!asset || !registry || !Array.isArray(registry.tokens)) return -1
-    var known = SEND_BACK_FALLBACK[asset.symbol]
+    var known = sendBackKnown(asset, tokens)
     if (!known) return -1
-    var listed = registry.tokens.filter(function(t) { return t && t.symbol === known.symbol && Array.isArray(t.denoms) })[0]
+    var listed = registry.tokens.filter(function(t) {
+        return t && Array.isArray(t.denoms) && (known.ethToken ? sameAddress(t.eth_token, known.ethToken) : t.symbol === known.symbol)
+    })[0]
     if (!listed) return -1
     var found = -1
     listed.denoms.forEach(function(d, i) {
@@ -2535,10 +2546,14 @@ export function sendBackChangeShown(amounts, sources, privateSources) {
     return n(amounts) > 1 || n(sources) + n(privateSources) > 1
 }
 
-/// The bridge module's symbol for a card symbol: wETH → ETH (what `send_back_plan` takes).
-export function sendBackSymbol(symbol) {
-    var known = SEND_BACK_FALLBACK[String(symbol || "")]
-    return known ? known.symbol : String(symbol || "")
+/// The bridge module's symbol for a card symbol: wETH → ETH (what `send_back_plan` takes). With
+/// the chosen bridge's `tokens`, any token it lists by its card symbol.
+export function sendBackSymbol(symbol, tokens) {
+    var card = String(symbol || "")
+    var listed = (Array.isArray(tokens) ? tokens : []).filter(function(t) { return t.card === card })[0]
+    if (listed) return listed.symbol
+    var known = SEND_BACK_FALLBACK[card]
+    return known ? known.symbol : card
 }
 
 /// A pasted withdraw-to code, cleaned: the `logoswd1…` part of a bare code, a link or text around
@@ -2787,7 +2802,7 @@ export function sendBackSources(blocks, chosen) {
         if (!b || b.viewOnly || b.watched) return
         ;(b.assets || []).forEach(function(a) {
             if (sendBackOffer(a, chosen))
-                out.push({ key: String(b.account) + "|" + a.symbol, account: String(b.account), symbol: a.symbol, amount: a.amount, asset: a })
+                out.push({ key: String(b.account) + "|" + assetId(a), account: String(b.account), symbol: a.symbol, amount: a.amount, asset: a })
         })
     })
     return out
@@ -3177,7 +3192,9 @@ export function privateClaimSteps(s) {
 /// the wallet lists for it (token_source_holdings) when it lists one, else no amount (the wallet's
 /// simulation checks the balance when it proves the burn). [{key, account, symbol, amount, asset,
 /// private: true}]; `asset.anyAmount` offers every denomination.
-export function privateSendBackSources(accounts, holdings) {
+export function privateSendBackSources(accounts, holdings, tokens) {
+    if (Array.isArray(tokens) && tokens.length > 0)
+        return privateSendBackSourcesOf(accounts, holdings, tokens)
     var out = []
     privateAccounts(accounts).forEach(function(acct) {
         var id = acct.replace(/^Private\//, "")
@@ -3606,4 +3623,245 @@ export function importResultLine(value) {
     if (!/^Public\//.test(account))
         return "Imported."
     return "Imported " + (v.label ? clean(v.label) + " (" + idShort(account) + ")" : "public account " + idShort(account)) + ". " + clean(v.notice || "")
+}
+
+// ── ERC-20 as a first-class path (rfp-022 docs/ERC20-PATH.md): one token table per bridge, so
+// Receive from Ethereum, Bridge to Ethereum and the card handle any token the bridge registers
+// (USDC, USDT, DAI, WETH …), not only wETH and dUSDC. ──
+
+/// The Ethereum address of native ETH in the bridge's registry.
+export const ETH_ADDRESS = "0x0000000000000000000000000000000000000000"
+/// The demo USDC's address, for the fixed lists below.
+const DUSDC_ADDRESS = "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e"
+
+function sameAddress(a, b) {
+    return String(a || "").toLowerCase() === String(b || "").toLowerCase() && String(a || "") !== ""
+}
+
+/// The symbol a bridged token has on LEZ (the card's): native ETH arrives as wETH; an ERC-20 keeps
+/// its own symbol (dUSDC stays dUSDC, USDC stays USDC), so the two names already shown never change.
+export function wrappedSymbol(ethToken, symbol) {
+    return sameAddress(ethToken, ETH_ADDRESS) ? "wETH" : String(symbol || "")
+}
+
+/// The base-unit value of the smallest of `denoms` ([{value}]), "" when none.
+function smallestValue(denoms) {
+    var at = smallestDenom(denoms)
+    var d = (denoms || []).filter(function(x) { return Number(x.index) === at })[0]
+    return d ? String(d.value) : ""
+}
+
+/// One bridge's tokens: [{ethToken, symbol, card, decimals, definition, frozen, denoms: [{index,
+/// value, text}]}]. From its `registry()` value when it answered (both chains), else
+/// `deploymentTokens` (the LEZ Bridge's `config().deployment.tokens`: the bridge code's list),
+/// else the fixed ETH and dUSDC of the bridge test network. `symbol` is the bridge module's (what
+/// `make_*_deposit_request` and `send_back_plan` take); `card` the wrapped one (wrappedSymbol).
+/// A token without denominations is left out (nothing to offer).
+export function bridgeTokens(registry, deploymentTokens) {
+    var reg = registry && Array.isArray(registry.tokens) ? registry.tokens.filter(function(t) { return t && t.symbol }) : []
+    var dep = Array.isArray(deploymentTokens) ? deploymentTokens.filter(function(t) { return t && t.symbol }) : null
+    var fromRegistry = function(t) {
+        var decimals = Number(t.decimals)
+        var denoms = (Array.isArray(t.denoms) ? t.denoms : []).map(function(d, i) {
+            var value = String(d && d.value !== undefined ? d.value : "")
+            return { index: d && d.index !== undefined ? Number(d.index) : i, value: value, text: String((d && d.text) || withDecimals(value, decimals)) }
+        }).filter(function(d) { return /^[0-9]+$/.test(d.value) })
+        return { ethToken: String(t.eth_token || "").toLowerCase(), symbol: String(t.symbol), card: wrappedSymbol(t.eth_token, t.symbol), decimals: decimals,
+                 definition: String(t.definition || ""), frozen: !!(t.freeze && t.freeze.eth_deposits === true), delisted: t.registered === false, denoms: denoms }
+    }
+    var fromDeployment = function(t) {
+        var decimals = Number(t.decimals)
+        var denoms = (Array.isArray(t.denoms) ? t.denoms : []).map(function(v, i) { return { index: i, value: String(v), text: withDecimals(String(v), decimals) } })
+            .filter(function(d) { return /^[0-9]+$/.test(d.value) })
+        return { ethToken: String(t.eth_token || "").toLowerCase(), symbol: String(t.symbol), card: wrappedSymbol(t.eth_token, t.symbol), decimals: decimals,
+                 definition: String(t.definition || ""), frozen: false, delisted: false, denoms: denoms }
+    }
+    var rows = []
+    if (dep !== null) {
+        // Per token of the chosen bridge (review-branches-3 erc20 #4): the registry's row when it
+        // has amounts; the bridge code's own amounts only when the vault wasn't read for the token
+        // (no row, or `registered` unknown); a token the vault was read for and gave no amounts
+        // is left out (no deposit to offer).
+        dep.forEach(function(t) {
+            var r = reg.filter(function(x) { return sameAddress(x.eth_token, t.eth_token) })[0]
+            var row = r ? fromRegistry(r) : null
+            if (row && row.denoms.length > 0) rows.push(row)
+            else if (!r || r.registered === null || r.registered === undefined) rows.push(fromDeployment(t))
+        })
+        reg.forEach(function(x) {
+            if (!dep.some(function(t) { return sameAddress(t.eth_token, x.eth_token) })) rows.push(fromRegistry(x))
+        })
+    } else
+        rows = reg.map(fromRegistry)
+    rows = rows.filter(function(t) { return t.denoms.length > 0 })
+    // The fixed bridge test network list only when nothing survives and the bridge gave no list.
+    if (rows.length === 0 && dep === null) {
+        rows = [
+            { ethToken: ETH_ADDRESS, symbol: "ETH", card: "wETH", decimals: 18, definition: "", frozen: false, delisted: false, denoms: SEND_BACK_FALLBACK.wETH.denoms },
+            { ethToken: DUSDC_ADDRESS, symbol: "dUSDC", card: "dUSDC", decimals: 6, definition: "", frozen: false, delisted: false, denoms: SEND_BACK_FALLBACK.dUSDC.denoms }
+        ].map(function(t) { return Object.assign({}, t, { denoms: t.denoms.map(function(v, i) { return { index: i, value: v, text: withDecimals(v, t.decimals) } }) }) })
+    }
+    return rows
+}
+
+/// A token's identity: its Ethereum address (lowercase), or "sym:<symbol>" for a row with none.
+export function tokenKey(t) {
+    var a = t ? String(t.ethToken || t.eth_token || "").toLowerCase() : ""
+    return a !== "" ? a : "sym:" + String(t && t.symbol || "")
+}
+
+/// A card asset's identity for Send back: its definition, else its Ethereum address, else its
+/// symbol (a row from an older Names that named neither).
+export function assetId(asset) {
+    if (!asset) return ""
+    if (asset.definition) return "def:" + String(asset.definition)
+    if (asset.ethToken) return String(asset.ethToken).toLowerCase()
+    return "sym:" + String(asset.symbol || "")
+}
+
+/// Whether source row `row` is the one picked (`account` + `asset`): same account, same token.
+export function sameSource(account, asset, row) {
+    return !!asset && !!row && String(account || "") === String(row.account || "") && assetId(asset) === assetId(row.asset)
+}
+
+/// The token Bridge to Ethereum hands `send_back_plan`: the one its amounts were found from
+/// (sendBackKnown), by Ethereum address, so what is shown is what is submitted (review-branches-3
+/// erc20 #1); "" when the asset isn't a token of the table (then nothing is offered either).
+export function sendBackToken(asset, tokens) {
+    var k = sendBackKnown(asset, tokens)
+    return k ? (k.ethToken || k.symbol) : ""
+}
+
+/// What Send back knows of a card asset row: {symbol (the bridge's), ethToken, decimals, denoms:
+/// [{index, value}]}, from `tokens` (bridgeTokens) by definition, then Ethereum address, then card
+/// symbol; else the fixed SEND_BACK_FALLBACK by card symbol; else null (not offered).
+export function sendBackKnown(asset, tokens) {
+    if (!asset) return null
+    // Without a table (an older bridge): the fixed list, still matched by address first.
+    var list = Array.isArray(tokens) && tokens.length > 0 ? tokens : bridgeTokens(null, null)
+    var t = null
+    if (asset.definition)
+        t = list.filter(function(x) { return x.definition !== "" && x.definition === asset.definition })[0] || null
+    if (!t && asset.ethToken)
+        t = list.filter(function(x) { return sameAddress(x.ethToken, asset.ethToken) })[0] || null
+    // A card symbol only for an asset that names neither (never when its ids found nothing).
+    if (!t && !asset.definition && !asset.ethToken) {
+        var same = list.filter(function(x) { return x.card === asset.symbol })
+        t = same.length === 1 ? same[0] : null
+    }
+    if (!t && asset.definition && !asset.ethToken && (!Array.isArray(tokens) || tokens.length === 0)) {
+        // an older bridge's fixed list has no definitions: by the card symbol, once
+        var fixed = list.filter(function(x) { return x.card === asset.symbol })
+        t = fixed.length === 1 && fixed[0].definition === "" ? fixed[0] : null
+    }
+    if (!t) return null
+    return { symbol: t.symbol, ethToken: t.ethToken, decimals: t.decimals, definition: t.definition, denoms: t.denoms.map(function(d) { return { index: d.index, value: d.value } }) }
+}
+
+/// The card's symbol for a token row of `bridge_net_balances`: the Names module names a token it
+/// doesn't know by its Ethereum address; the chosen bridge's table names it (wrappedSymbol).
+function cardSymbol(t, tokens) {
+    var sym = String(t.symbol || "")
+    if (!/^0x[0-9a-fA-F]{40}$/.test(sym)) return sym
+    var listed = (Array.isArray(tokens) ? tokens : []).filter(function(x) { return (t.definition && x.definition === String(t.definition)) || sameAddress(x.ethToken, t.eth_token || sym) })[0]
+    return listed ? listed.card : sym.substr(0, 6) + "…" + sym.substr(38)
+}
+
+/// The token Receive asks for: `chosen` when the list has it and it isn't paused, else ETH, else
+/// the first token that isn't paused; "" when there is none (a bridge without ETH no longer
+/// leaves an empty amount row).
+export function receiveTokenNow(list, chosen) {
+    var open = receiveTokensOpen(list)
+    var pick = function(key) { return open.filter(function(t) { return tokenKey(t) === key })[0] }
+    var t = pick(String(chosen || "").toLowerCase()) || pick(ETH_ADDRESS) || open[0]
+    return t ? tokenKey(t) : ""
+}
+
+/// The symbol of token `key` in `list` (for the amount chips), "" when it isn't there.
+export function receiveSymbolOf(list, key) {
+    var t = (Array.isArray(list) ? list : []).filter(function(x) { return tokenKey(x) === String(key || "") })[0]
+    return t ? String(t.symbol) : ""
+}
+
+/// What `make_*_deposit_request` is given for token `key`: its Ethereum address (the module
+/// matches it exactly), or its symbol for a row with none.
+export function receiveTokenArg(list, key) {
+    var t = (Array.isArray(list) ? list : []).filter(function(x) { return tokenKey(x) === String(key || "") })[0]
+    return t ? (t.ethToken || t.symbol) : ""
+}
+
+/// When the token the person pressed can't be asked for any more (paused, delisted or gone after
+/// the registry was read), the line that says the choice changed and why; "" otherwise
+/// (review-branches-3 erc20 #3). The amount starts on the smallest again (Main.qml).
+export function receiveSwitchNote(list, pressedKey, nowKey, pressed) {
+    if (!pressed || String(pressedKey || "") === String(nowKey || "")) return ""
+    var all = Array.isArray(list) ? list : []
+    var was = all.filter(function(x) { return tokenKey(x) === String(pressedKey || "") })[0]
+    var name = was ? String(was.symbol) : "The token you chose"
+    var why = !was ? " is no longer offered by this bridge" : was.delisted ? " is no longer accepted by this bridge's vault" : " deposits are paused on this bridge for now"
+    var now = receiveSymbolOf(all, nowKey)
+    return now !== "" ? name + why + ", so " + now + " is chosen instead, at its smallest amount. Choose again if you want another."
+        : name + why + ", and this bridge offers no other token right now."
+}
+
+/// The tokens Receive offers (not paused) and one plain line naming the paused ones ("" if none).
+export function receiveTokensOpen(list) {
+    return (Array.isArray(list) ? list : []).filter(function(t) { return t && !t.frozen && !t.delisted })
+}
+export function receivePausedLine(list) {
+    var paused = (Array.isArray(list) ? list : []).filter(function(t) { return t && t.frozen }).map(function(t) { return String(t.symbol) })
+    if (paused.length === 0) return ""
+    return "Deposits of " + paused.join(" and ") + " are paused on this bridge for now."
+}
+
+/// The deposit step's three lines for `symbol`: an ERC-20 is approved first on the page (exactly
+/// the amount), then deposited; ETH is one transaction.
+export function receiveDepositSteps(result, tokens) {
+    // The code's own token: its Ethereum address when the reply carries it, else the one table row
+    // with its symbol, else by the symbol's text.
+    var r = result && typeof result === "object" ? result : { symbol: result }
+    var addr = String((r.deposit && r.deposit.eth_token) || r.eth_token || "")
+    var symbol = String(r.symbol || "")
+    var same = (Array.isArray(tokens) ? tokens : []).filter(function(x) { return x.symbol === symbol })
+    var isToken = addr !== "" ? !sameAddress(addr, ETH_ADDRESS) : same.length === 1 ? !sameAddress(same[0].ethToken, ETH_ADDRESS) : String(symbol || "ETH") !== "ETH"
+    if (!isToken) return RECEIVE_DEPOSIT_STEPS
+    return [RECEIVE_DEPOSIT_STEPS[0], RECEIVE_DEPOSIT_STEPS[1],
+            "Approve exactly the amount there, then deposit (your Ethereum wallet asks twice). Then come back here and press Check now."]
+}
+
+/// A private send-back source's chip: "2if1EJ…6HUC · 0.1 wETH · private", or with no balance
+/// listed "2if1EJ…6HUC · USDT · private" (one chip per token, so the token is always named).
+export function privateSourceLabel(row) {
+    if (!row) return ""
+    var amount = String(row.amount || "")
+    return idShort(row.account) + " · " + (amount !== "" ? amount + " " : "") + String(row.symbol || "") + " · private"
+}
+
+/// privateSendBackSources with the chosen bridge's tokens: a row per private account and token it
+/// holds (token_source_holdings), else, when the wallet lists nothing for it, a row per token with
+/// every amount (the wallet's simulation checks the balance when it proves the burn).
+function privateSendBackSourcesOf(accounts, holdings, tokens) {
+    var out = []
+    privateAccounts(accounts).forEach(function(acct) {
+        var id = acct.replace(/^Private\//, "")
+        var held = []
+        ;(Array.isArray(holdings) ? holdings : []).forEach(function(src) {
+            ;((src && src.holdings) || []).forEach(function(h) {
+                if (String(h.account || "").replace(/^(Private|Public)\//, "") !== id || !someAmount(String(h.balance || "0"))) return
+                var sym = String(h.symbol || "")
+                var byDef = h.definition ? tokens.filter(function(x) { return x.definition !== "" && x.definition === String(h.definition) }) : []
+                var byCard = byDef.length > 0 || h.definition ? [] : tokens.filter(function(x) { return x.card === sym })
+                var bySym = byDef.length > 0 || byCard.length > 0 || h.definition ? [] : tokens.filter(function(x) { return x.symbol === sym })
+                var t = byDef[0] || (byCard.length === 1 ? byCard[0] : null) || (bySym.length === 1 ? bySym[0] : null)
+                if (t && held.every(function(k) { return tokenKey(k) !== tokenKey(t) }))
+                    held.push({ symbol: t.card, ethToken: t.ethToken, base: String(h.balance), amount: withDecimals(String(h.balance), Number(h.decimals) || t.decimals), definition: t.definition })
+            })
+        })
+        var assets = held.length > 0 ? held.map(function(k) { return { symbol: k.symbol, base: k.base, amount: k.amount, definition: k.definition, ethToken: k.ethToken, "private": true } })
+            : tokens.map(function(t) { return { symbol: t.card, base: "", amount: "", definition: t.definition, ethToken: t.ethToken, "private": true, anyAmount: true } })
+        assets.forEach(function(asset) {
+            out.push({ key: acct + "|" + assetId(asset), account: acct, symbol: asset.symbol, amount: asset.amount, asset: asset, "private": true })
+        })
+    })
+    return out
 }
