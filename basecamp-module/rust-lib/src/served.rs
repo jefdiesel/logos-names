@@ -69,6 +69,16 @@ fn lane_lock(lane: &Lane) -> Option<Arc<Mutex<()>>> {
     Some(lock(&LANES).get_or_insert_with(HashMap::new).entry(lane_scope() + &key).or_default().clone())
 }
 
+/// Runs `work` in `lane`'s turn on the calling thread: after the background read of that kind under
+/// way, if any. names-stall-3 took this out (its reads take the turn inside `Served::read`);
+/// names-roadmap-2's account import still runs the names tool in the CLI lane with it (merge
+/// wallet-1119).
+pub fn in_lane<R>(lane: &Lane, work: impl FnOnce() -> R) -> R {
+    let Some(turn) = lane_lock(lane) else { return work() };
+    let _turn = lock(&turn);
+    work()
+}
+
 /// The lanes are the module's (one names instance per host process).
 #[cfg(not(test))]
 fn lane_scope() -> String {
