@@ -592,6 +592,29 @@ pub fn mark_imported(request: &mut Value, private: bool, first: bool) {
     request["explanation"] = json!(format!("{} {before}", lines.join(" ")));
 }
 
+/// Where an account's pinned scheme is kept for good: `app-secret-schemes.json` in the network's
+/// wallet folder, beside `storage.json`. Not in `provider.json`, whose grant rows go when an app is
+/// disconnected or a grant taken back (and the whole file with a reset of the connected apps); the
+/// wallet folder is per network and goes into every Backup with the keys whose values it
+/// describes. It holds no secret: an account id and the word `phrase`, `imported` or `unknown`.
+pub const PINS_FILE: &str = "app-secret-schemes.json";
+/// The pin of an account whose grant is from before pinning: the tool gives both sets.
+pub const SCHEME_UNKNOWN: &str = "unknown";
+
+/// The scheme kept for `account` in `wallet_dir`, if any.
+pub fn read_pin(wallet_dir: &std::path::Path, account: &str) -> Option<String> {
+    let text = std::fs::read_to_string(wallet_dir.join(PINS_FILE)).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?[account].as_str().map(str::to_owned)
+}
+
+/// Keeps `scheme` for `account` in `wallet_dir` (mode 600; replaces the file whole).
+pub fn write_pin(wallet_dir: &std::path::Path, account: &str, scheme: &str) -> Result<(), String> {
+    let path = wallet_dir.join(PINS_FILE);
+    let mut map = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Map<String, Value>>(&t).ok()).unwrap_or_default();
+    map.insert(account.to_owned(), json!(scheme));
+    crate::cli::write_private(&path, Value::Object(map).to_string().as_bytes()).map_err(|e| format!("cannot keep the account's scheme: {e}"))
+}
+
 /// Why `app_secret` gave no values, in plain words: never the names tool's own text, which named
 /// key trees and CLI errors (the 0.17.0 screen showed "the names CLI failed: Error: …").
 pub fn secret_failure(what: &str, account: &str, why: &str) -> String {
@@ -797,7 +820,9 @@ impl Grants {
         if list.len() >= MAX_SECRET_GRANTS_PER_APP || total >= MAX_SECRET_GRANTS {
             return Err("this app has too many secret grants; take some back in Settings first".to_owned());
         }
-        list.push(json!({ "account": account, "scope": scope, "since": now }));
+        // `v: 2`: made by a build that pins the scheme at the first values (a row without it is
+        // from before: which scheme made its values is unknown).
+        list.push(json!({ "account": account, "scope": scope, "since": now, "v": 2 }));
         Ok(())
     }
 
@@ -806,6 +831,12 @@ impl Grants {
     /// later change in key-tree membership never changes the account's values.
     pub fn pinned_scheme(&self, account: &str) -> Option<String> {
         self.secrets.values().filter_map(Value::as_array).flatten().find(|g| g["account"] == account && g["scheme"].is_string()).and_then(|g| g["scheme"].as_str().map(str::to_owned))
+    }
+
+    /// A grant for `account` from before this build pinned schemes (no `v`): its values may have
+    /// been made under either scheme.
+    pub fn has_legacy_grant(&self, account: &str) -> bool {
+        self.secrets.values().filter_map(Value::as_array).flatten().any(|g| g["account"] == account && g.get("v").is_none() && !g["scheme"].is_string())
     }
 
     /// Pins `scheme` on every grant for `account` that has none yet.

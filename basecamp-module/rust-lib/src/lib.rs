@@ -8098,13 +8098,23 @@ impl Names {
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
         // The scheme pinned for this account at its first values (any app): the tool must use it.
-        let pinned = self.store().private.pinned_scheme(&account);
+        // Kept in the wallet folder (provider_private::PINS_FILE), falling back to the grant rows a
+        // build before that kept it in. A grant from before pinning: `unknown`, both sets asked.
+        let wallet_dir = self.wallet_dir_of(self.net);
+        let mut pinned = wallet_dir.as_deref().and_then(|dir| provider_private::read_pin(dir, &account)).or_else(|| self.store().private.pinned_scheme(&account));
+        if pinned.is_none() && self.store().private.has_legacy_grant(&account) {
+            pinned = Some(provider_private::SCHEME_UNKNOWN.to_owned());
+            if let Some(dir) = &wallet_dir {
+                provider_private::write_pin(dir, &account, provider_private::SCHEME_UNKNOWN)?;
+            }
+        }
+        let unknown = pinned.as_deref() == Some(provider_private::SCHEME_UNKNOWN);
         let mut input = json!({
             "app": ask.app, "account": account, "scope": ask.scope, "context": registry::hex(&ask.context),
             "tag": ask.tag, "first": ask.first, "count": ask.count,
         });
         if let Some(scheme) = &pinned {
-            input["scheme"] = json!(scheme);
+            input["scheme"] = json!(if unknown { "both" } else { scheme.as_str() });
         }
         let what = if ask.scope.starts_with("RFP022/deposit") { "deposit keys" } else { "the values this app asks for" };
         // The tool's words never reach the screen (they named key trees and CLI errors): a plain line.
@@ -8120,7 +8130,7 @@ impl Names {
         // answer is taken only for an account known to be a phrase account (review 2026-11-18).
         let scheme = match answer["scheme"].as_str() {
             Some(scheme @ (app_secret::SCHEME_IMPORTED | app_secret::SCHEME_PHRASE)) => scheme.to_owned(),
-            _ if pinned.as_deref() == Some(app_secret::SCHEME_IMPORTED) => return Err(provider_private::older_tool_for_imported(what, &account)),
+            _ if pinned.as_deref() == Some(app_secret::SCHEME_IMPORTED) || unknown => return Err(provider_private::older_tool_for_imported(what, &account)),
             _ => match self.account_imported(&account) {
                 Some(false) => app_secret::SCHEME_PHRASE.to_owned(),
                 Some(true) => return Err(provider_private::older_tool_for_imported(what, &account)),
@@ -8128,16 +8138,37 @@ impl Names {
             },
         };
         // Pinned once; a tool that answers another way than the pin is refused, never handed out.
-        if pinned.as_ref().is_some_and(|p| *p != scheme) {
+        if !unknown && pinned.as_ref().is_some_and(|p| *p != scheme) {
             return Err(provider_private::other_scheme(what, &account));
         }
+        // An unknown pin: the other scheme's values too, which the app matches against what it
+        // stored (it never pins: what it stored decides, record by record).
+        let other: Option<Vec<String>> = if unknown {
+            let o: Vec<String> = answer["other_values"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+            if o.len() as u64 != ask.count || o.iter().any(|v| v.len() != 64) || answer["other_scheme"].as_str().is_none_or(|x| x == scheme) {
+                return Err(provider_private::older_tool(what, &account));
+            }
+            Some(o)
+        } else {
+            None
+        };
+        if pinned.is_none() {
+            if let Some(dir) = &wallet_dir {
+                provider_private::write_pin(dir, &account, &scheme)?;
+            }
+        }
         let store = self.store();
-        if store.private.secrets.values().filter_map(Value::as_array).flatten().any(|g| g["account"] == account.as_str() && !g["scheme"].is_string()) {
+        if !unknown && store.private.secrets.values().filter_map(Value::as_array).flatten().any(|g| g["account"] == account.as_str() && !g["scheme"].is_string()) {
             store.private.pin_scheme(&account, &scheme);
             store.save();
         }
         let imported = scheme == app_secret::SCHEME_IMPORTED;
-        Ok(json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values, "imported": imported }))
+        let mut reply = json!({ "granted": true, "account": account, "scope": ask.scope, "tag": ask.tag, "first": ask.first, "values": values, "imported": imported });
+        if let Some(other) = other {
+            reply["other_values"] = json!(other);
+            reply["other_imported"] = json!(!imported);
+        }
+        Ok(reply)
     }
 
     /// Whether `account` is imported: the names CLI's word (`module account-scheme`, by key-tree
@@ -12827,7 +12858,7 @@ mod tests {
              esac"
         );
         let (mut names, dir) = with_wallet("pinned-scheme", &tail);
-        for (n, scheme) in [(0, "imported"), (1, "phrase")] {
+        for (n, scheme) in [(0, "imported"), (1, "phrase"), (2, "phrase")] {
             std::fs::write(dir.join(format!("answer-{n}.json")), json!({ "account": account, "values": serde_json::from_str::<Value>(&values).unwrap(), "scheme": scheme }).to_string() + "\n").unwrap();
         }
         connect(&mut names, "lez_bridge", &account);
@@ -12845,6 +12876,46 @@ mod tests {
         assert_eq!(sent["scheme"], "imported", "the pin goes to the tool");
         assert!(second["error"].as_str().unwrap_or_default().contains("another way"), "{second}");
         assert!(second["value"]["values"].is_null());
+        // The pin is kept in the wallet folder, so taking the grant back and giving it again
+        // (the app's only grant for the account) does not lose it (review 2026-11-18).
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        assert_eq!(provider_private::read_pin(&wallet, &account).as_deref(), Some("imported"));
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        assert_eq!(parsed(&names.revoke_secret("lez_bridge".into(), account.clone(), "RFP022/exit".into()))["value"]["revoked"], true);
+        as_caller(app("lez_bridge"));
+        let id = ask(&mut names)["value"]["request"]["request"].as_str().unwrap().to_owned();
+        assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
+        as_caller(app("lez_bridge"));
+        let third = ask(&mut names);
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in-2.json")).unwrap()).unwrap();
+        assert_eq!(sent["scheme"], "imported", "the pin outlives the grant");
+        assert!(third["error"].as_str().unwrap_or_default().contains("another way"), "{third}");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Review 2026-11-18: a grant from before this build pinned schemes is `unknown`: the tool is
+    /// asked for both sets and the app gets both, to match against what it stored.
+    #[test]
+    fn a_grant_from_before_pinning_gets_both_sets() {
+        let account = format!("Public/{PUBLIC}");
+        let tail = "case \"$*\" in\n\
+             *\"module app-secret\"*) d=\"$(dirname \"$0\")\"; cat > \"$d/secret-in.json\"; cat \"$d/answer.json\" ;;\n\
+             esac".to_owned();
+        let (mut names, dir) = with_wallet("legacy-grant", &tail);
+        std::fs::write(dir.join("answer.json"), json!({ "account": account, "values": ["ab".repeat(32)], "scheme": "phrase", "other_values": ["cd".repeat(32)], "other_scheme": "imported" }).to_string() + "\n").unwrap();
+        connect(&mut names, "lez_bridge", &account);
+        // A secret grant row as builds before pinning wrote it (no `v`, no `scheme`).
+        names.store().private.secrets.insert("lez_bridge".into(), json!([{ "account": account, "scope": "RFP022/exit", "since": 1 }]));
+        names.store().save();
+        as_caller(app("lez_bridge"));
+        let got = parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1))["value"].clone();
+        let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in.json")).unwrap()).unwrap();
+        assert_eq!(sent["scheme"], "both", "{sent}");
+        assert_eq!(got["values"], json!(["ab".repeat(32)]), "{got}");
+        assert_eq!((got["other_values"].clone(), got["other_imported"].as_bool()), (json!(["cd".repeat(32)]), Some(true)));
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        assert_eq!(provider_private::read_pin(&wallet, &account).as_deref(), Some("unknown"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
     }
