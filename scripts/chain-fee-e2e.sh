@@ -358,6 +358,9 @@ try:
 except (OSError, ValueError):
     cfg = {}
 cfg["sequencer"] = f"http://127.0.0.1:{HTTP + 3}"
+# LEZ 0.3's settings are the flat fields; since wallet-1121 a config is on LEZ 0.4 unless it says
+# LEZ 0.3 and carries the mark of a choice (default_network).
+cfg["names_network"], cfg["default_network"] = "lez-0.3", "lez-0.4"
 json.dump(cfg, open(cp, "w"))
 ctl("module", "unload", "names")
 say("    names reloaded: " + ctl("module", "load", "names")[1])

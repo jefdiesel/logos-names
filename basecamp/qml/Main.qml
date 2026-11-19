@@ -14598,7 +14598,7 @@ Item {
                             text: root.netProblem !== "" ? root.netProblem : "Switching…"
                         }
                         StatusLine {
-                            visible: root.namesNet === "0.4" && root.networkResetAt > 0
+                            visible: root.namesNet === "0.4" && root.networkResetAt > 0 && !(root.netCheckFound && root.netCheckFound.reset)
                             kind: "waiting"
                             text: Logic.networkResetLine(root.networkResetAt, root.networkShownName, root.clockShown)
                         }
@@ -14792,7 +14792,7 @@ Item {
                     }
                     Part { text: "Accounts" }
                     // Which network this list is: never one network's accounts read as the other's.
-                    Hint { color: root.ink; font.pixelSize: root.px(15); text: "On " + (root.namesNet === "0.4" ? "LEZ 0.4 (the bridge test network)" : "LEZ 0.3 (the public Logos testnet)") + ": the accounts of that network's wallet. Switch networks at the top of the Wallet." }
+                    Hint { color: root.ink; font.pixelSize: root.px(15); text: "On " + (root.namesNet === "0.4" ? "LEZ 0.4 (the bridge test network)" : "LEZ 0.3 (the public Logos testnet)") + ": the accounts of that network's wallet. Switch networks under Network, above." }
                     Hint { visible: !root.cliOld || root.cliAccounts !== null; text: "Your wallet's accounts. The one marked Pays is where payments and new names come from, one private and one public. Names you hold stay with the accounts holding them, and payments to a name still go where the name points." }
                     Hint { visible: root.cliPath === ""; text: "Install Names on this computer first to see your accounts." }
                     Hint { visible: root.cliPath !== "" && root.cliAccounts === null && root.accountsError === ""; text: "Reading your accounts…" }

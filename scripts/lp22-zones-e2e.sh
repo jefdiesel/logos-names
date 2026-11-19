@@ -343,6 +343,11 @@ seq_setup(SEQ_B, config_b)
 say(f"    two chains made: A channel {CHANNEL_A[:8]}… (local.json as it is), B channel {CHANNEL_B[:8]}… (its own)")
 rc, out = ctl("install", "--dir", os.environ["NAMES_LGX"], "-y")
 say(f"    install names: exit {rc} {out[-200:] if rc else ''}")
+# Zones are LEZ 0.3's; since wallet-1121 a fresh module opens on LEZ 0.4, so this run's config says
+# LEZ 0.3, as a person's choice (default_network).
+os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+json.dump({"names_network": "lez-0.3", "default_network": "lez-0.4"}, open(CONFIG, "w"))
+os.chmod(CONFIG, 0o600)
 rc, out = ctl("module", "load", "names")
 say(f"    module load names: {out}")
 if rc != 0:
@@ -352,8 +357,10 @@ if rc != 0:
 say("\n== 1. HOME: zone A, the wallet made and funded there")
 seq_up(SEQ_A, URL_A, BASE + 5)
 step("the names CLI is taken", names("set_cli", NAMES_BIN)["value"] is True)
-r = names("set_sequencer", URL_A)
-step("home reads from sequencer A", r["value"] is True, shown(r))
+# Another chain than the built-in testnet's: since wallet-1121 home takes it only when asked, even
+# with no wallet yet.
+r = names("zone_sequencer", "home", URL_A, "true")
+step("home reads from sequencer A (another chain, taken as asked)", r["ok"] and r["value"].get("changed") is True, shown(r))
 r = names("cli_status")
 show("cli_status", r)
 HOME_WALLET = r["value"].get("wallet_dir") if r["ok"] else None
