@@ -34,8 +34,9 @@ pub const NFT_PROGRAM_IMAGE_ID: [u8; 32] =
 
 /// The public name of every deed. It never names the LNS name.
 pub const DEED_NAME: &str = "LNS name deed";
-/// What a deed's `uri` points at: a generic description of LNS deeds.
-pub const DEED_URI: &str = "https://nameswallet.app/lns-deed";
+/// What a deed's `uri` points at: one static image for every deed, with no name on it
+/// (a wallet draws the holder's own name on the same card, locally).
+pub const DEED_URI: &str = "https://nameswallet.app/lns/deed.png";
 /// A deed's `creators`: free text with no effect in the NFT program.
 pub const DEED_CREATORS: &str = "LNS registry";
 
