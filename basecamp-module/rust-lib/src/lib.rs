@@ -14030,6 +14030,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// An `RFP022/exit` context the wallet reads (names-safety-b: the exit layout is required).
+    fn exit_test_context() -> String {
+        registry::hex(&exit_recipient::tests::context(exit_recipient::tests::V4_CFG, [0; 20], 1, [0x3c; 20], 0))
+    }
+
     /// Review 2026-11-18: a names tool from 14ec746..7096020 (no `scheme` in its answer, no
     /// `module account-scheme`) is refused for an imported PRIVATE account, which the wallet file
     /// lists without an id; a phrase private account listed with its id still works with it.
@@ -14047,7 +14052,7 @@ mod tests {
             let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
             std::fs::write(wallet.join(cli::STORAGE_FILE), json!({ "key_chain": { "accounts": entries } }).to_string()).unwrap();
         };
-        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1));
+        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), exit_test_context(), "RFP022/ek".into(), 0, 1));
         for (label, entries, granted) in [
             ("old-tool-imported-private", json!([{ "ImportedPrivate": { "account": {}, "key_chain": {}, "kind": "Regular" } }, { "Public": { "account_id": PUBLIC } }]), false),
             ("old-tool-phrase-private", json!([{ "Private": { "account_id": PRIVATE } }, { "Public": { "account_id": PUBLIC } }]), true),
@@ -14091,7 +14096,7 @@ mod tests {
         }
         connect(&mut names, "lez_bridge", &account);
         as_caller(app("lez_bridge"));
-        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1));
+        let ask = |names: &mut Names| parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), exit_test_context(), "RFP022/ek".into(), 0, 1));
         let id = ask(&mut names)["value"]["request"]["request"].as_str().unwrap().to_owned();
         assert_eq!(approve(&mut names, &id, &account)["value"]["state"], "approved");
         as_caller(app("lez_bridge"));
@@ -14136,13 +14141,15 @@ mod tests {
         // A secret grant row as builds before pinning wrote it (no `v`, no `scheme`).
         names.store().private.secrets.insert("lez_bridge".into(), json!([{ "account": account, "scope": "RFP022/exit", "since": 1 }]));
         names.store().save();
+        // The exit's Ethereum address approved before (names-safety-b: an address not approved asks first).
+        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        exit_recipient::approve(&wallet, "lez_bridge", &account, &format!("0x{}", "3c".repeat(20))).unwrap();
         as_caller(app("lez_bridge"));
-        let got = parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), "abcd".into(), "RFP022/ek".into(), 0, 1))["value"].clone();
+        let got = parsed(&names.app_secret(account.clone(), "RFP022/exit".into(), exit_test_context(), "RFP022/ek".into(), 0, 1))["value"].clone();
         let sent: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("secret-in.json")).unwrap()).unwrap();
         assert_eq!(sent["scheme"], "both", "{sent}");
         assert_eq!(got["values"], json!(["ab".repeat(32)]), "{got}");
         assert_eq!((got["other_values"].clone(), got["other_imported"].as_bool()), (json!(["cd".repeat(32)]), Some(true)));
-        let wallet = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
         assert_eq!(provider_private::read_pin(&wallet, &account).as_deref(), Some("unknown"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
