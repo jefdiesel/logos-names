@@ -1623,14 +1623,16 @@ export function receiveCodeRefused(message) {
 /// module first: the app depends on it.
 export const BUNDLED_BRIDGE = [
     { name: "lez_bridge", file: "lez_bridge.lgx", label: "LEZ Bridge module",
-      sha256: "b59b444c8cb7cafb1e5abf28401875d2c5636f93c04b9eb7fc84b082f9214479",
-      root: "6eb533d490e013a6db24a0a537a3311557c868203a4e74b05b182cfb2233a522",
+      sha256: "0f321ece9faac2244bfdbecd7db5638b42ea1b9fbe9ed2c68eb5cf1fcfa356dd",
+      root: "7f534f09069a4eb9335d424ca5445e4e927250c425de0728141d0b1f16bd7bb0",
       // The commit the shipped bridge says it was built from (its config().build.commit): rfp-022
-      // fa75180 (branch next-1118b: imported accounts' bridge secrets from the recovery phrase and
-      // the module's account_notice; before it v7-in-wallet, wallet-next-module (the address book
-      // and the safe Remove calls) and v6-in-wallet: the relayed claim on a light-client bridge,
-      // private claim and private send-back through the wallet's private-call sheet; v5 the default).
-      build: "fa75180" }
+      // 27f7608 (branch next-1119b: imported-2, erc20-path, roadmap-2 and privacy-m5 merged on
+      // fa75180, then bridge-sdk's gates: the secret calls answer only names_ui, lez_bridge_ui and
+      // the host; the release prover is pinned in the module's data folder and a changed file
+      // answers `prover_changed`; a withdraw-to code's fee choice is the only one its send-back
+      // takes. Before it next-1118b fa75180 (imported accounts), v7-in-wallet, wallet-next-module
+      // and v6-in-wallet; v5 the default).
+      build: "27f7608" }
 ]
 
 /// The LEZ 0.4 names tool this app ships in qml/bundled/ (built without in-process proving, so
