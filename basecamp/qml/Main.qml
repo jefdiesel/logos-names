@@ -11133,7 +11133,7 @@ Item {
                             hint: "0.01"
                             onTextChanged: root.moveReset()
                         }
-                        Text { text: moveScreen.asset !== null ? moveScreen.asset.symbol : ""; color: root.dim; font.family: root.sans; font.pixelSize: root.px(17) }
+                        Text { textFormat: Text.PlainText; text: moveScreen.asset !== null ? moveScreen.asset.symbol : ""; color: root.dim; font.family: root.sans; font.pixelSize: root.px(17) }
                         Link {
                             visible: moveScreen.asset !== null && !moveScreen.sending
                             text: "All"
@@ -11162,7 +11162,7 @@ Item {
                         visible: root.moveCheck !== null && root.moveCheck.plan !== null
                         Layout.fillWidth: true
                         readonly property var plan: root.moveCheck !== null ? root.moveCheck.plan : null
-                        Text { text: "Check it, then approve"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                        Text { textFormat: Text.PlainText; text: "Check it, then approve"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
                         Fact { label: "Moves"; value: moveSheet.plan ? moveSheet.plan.amount_shown + " " + moveSheet.plan.symbol + (moveSheet.plan.bridge_label ? " (" + moveSheet.plan.bridge_label + ")" : "") : "" }
                         Fact { label: "Token"; code: true; value: moveSheet.plan ? Logic.keyShown(moveSheet.plan.definition) : ""; full: moveSheet.plan ? String(moveSheet.plan.definition) : "" }
                         Fact { label: "From"; value: moveSheet.plan ? Logic.idShort(moveSheet.plan.from) + ", which signs it" : "" }
@@ -11791,9 +11791,9 @@ Item {
                                 text: (modelData.ok ? "✓ " : "✗ ") + modelData.text
                             }
                         }
-                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.privacy ? root.claimCheck.privacy + (root.receivePrivateAble ? " For a private claim, make a private code on Receive from Ethereum." : " Private claims aren't in this wallet yet.") : "" }
-                        Hint { visible: root.claimCheck !== null && !!root.claimCheck.approval; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.approval ? root.claimCheck.approval : "" }
-                        Hint { textFormat: Text.PlainText; visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + Logic.clean(root.claimCheck.error.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimCheck !== null && !!root.claimCheck.privacy; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.privacy ? Logic.bridgeText(root.claimCheck.privacy) + (root.receivePrivateAble ? " For a private claim, make a private code on Receive from Ethereum." : " Private claims aren't in this wallet yet.") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimCheck !== null && !!root.claimCheck.approval; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.approval ? Logic.bridgeText(root.claimCheck.approval) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimCheck !== null && root.claimCheck.ok === false && !!root.claimCheck.error; font.pixelSize: root.px(15); text: root.claimCheck !== null && root.claimCheck.error ? Logic.claimErrorTitle(root.claimCheck.error.code) + ": " + Logic.bridgeText(root.claimCheck.error.message) : "" }
                         Repeater {
                             model: root.depositClaimJob !== null ? Logic.claimPhases(root.depositClaimJob) : []
                             Hint {
@@ -11804,10 +11804,10 @@ Item {
                                 text: (modelData.done ? "✓ " : modelData.now ? "… " : "· ") + modelData.word + ": " + Logic.clean(modelData.hint)
                             }
                         }
-                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? Logic.clean(root.depositClaimJob.note) : "" }
-                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.error; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) + ": " + Logic.clean(root.depositClaimJob.error.message) : "" }
-                        Hint { textFormat: Text.PlainText; visible: root.claimUncertain !== null; font.pixelSize: root.px(15); text: root.claimUncertain !== null ? Logic.clean(root.claimUncertain.message) : "" }
-                        Hint { textFormat: Text.PlainText; visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? Logic.clean(root.claimNeeds.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.note; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.note ? Logic.bridgeText(root.depositClaimJob.note) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.depositClaimJob !== null && !!root.depositClaimJob.error; font.pixelSize: root.px(15); text: root.depositClaimJob !== null && root.depositClaimJob.error ? Logic.claimErrorTitle(root.depositClaimJob.error.code) + ": " + Logic.bridgeText(root.depositClaimJob.error.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimUncertain !== null; font.pixelSize: root.px(15); text: root.claimUncertain !== null ? Logic.bridgeText(root.claimUncertain.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.claimNeeds !== null && !!root.claimNeeds.message; font.pixelSize: root.px(15); text: root.claimNeeds !== null ? Logic.bridgeText(root.claimNeeds.message) : "" }
                     }
 
                     Link {
@@ -11920,7 +11920,7 @@ Item {
                             Hint { required property var modelData; font.pixelSize: root.px(15); text: String(modelData) }
                         }
                         Hint { visible: root.pcRefused !== null && !!root.pcRefused.code; font.pixelSize: root.px(15); text: root.pcRefused !== null ? Logic.claimErrorTitle(root.pcRefused.code) + " (" + String(root.pcRefused.code || "") + ")" : "" }
-                        Hint { textFormat: Text.PlainText; visible: root.pcNeeds !== null && !!root.pcNeeds.message; font.pixelSize: root.px(15); text: root.pcNeeds !== null ? Logic.clean(root.pcNeeds.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.pcNeeds !== null && !!root.pcNeeds.message; font.pixelSize: root.px(15); text: root.pcNeeds !== null ? Logic.bridgeText(root.pcNeeds.message) : "" }
                         Fact { visible: root.pcJobNow !== null; label: "Job"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.id : ""; full: root.pcJobNow !== null ? root.pcJobNow.id : "" }
                         Fact { visible: root.pcJobNow !== null && root.pcJobNow.tx !== ""; label: "Transaction"; code: true; value: root.pcJobNow !== null ? root.pcJobNow.tx : ""; full: root.pcJobNow !== null ? root.pcJobNow.tx : "" }
                     }
@@ -12148,7 +12148,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 10
                         Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: Logic.receiveSecretLine(receiveScreen.result) }
-                        Hint { textFormat: Text.PlainText; visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? String(root.bridgeConfig.notices.not_private.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.bridgeConfig !== null && !!root.bridgeConfig.notices && !!root.bridgeConfig.notices.not_private; font.pixelSize: root.px(15); text: root.bridgeConfig !== null && root.bridgeConfig.notices && root.bridgeConfig.notices.not_private ? Logic.bridgeText(root.bridgeConfig.notices.not_private.text) : "" }
                         Hint { visible: !root.receivePrivateAble; font.pixelSize: root.px(15); text: "This LEZ Bridge can't make private codes yet: their claim needs a proof made on this computer, which a newer LEZ Bridge offers." }
                         Hint { visible: root.receivePrivateAble; font.pixelSize: root.px(15); text: "A private code's deposit is claimed by a proof your wallet makes on this computer (" + Logic.PRIVATE_PROOF_TIME + ", about 9.5 GB of memory). Nothing public then links the Sepolia deposit to your account; the amount, the token and the timing are public." }
                         Fact { visible: receiveScreen.result !== null; label: "Into"; code: true; value: receiveScreen.resultAccount; full: receiveScreen.resultAccount }
@@ -12171,11 +12171,11 @@ Item {
                         }
                         Fact { visible: receiveScreen.result !== null; label: "Code"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.request || "") : "" }
                         Fact { visible: receiveScreen.result !== null && !!receiveScreen.result.commitment; label: "Commitment"; code: true; value: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : ""; full: receiveScreen.result !== null ? String(receiveScreen.result.commitment || "") : "" }
-                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? String(receiveScreen.result.not_private.text || "") : "" }
-                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? String(receiveScreen.result.bridge_fee.error) : "" }
-                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? String(receiveScreen.result.compare.text || "") : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.not_private; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.not_private ? Logic.bridgeText(receiveScreen.result.not_private.text) : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.bridge_fee && !!receiveScreen.result.bridge_fee.error; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.bridge_fee && receiveScreen.result.bridge_fee.error ? Logic.bridgeText(receiveScreen.result.bridge_fee.error) : "" }
+                        Hint { textFormat: Text.PlainText; visible: receiveScreen.result !== null && !!receiveScreen.result.compare; font.pixelSize: root.px(15); text: receiveScreen.result !== null && receiveScreen.result.compare ? Logic.bridgeText(receiveScreen.result.compare.text) : "" }
                         Hint { visible: text !== ""; font.pixelSize: root.px(15); text: Logic.compareDigitsDetail(receiveScreen.result !== null ? receiveScreen.result.compare : null) }
-                        Hint { textFormat: Text.PlainText; visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? Logic.clean(root.receiveNeeds.message) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.receiveNeeds !== null && !!root.receiveNeeds.message; font.pixelSize: root.px(15); text: root.receiveNeeds !== null ? Logic.bridgeText(root.receiveNeeds.message) : "" }
                     }
                     Link { visible: receiveScreen.shows && (root.receiveFocus !== "" || receiveScreen.result !== null); text: "Make another code"; font.pixelSize: root.px(15); onPressed: root.startNewReceive() }
                 }
@@ -12340,7 +12340,7 @@ Item {
                                 model: root.sbCheck !== null ? Logic.addressHalves(String(root.sbCheck.recipient || "")) : []
                                 Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                             }
-                            Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
                             // A signed code (WALLET-ROADMAP item 9): checked by the LEZ Bridge module; the words stay required.
                             StatusLine { readonly property var sig: Logic.signatureLine(root.sbCheck); visible: sig.text !== ""; kind: sig.kind; text: sig.text }
                             // What the words are, and where to compare them.
@@ -12478,7 +12478,7 @@ Item {
                                 font.family: root.mono
                                 font.pixelSize: root.px(13)
                             }
-                            Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: root.sbWitness !== null && root.sbWitness.note ? String(root.sbWitness.note) : "" }
+                            Hint { textFormat: Text.PlainText; font.pixelSize: root.px(15); text: root.sbWitness !== null && root.sbWitness.note ? Logic.bridgeText(root.sbWitness.note, 600) : "" }
                         }
                         // The proof's Ethereum wrapper, by hand today: the seal the bridge team sends.
                         ColumnLayout {
@@ -12553,7 +12553,7 @@ Item {
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.exit_commitment; label: "Exit"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.burn_tx; label: "Burn"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.released_tx; label: "Released"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : "" }
-                        Hint { textFormat: Text.PlainText; visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + String(root.sbFocusStatus.text) : "" }
+                        Hint { textFormat: Text.PlainText; visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + Logic.bridgeText(root.sbFocusStatus.text) : "" }
                         TextEdit {
                             visible: root.sbRelease !== null && root.sbRelease.id === root.sbFocus
                             Layout.fillWidth: true

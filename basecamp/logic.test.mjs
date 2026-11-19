@@ -653,7 +653,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const bare = [...sheetQml.matchAll(/(^|[^\w.])Text \{/gm)].map((m) => ({ line: sheetQml.slice(0, m.index + m[0].indexOf("Text")).split("\n").length, block: blockOf(sheetQml, m.index) }))
     // The address step's words (names-roadmap-2 changes that line; its plain format is in the
     // marked patch for that branch, LP0001-JOB-B-ROADMAP2.patch).
-    .filter((t) => !/textFormat:/.test(t.block) && !t.block.includes("root.sbCheck.words_text")).map((t) => t.line);
+    .filter((t) => !/textFormat:/.test(t.block)).map((t) => t.line);
   check("Main.qml: every Text element names its format", bare, []);
   // Finding 1: Names keeps the address it ticked for each send-back it planned, and the exemption reads it.
   check("Main.qml: sbPlan records the ticked address", /plans\[id\] = ticked\s*sbOwnPlans = plans/.test(sheetQml), true);
@@ -1683,7 +1683,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 {
   const L = await import("./qml/logic.mjs");
   const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
-  check("bridge text: hidden characters gone, markup left as text", L.clean("<b>bad</b>\u202e\u200b ok"), "<b>bad</b> ok");
+  // names-safety-b (review finding 3): the cleaner drops < > & too; the hints are plain text as well.
+  check("bridge text: hidden characters and markup characters gone", L.clean("<b>bad</b>\u202e\u200b ok"), "bbad/b ok");
   const hints = qml.split("\n").filter((l) => /Hint \{/.test(l) && /\.message|\.error\b|\.note\b|\.notice|\.reason|claimLine/.test(l));
   check("bridge text: every hint showing a module's message, error, note, notice or reason is plain text", hints.filter((l) => !/textFormat: Text\.PlainText/.test(l)).length, 0);
   check("bridge text: no raw String(…message) left in a hint", hints.filter((l) => /String\([^)]*\.(message|note|notice|reason) \|\| ""\)/.test(l)).length, 0);
