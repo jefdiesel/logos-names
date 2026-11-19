@@ -1,6 +1,10 @@
 #!/bin/bash
 # lns-deeds rehearsal flows on the throwaway rc3 chain (127.0.0.1:3360, dev receipts).
-# flows.sh upgrade | mkc | start-regs | flows | after-regs
+# Phases as last run: upgrade2 | reg | flows | more | rereg. Run before them from an earlier copy
+# of this script (same helpers): `upgrade` (the first in-place update, to an intermediate image
+# c8514dd2… that minted on a RegisterWithDeed variant, since dropped), `mkc` (user C) and
+# `start-regs` (the old CLI's plain registration of lns-deeds-oldclient, block 455). The deployed
+# registry was made first with deploy-our04.sh (D=rehearsal, REHEARSAL=1) and the old image.
 set -u
 D=/Volumes/exos162/logos/fix-1119/lns-deeds; R=$D/rehearsal; L=$D/logs
 . $R/state.env; . $D/users/state.env; . $D/nftdeploy/state.env
