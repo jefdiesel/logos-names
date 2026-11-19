@@ -17,6 +17,8 @@ import QtQuick
 import QtQuick.Layouts
 import Logos.Theme
 import "logic.mjs" as Logic
+import "claimdelay.mjs" as ClaimDelay
+import "relayline.mjs" as RelayLine
 
 Item {
     id: root
@@ -3201,6 +3203,7 @@ Item {
         pcDetails = false
         pcExtras = []
         pcCheckFailed = false
+        pcDelayLoad(id)
         pcJob = privateClaimJobs[id] || null
         pcLooking = pcJob === null
         bridgeCall(Logic.PRIVATE_BRIDGE.jobs, [], function(value) {
@@ -3208,8 +3211,10 @@ Item {
             var j = Logic.privateJobFor(value, ["claim"], id)
             if (j !== null && pcDeposit === id && (j.state === "running" || pcJob !== null))
                 pcTakeJob(j)
+            if (pcDeposit === id) pcDelayTick()   // a claim time already due starts now, not 30 s later
         }, function(message, kind) {
             pcLooking = false
+            if (pcDeposit === id) pcDelayTick()
             console.log("names_ui: private claim: jobs:", kind, message)
         }, 60000)
     }
@@ -3357,12 +3362,13 @@ Item {
     /// The private wait on screen (a claim or a send-back's burn being approved, proved or sent):
     /// read every 30 s only while its screen is open and in front; a clock moves its elapsed time.
     readonly property bool privateWaitOnView: section === "wallet" && receiveFrontmost
-        && ((walletView === "pclaim" && (pcNeeds !== null || (pcJobNow !== null && pcJobNow.running)))
+        && ((walletView === "pclaim" && (pcNeeds !== null || (pcJobNow !== null && pcJobNow.running) || pcDelayWatchNow))
             || (walletView === "sendback" && sbJobView !== null && sbJobView.running))
     function privatePoll() {
-        if (walletView === "pclaim")
+        if (walletView === "pclaim") {
+            pcDelayTick()
             pcPoll()
-        else if (walletView === "sendback")
+        } else if (walletView === "sendback")
             sbJobPoll()
     }
     Timer {
@@ -3377,6 +3383,66 @@ Item {
         running: root.privateWaitOnView
         onTriggered: root.privateNow = Date.now()
     }
+    // ── The claim delay (claimdelay.mjs; the LEZ Bridge's receive_claim_plan): a private receive's
+    //    claim time, drawn once by the bridge and read back here, never drawn here. When it has come
+    //    while this page is open and in front, the claim starts as pressing Claim does (the person
+    //    still approves it); checked at most every 30 s, nothing in the background. ──
+    property var pcDelay: null              // receive_claim_plan's answer for pcDeposit; {failed: true} if it failed
+    property bool pcDelayAsking: false      // "Claim now instead" on its way
+    property string pcDelayError: ""
+    property bool pcDelayStarted: false     // the planned claim started by itself once on this opening
+    property bool pcDelayOverride: false    // "Claim now instead" on this opening (page-local; the bridge keeps its plan)
+    property double pcDelayClock: Date.now()
+    readonly property var pcDelayView: ClaimDelay.claimDelayState({ features: bridgeFeatures, featuresKnown: bridgeConfig !== null, row: pcRow, plan: pcDelay,
+        fallback: pcDeposit !== "" && receiveStatuses[pcDeposit] ? receiveStatuses[pcDeposit].claim_delay : null, override: pcDelayOverride, nowMs: pcDelayClock })
+    readonly property var pcDelayControls: ClaimDelay.claimDelayControls(pcDelayView)
+    // The bridge's features came after the page opened: read the plan now (the page waited meanwhile).
+    onBridgeFeaturesChanged: if (walletView === "pclaim" && pcDeposit !== "" && (pcDelay === null || pcDelay.nofeature)) pcDelayLoad(pcDeposit)
+    function pcDelayLoad(id) {
+        pcDelay = null
+        pcDelayAsking = false
+        pcDelayError = ""
+        pcDelayStarted = false
+        pcDelayOverride = false
+        pcDelayClock = Date.now()
+        if (bridgeConfig === null)
+            return   // not known yet: a private receive waits (Reading…) until the features come
+        if (!ClaimDelay.claimDelayCan(bridgeFeatures)) {
+            pcDelay = { failed: true, nofeature: true }
+            return
+        }
+        bridgeCall(ClaimDelay.CLAIM_DELAY_CALL, [id, "{}"], function(value) {
+            if (pcDeposit !== id) return
+            pcDelay = value || { failed: true }
+            pcDelayTick()   // already due with the page open and in front: starts now, not 30 s later
+        }, function(message, kind) {
+            if (pcDeposit === id) pcDelay = { failed: true }
+            console.log("names_ui: claim delay:", kind, message)
+        }, 30000)
+    }
+    /// "Claim now instead": lifts the wait for this opening and starts the claim as Claim does. Nothing
+    /// is written to the bridge: its plan stays until the claim is sent, so a refused or declined claim
+    /// waits again next time (review 4, finding 3). pcStart shows "Checking…" at once.
+    function pcDelayClaimNow() {
+        if (pcDeposit === "")
+            return
+        pcDelayError = ""
+        pcDelayOverride = true
+        pcStart()
+    }
+    function pcDelayTick() {
+        var now = Date.now()
+        pcDelayClock = now
+        var s = { on: pcDelayView.on, due: pcDelayView.due, open: walletView === "pclaim" && section === "wallet", front: receiveFrontmost, stage: pcStageNow,
+                  started: pcDelayStarted, able: privateClaimAble, error: pcError, nowMs: now }
+        if (ClaimDelay.claimDelayAutoStart(s)) {
+            pcDelayStarted = true
+            root.pcStart()
+        }
+    }
+    /// The private wait's 30 s timer below also runs while the claim time is watched (no timer of its own).
+    readonly property bool pcDelayWatchNow: ClaimDelay.claimDelayWatching({ on: pcDelayView.on, open: walletView === "pclaim" && section === "wallet", front: receiveFrontmost, stage: pcStageNow, started: pcDelayStarted })
+
     /// The wait's clock starts when it was approved here, else when it was proposed.
     function privateSince(job) {
         if (!job || !job.id)
@@ -11711,6 +11777,7 @@ Item {
                     // again" wait shows under it, it is the one button (no second primary).
                     Action { visible: root.claimStageNow === "ready"; label: root.claimAsking ? "Asking the wallet…" : "Continue"; strong: true; enabledNow: !root.claimAsking; onPressed: root.startClaim(false) }
                     Hint { visible: root.claimStageNow === "ready" && !(root.claimCheck !== null && !!root.claimCheck.privacy); font.pixelSize: root.px(15); text: "The bridge pays the fee." }
+                    Hint { visible: root.claimStageNow === "ready" && root.claimSource.indexOf("deposit:") === 0 && ClaimDelay.claimDelayCan(root.bridgeFeatures); font.pixelSize: root.px(15); text: ClaimDelay.CLAIM_DELAY_PUBLIC_LINE }
 
                     // The wallet's questions for this claim, answered here as the step itself.
                     Hint {
@@ -11737,6 +11804,7 @@ Item {
                         kind: "done"
                         text: (root.depositClaimJob !== null && root.depositClaimJob.block !== undefined ? "Claimed in block " + root.depositClaimJob.block : "Claimed")
                             + (root.depositClaimJob !== null && root.depositClaimJob.result && root.depositClaimJob.result.balance_text ? " · Now in the account: " + root.depositClaimJob.result.balance_text + " (wrapped)." : ".")
+                            + Logic.clean(RelayLine.relayUsedLine(root.depositClaimJob !== null ? root.depositClaimJob.relay : null))
                     }
                     // A refusal (the check) or a failure (the claim): one line in its kind, and its one
                     // next action (Logic.claimNext): Check again only where it can change anything.
@@ -11848,8 +11916,21 @@ Item {
                     // Step: claim it (the bridge's checks, then the proposal; the sheet comes next).
                     Hint { visible: pclaimScreen.before; color: root.ink; text: Logic.PRIVATE_CLAIM_NOTE }
                     Hint { visible: pclaimScreen.before && root.proofWarning !== ""; font.pixelSize: root.px(15); text: root.proofWarning }
+                    // The claim delay (claimdelay.mjs): the planned time, "Claim now instead" with its cost, and
+                    // that the claim starts only with this page open. Off: the page as before.
+                    StatusLine {
+                        visible: pclaimScreen.stage === "start" && root.pcDelayView.line !== "" && !(root.pcDelayView.due && root.pcDelayStarted)
+                        kind: root.pcDelayView.why === "reading" ? "working" : "waiting"
+                        text: root.pcDelayView.line
+                        actionLabel: root.pcDelayControls.lineAction === "retry" ? ClaimDelay.CLAIM_DELAY_RETRY_LABEL : root.pcDelayControls.lineAction === "now" ? ClaimDelay.CLAIM_DELAY_NOW_LABEL : ""
+                        onAct: if (root.pcDelayControls.lineAction === "retry") root.pcDelayLoad(root.pcDeposit); else root.pcDelayClaimNow()
+                    }
+                    Link { visible: pclaimScreen.stage === "start" && root.pcDelayControls.nowLink; text: ClaimDelay.CLAIM_DELAY_NOW_LABEL; color: root.dim; font.pixelSize: root.px(15); onPressed: root.pcDelayClaimNow() }
+                    Hint { visible: pclaimScreen.stage === "start" && root.pcDelayControls.cost; font.pixelSize: root.px(15); text: ClaimDelay.CLAIM_DELAY_NOW_COST }
+                    Hint { visible: pclaimScreen.stage === "start" && root.pcDelayControls.note; font.pixelSize: root.px(15); textFormat: Text.PlainText; text: ClaimDelay.CLAIM_DELAY_PAGE_NOTE }
+                    StatusLine { visible: root.pcDelayError !== ""; kind: Logic.noticeKind(root.pcDelayError, true); text: root.pcDelayError; actionLabel: root.pcDelayAsking ? "" : "Try again"; onAct: root.pcDelayClaimNow() }
                     Action {
-                        visible: pclaimScreen.stage === "start" || pclaimScreen.stage === "checking" || pclaimScreen.stage === "asking"
+                        visible: (pclaimScreen.stage === "start" || pclaimScreen.stage === "checking" || pclaimScreen.stage === "asking") && !(pclaimScreen.stage === "start" && root.pcDelayView.hold)
                         label: pclaimScreen.stage === "checking" ? "Checking…" : pclaimScreen.stage === "asking" ? "Asking your wallet…" : "Claim privately"
                         strong: true
                         enabledNow: pclaimScreen.stage === "start" && root.privateClaimAble && root.pcError === ""
@@ -11913,6 +11994,7 @@ Item {
                         spacing: 10
                         Hint { font.pixelSize: root.px(15); text: "LEZ 0.4 · bridge test network. The LEZ Bridge builds the claim and asks your wallet; your wallet simulates it, shows you what it does, then proves it on this computer and sends it. The bridge never sees your keys and never proves." }
                         Fact { visible: pclaimScreen.row !== null; label: "Into"; code: true; value: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : ""; full: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : "" }
+                        Hint { visible: root.pcDelayView.detail !== ""; font.pixelSize: root.px(15); text: root.pcDelayView.detail }
                         Fact { visible: root.pcPlan !== null && root.pcPlan.sponsored !== undefined && root.pcPlan.sponsored !== null; label: "Fee"; value: root.pcPlan !== null && root.pcPlan.sponsored === true ? "Sponsored by the bridge, paid inside the proof" : "Paid inside the proof from the account" }
                         Hint { textFormat: Text.PlainText; visible: root.pcPlan !== null && !!root.pcPlan.privacy && !!root.pcPlan.privacy.headline; font.pixelSize: root.px(15); text: root.pcPlan !== null && root.pcPlan.privacy ? String(root.pcPlan.privacy.headline || "") : "" }
                         Repeater {
@@ -12451,6 +12533,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 8
                             Hint { color: root.ink; text: Logic.SETTLE_CONSENT }
+                            Hint { font.pixelSize: root.px(15); text: Logic.SEND_BACK_FINISH_YOURSELF }
                             RowLayout {
                                 spacing: 10
                                 Action { label: root.sbAsking ? "Handing it over…" : "Continue"; strong: true; enabledNow: !root.sbAsking; onPressed: root.sbSettle(true) }
@@ -12501,6 +12584,7 @@ Item {
                             NumberLine { text: "1. " + Logic.SEND_BACK_RELEASE_STEPS[0] }
                             Action { label: root.sbLinkCopied ? "Copied." : root.sbAsking ? "Getting the link…" : "Copy the link"; strong: sendBackScreen.p.action !== "settle"; enabledNow: !root.sbAsking; onPressed: root.sbCopyRelease() }
                             NumberLine { text: "2. " + Logic.SEND_BACK_RELEASE_STEPS[1] }
+                            Hint { font.pixelSize: root.px(15); text: Logic.SEND_BACK_FINISH_YOURSELF }
                         }
                         StatusLine { visible: sendBackScreen.st !== null && !!sendBackScreen.st.note && sendBackScreen.p.detail !== String(sendBackScreen.st.note); kind: Logic.isWaitMessage(sendBackScreen.st !== null ? sendBackScreen.st.note : "") ? "waiting" : ""; text: sendBackScreen.st !== null && sendBackScreen.st.note ? root.sentence(String(sendBackScreen.st.note)) : "" }
                         SendBackCheckLine { visible: sendBackScreen.p.stage !== "released" }
@@ -12551,6 +12635,7 @@ Item {
                         Hint { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.privacy; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.privacy ? String(root.sbFocusStatus.privacy) : "" }
                         Fact { visible: root.sbFocusRow !== null; label: "To"; code: true; value: root.sbFocusRow !== null ? root.sbFocusRow.recipient : ""; full: root.sbFocusRow !== null ? root.sbFocusRow.recipient : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.exit_commitment; label: "Exit"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.exit_commitment || "") : "" }
+                        Fact { visible: root.sbFocusStatus !== null && RelayLine.relayUsed(root.sbFocusStatus.relay) !== ""; label: "Relay"; value: root.sbFocusStatus !== null ? Logic.clean(RelayLine.relayUsed(root.sbFocusStatus.relay)) : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.burn_tx; label: "Burn"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.burn_tx || "") : "" }
                         Fact { visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.released_tx; label: "Released"; code: true; value: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : ""; full: root.sbFocusStatus !== null ? String(root.sbFocusStatus.released_tx || "") : "" }
                         Hint { textFormat: Text.PlainText; visible: root.sbFocusStatus !== null && !!root.sbFocusStatus.text; font.pixelSize: root.px(15); text: root.sbFocusStatus !== null && root.sbFocusStatus.text ? "The bridge says: " + Logic.bridgeText(root.sbFocusStatus.text) : "" }

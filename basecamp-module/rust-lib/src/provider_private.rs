@@ -296,6 +296,9 @@ pub fn cli_input(request: &Value, expect_digest: Option<&str>, token_programs: &
         "openings": request["openings"],
         "fee_payer": request["fee_payer"],
         "expect_digest": expect_digest,
+        // The "at most" the person approved on the sheet: the CLI refuses to prove once the
+        // chain's fee is above it (rfp-022 review 4, finding 1). Null when planning.
+        "approved_at_most": if expect_digest.is_some() { request["report"]["fee"]["at_most"].clone() } else { Value::Null },
     })
 }
 
@@ -426,7 +429,7 @@ pub fn review(request: &Value, report: &Value, labels: &Map<String, Value>, toke
     match (about, at_most) {
         (Some(about), Some(at_most)) => {
             let from = if payer == account { "your account".to_owned() } else { short_account(payer) };
-            lines.push(format!("Fee: about {} LEZ, at most {}, paid inside the proof from {from}; what isn't used comes back to it.", grouped(about), grouped(at_most)));
+            lines.push(format!("Fee: about {} LEZ, at most {}, paid inside the proof from {from}; what isn't used comes back to it. If the chain's fee is above that when the proof starts, nothing is sent and you are asked again.", grouped(about), grouped(at_most)));
             if let Some(cap) = declared.max_fee {
                 if at_most > cap {
                     refusals.push(format!("The fee can reach {} LEZ, more than the {} the app declared.", grouped(at_most), grouped(cap)));
@@ -1001,6 +1004,11 @@ mod tests {
         assert_eq!(input["token_programs"][0], TOKEN);
         assert_eq!(input["accounts"], made["mentions"]);
         assert_eq!(input["expect_digest"], "cd");
+        // Review 4, finding 1: the approved "at most" goes back to the CLI on send, never on plan.
+        let mut reported = made.clone();
+        reported["report"] = json!({ "fee": { "about": "5723160", "at_most": "9300135" } });
+        assert_eq!(cli_input(&reported, Some("cd"), &[])["approved_at_most"], "9300135");
+        assert!(cli_input(&reported, None, &[])["approved_at_most"].is_null());
     }
 
     #[test]
@@ -1050,7 +1058,7 @@ mod tests {
                 "Private/2if1EJ…6HUC receives 100 (100,000,000 base units) dUSDC (FBqNAw…LQZJ).",
                 "Private/2if1EJ…6HUC receives 20,000,000 LEZ.",
                 "Nothing leaves your account except the fee.",
-                "Fee: about 5,723,160 LEZ, at most 9,300,135, paid inside the proof from your account; what isn't used comes back to it."
+                "Fee: about 5,723,160 LEZ, at most 9,300,135, paid inside the proof from your account; what isn't used comes back to it. If the chain's fee is above that when the proof starts, nothing is sent and you are asked again."
             ])
         );
         assert_eq!(
@@ -1105,7 +1113,7 @@ mod tests {
                 "Private/2if1EJ…6HUC receives 20,000,000 LEZ.",
                 "Private/2if1EJ…6HUC receives 100 (100,000,000 base units) dUSDC (FBqNAw…LQZJ).",
                 "Nothing leaves your account except the fee.",
-                "Fee: about 5,723,160 LEZ, at most 9,300,135, paid inside the proof from your account; what isn't used comes back to it."
+                "Fee: about 5,723,160 LEZ, at most 9,300,135, paid inside the proof from your account; what isn't used comes back to it. If the chain's fee is above that when the proof starts, nothing is sent and you are asked again."
             ])
         );
         assert_eq!(

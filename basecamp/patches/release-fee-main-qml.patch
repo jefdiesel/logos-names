@@ -1,0 +1,84 @@
+--- a/basecamp/qml/Main.qml
++++ b/basecamp/qml/Main.qml
+@@ -19,6 +19,7 @@
+ import "logic.mjs" as Logic
+ import "claimdelay.mjs" as ClaimDelay
+ import "relayline.mjs" as RelayLine
++import "releasefee.mjs" as ReleaseFee   // PATCH privacy-m5 release fee
+ 
+ Item {
+     id: root
+@@ -1777,6 +1778,26 @@
+     property string sbAccount: ""          // the public account the tokens leave
+     property var sbAsset: null             // its card asset row (bridgeNetRows)
+     property int sbDenom: -1               // the denomination chosen
++    // PATCH privacy-m5 release fee (rfp-022 docs/privacy-m5/release-fee.md): the most a release relayer
++    // may keep, fixed inside the burn. Default 0: the person finishes it, or the settlement service does.
++    property var sbFeeMenu: null           // send_back_fee_menu's answer for the chosen amount; {failed: true} if it failed
++    property int sbFeeChoice: 0
++    readonly property var sbFeeSheet: ReleaseFee.releaseFeeSheet(bridgeFeatures, sbFeeMenu, sbFeeChoice)
++    onSbDenomChanged: sbFeeLoad()
++    function sbFeeLoad() {
++        sbFeeMenu = null
++        sbFeeChoice = 0
++        if (sbDenom < 0 || sbAsset === null || !ReleaseFee.releaseFeeCan(bridgeFeatures))
++            return
++        var denom = sbDenom
++        bridgeCall(ReleaseFee.RELEASE_FEE_MENU_CALL, [Logic.sendBackSymbol(sbAsset.symbol), String(denom)], function(value) {
++            if (sbDenom === denom) sbFeeMenu = value || { failed: true }
++        }, function(message, kind) {
++            if (sbDenom === denom) sbFeeMenu = { failed: true }
++            console.log("names_ui: send back: send_back_fee_menu:", kind, message)
++        }, 60000)
++    }
++    // END PATCH
+     property var sbLink: null              // send_back_link()
+     property bool sbLinkCopied: false
+     property string sbCodeInput: ""
+@@ -2101,11 +2122,18 @@
+         // Only the address in the box now, read back and ticked as the person's.
+         if (!sbTicked || sbCheck.key !== Logic.addressBoxKey(sbCodeInput)) {
+             sbError = "Check the address in the box and tick \u201c" + Logic.ADDRESS_TICK + "\u201d first. Nothing was done."
++            return
++        }
++        // PATCH privacy-m5 release fee: the chosen fee goes into the plan (send_back_plan_with), or the old call.
++        var planCall = ReleaseFee.releaseFeePlanCall(bridgeFeatures, [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], sbFeeChoice)
++        if (planCall.error) {
++            sbError = planCall.error
+             return
+         }
++        // END PATCH
+         sbAsking = true
+         sbError = ""
+-        bridgeCall(Logic.PRIVATE_BRIDGE.sendBackPlan, [Logic.sendBackSymbol(sbAsset.symbol), String(sbDenom), sbAccount, sbCheck.code], function(value) {
++        bridgeCall(planCall.method, planCall.args, function(value) {
+             sbAsking = false
+             if (value && value.needs) {
+                 sbNeedsReply(value, "plan")
+@@ -11801,6 +11829,26 @@
+                             Link { visible: root.sbAmounts.length > 1 && !sbAddressStep.a.show; text: "Change"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbDenom = -1 }
+                         }
+                         Hint { visible: root.sbFromPrivate; font.pixelSize: root.px(15); text: "From your private account: your wallet proves the burn on this computer (" + Logic.PRIVATE_PROOF_TIME + ") and checks the account holds it." }
++                        // PATCH privacy-m5 release fee: the choices from the vault's menu, no relay fee first.
++                        ColumnLayout {
++                            visible: root.sbFeeSheet.state !== "off"
++                            Layout.fillWidth: true
++                            spacing: 6
++                            Hint { color: root.ink; text: ReleaseFee.RELEASE_FEE_HEADING }
++                            StatusLine { visible: root.sbFeeSheet.note !== ""; kind: root.sbFeeSheet.state === "reading" ? "working" : ""; text: root.sbFeeSheet.note }
++                            Flow {
++                                Layout.fillWidth: true
++                                spacing: 8
++                                Repeater {
++                                    model: root.sbFeeSheet.rows
++                                    Choice { required property var modelData; label: modelData.title; chosen: modelData.selected; onPressed: root.sbFeeChoice = modelData.choice }
++                                }
++                            }
++                            Hint { visible: root.sbFeeSheet.state === "ready"; font.pixelSize: root.px(15); text: (root.sbFeeSheet.rows.filter(function(r) { return r.selected })[0] || { text: "" }).text }
++                            Hint { visible: root.sbFeeSheet.who !== ""; font.pixelSize: root.px(15); text: root.sbFeeSheet.who }
++                            Hint { visible: root.sbFeeSheet.privacy !== ""; font.pixelSize: root.px(15); text: root.sbFeeSheet.privacy }
++                        }
++                        // END PATCH
+                         // The box.
+                         Hint { color: root.ink; text: Logic.bridgeCan(root.bridgeFeatures, "send_back_address") ? Logic.ADDRESS_BOX_HINT : Logic.ADDRESS_BOX_HINT_CODE }
+                         Field { id: sbCodeField; Layout.fillWidth: true; size: 15; code: true; hint: Logic.bridgeCan(root.bridgeFeatures, "send_back_address") ? "logoswd1… or 0x…" : "logoswd1…"; onTextChanged: root.sbBoxChanged(text); onAccepted: root.sbCheckCode() }

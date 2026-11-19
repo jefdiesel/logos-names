@@ -1726,6 +1726,18 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("import: the warning and the recovery-phrase line are fixed words", [L.IMPORT_WARNING.indexOf("Anyone who sees it") > 0, L.IMPORT_COVER_LINE.indexOf("recovery phrase won't bring") > 0], [true, true]);
 }
 
+{
+  const { SEND_BACK_FINISH_YOURSELF } = await import("./qml/logic.mjs");
+  // Finishing a send-back needs no service of ours; sending it yourself links your address (rfp-022 release relayer).
+  check("finish yourself: no service needed, anyone may send", [/without the bridge's service/.test(SEND_BACK_FINISH_YOURSELF), /anyone can send the release to the vault/.test(SEND_BACK_FINISH_YOURSELF)], [true, true]);
+  check("finish yourself: the cost in words", /links that address to this send-back; a relayer avoids that\.$/.test(SEND_BACK_FINISH_YOURSELF), true);
+  check("finish yourself: plain words", /official|lookup/i.test(SEND_BACK_FINISH_YOURSELF), false);
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("finish yourself: under the release steps and beside the consent", [/SEND_BACK_RELEASE_STEPS\[1\] }\n\s*Hint {[^\n]*SEND_BACK_FINISH_YOURSELF/.test(qml), /SETTLE_CONSENT }\n\s*Hint {[^\n]*SEND_BACK_FINISH_YOURSELF/.test(qml)], [true, true]);
+  // Merge wallet-1119: the relay's label is the bridge module's text, so it goes through Logic.clean (names-safety-b).
+  check("relay label: cleaned where it is drawn", [/Logic\.clean\(RelayLine\.relayUsedLine\(/.test(qml), /value: root\.sbFocusStatus !== null \? Logic\.clean\(RelayLine\.relayUsed\(root\.sbFocusStatus\.relay\)\)/.test(qml)], [true, true]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 
