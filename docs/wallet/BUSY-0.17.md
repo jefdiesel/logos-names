@@ -24,6 +24,20 @@ the app asks again: the name lookups (`read`, the board's, `keep`) now do too. A
 wallet (a send logged, a job ended, an account made or renamed) drops the kept reads of it. `faucet_claim` answers `code: "pending"` while the faucet is asked, and
 the app asks again for its answer (never a second ask of the faucet).
 
+Since `names-stall-3` (2026-11-19), also as Names opens on a Basecamp that has the Logos
+Blockchain node loaded: the node reads the app polls (`chain_status`, `chain_accounts`,
+`chain_stake`, `chain_claim` without sending, `chain_tx`, `activity`'s settling,
+`pending_inscriptions`' accounts) are asked without waiting (`node::polled`, an asynchronous
+ask from the call's thread, the answer kept 5 s, shown 30 s at most while a newer one is asked),
+and answer busy before the node's first answer. The module keeps one client per module for the
+life of the host (`peer.rs`, `client`), so the node's object is acquired once, and its first ask
+may wait 1 s until one was sent without acquiring. The CLI's `--version` (asked on LEZ 0.4 before
+any CLI run) and `file_sha256` (the shipped bridge, ~10 MB) are read on a thread of their own:
+the polls answer busy meanwhile, any other call says so in words (busy promises nothing was
+done). A burst of calls waits 400 ms in all for first reads (`served::WAIT_BUDGET`), not 600 ms
+each, and a read already under way is never waited for again. A send, a claim, an account made
+or renamed and an inscription still wait for the node, and drop what the polls kept.
+
 Since `names-hang-fix` (2026-11-18), a module that isn't loaded is never waited for, so it can't
 make the wallet busy (`basecamp-module/rust-lib/src/peer.rs`). The module finds out from its
 endpoint, which takes microseconds and needs no client. A chain method then answers at once with

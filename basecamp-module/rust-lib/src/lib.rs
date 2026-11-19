@@ -1834,6 +1834,7 @@ fn note_balances(chain: &str, scope: &str, balances: &[(String, u128)]) {
 /// `reply` with a machine-readable `code` beside an error, for the methods that say one.
 fn reply_coded(outcome: Result<Value, (String, &str)>) -> String {
     match outcome {
+        Err((error, code)) if is_busy(&error) => json!({ "success": false, "value": null, "error": busy_words(&error), "code": code }),
         Ok(value) => json!({ "success": true, "value": value, "error": null, "code": null }),
         Err((error, code)) => json!({ "success": false, "value": null, "error": error, "code": code }),
     }
@@ -1843,18 +1844,56 @@ fn reply_coded(outcome: Result<Value, (String, &str)>) -> String {
 /// What an error carries in front of a served read's busy envelope (`busy_or_reply`).
 const BUSY_MARK: &str = "\u{0}busy\u{0}";
 
-/// `reply`, but an error that is a served read's busy envelope (`BUSY_MARK`) is answered as that
-/// envelope: not taken, ask again.
+/// `why` as the busy envelope it carries, when it is one (`BUSY_MARK`).
+fn busy_of(why: &str) -> Option<String> {
+    why.strip_prefix(BUSY_MARK).map(str::to_owned)
+}
+
+/// Whether `why` is a read still under way (`BUSY_MARK`), not a failure.
+fn is_busy(why: &str) -> bool {
+    why.starts_with(BUSY_MARK)
+}
+
+/// `read` kept as it is while it is still under way (`Ok(read)`, so the reads after it are asked
+/// at the same time); a real failure is `Err`, and nothing after it is asked.
+fn still_or(read: Result<Value, String>) -> Result<Result<Value, String>, String> {
+    match read {
+        Err(why) if !is_busy(&why) => Err(why),
+        read => Ok(read),
+    }
+}
+
+/// What a check that can't wait says when the names CLI's version is still being read.
+const STILL_STARTING: &str = "the wallet was still reading which names CLI it runs (it had just started), so this wasn't checked; ask again in a moment";
+
+/// The busy mark with what is still being read (`served::still_reading`'s envelope).
+fn still_reading(what: &str) -> String {
+    BUSY_MARK.to_owned() + &served::still_reading(what)
+}
+
+/// `reply`, but an error that is a read still under way (`BUSY_MARK`) is answered as its busy
+/// envelope: not taken, ask again. Only for reads the app polls (nothing is changed by them);
+/// any other call answers it in words (`reply`), since busy promises that nothing was done.
 fn busy_or_reply(outcome: Result<Value, String>) -> String {
     match outcome {
-        Err(why) if why.starts_with(BUSY_MARK) => why[BUSY_MARK.len()..].to_owned(),
+        Err(why) if is_busy(&why) => busy_of(&why).unwrap_or_default(),
         other => reply(other),
     }
+}
+
+/// The words of a busy mark's envelope ("still reading …; this updates in a moment").
+fn busy_words(why: &str) -> String {
+    let envelope: Value = busy_of(why).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or(Value::Null);
+    envelope["error"].as_str().unwrap_or("the wallet is still reading; this updates in a moment").to_owned()
 }
 
 fn reply(outcome: Result<Value, String>) -> String {
     match outcome {
         Ok(value) => json!({ "success": true, "value": value, "error": null }),
+        // A read still under way somewhere below (the CLI's version, the node's answer) in a call
+        // that isn't a poll: said in words, never the mark (and never busy: that promises
+        // nothing was done).
+        Err(error) if is_busy(&error) => json!({ "success": false, "value": null, "error": busy_words(&error) }),
         // A module names needs isn't loaded: typed, so an app can tell it from any other
         // failure without reading the words (`code`, and which module).
         Err(error) if error.contains(node::NOT_LOADED) => {
@@ -2375,7 +2414,8 @@ impl Names {
     }
 
     /// What the CLI at `program` says its version is (`names --version`), asked once per
-    /// build of it.
+    /// build of it. It is asked on a thread of its own (a CLI that hangs takes up to 20 s): until
+    /// it answers, this is a read still under way (`BUSY_MARK`), which a call answers as busy.
     fn cli_line(&self, program: &std::path::Path) -> Result<String, String> {
         let modified = std::fs::metadata(program).and_then(|meta| meta.modified()).map_err(|_| format!("there is no program at {}", program.display()))?;
         if let Some((when, line)) = self.cli_lines.lock().ok().and_then(|lines| lines.get(program).cloned()) {
@@ -2383,7 +2423,16 @@ impl Names {
                 return Ok(line);
             }
         }
-        let line = cli::version(program)?;
+        let path = program.to_path_buf();
+        let key = format!("cli-version:{}:{modified:?}", program.display());
+        // A version that couldn't be read is asked again after a minute (a new build of the
+        // file is another key, asked at once).
+        let snap = self.served.read(&key, std::time::Duration::from_secs(60), served::Lane::Free, move || cli::version(&path).map(Value::from));
+        let line = match snap.value_or("the names CLI's version") {
+            Ok(line) => line.as_str().unwrap_or_default().to_owned(),
+            Err(Ok(busy)) => return Err(BUSY_MARK.to_owned() + &busy),
+            Err(Err(why)) => return Err(why),
+        };
         if let Ok(mut lines) = self.cli_lines.lock() {
             lines.insert(program.to_path_buf(), (modified, line.clone()));
         }
@@ -3105,10 +3154,13 @@ impl Names {
             return Ok(json!({ "installed": false, "path": ours, "version": null, "prover": false, "job": jobs.state(&id)? }));
         }
         if let Some(set) = self.cli.clone() {
-            if let Ok(line) = self.cli_line(std::path::Path::new(&set)) {
-                if line.contains(LEZ04_CLI_MARK) {
+            match self.cli_line(std::path::Path::new(&set)) {
+                Ok(line) if line.contains(LEZ04_CLI_MARK) => {
                     return Ok(json!({ "installed": true, "path": set, "version": line, "prover": false, "job": null }));
                 }
+                // Its version is still being read: busy (nothing done), never a download meanwhile.
+                Err(why) if is_busy(&why) => return Err(why),
+                _ => {}
             }
         }
         if let Some(line) = self.adopt_lez04_tool(&ours) {
@@ -4579,7 +4631,7 @@ impl NamesModule for Names {
         })();
         let (setup, registry) = match ready {
             Ok(ready) => ready,
-            Err(why) => return reply(Err(why)),
+            Err(why) => return busy_or_reply(Err(why)),
         };
         // The CLI lists the accounts (seconds when it catches the wallet up), then each is read
         // over the network: on a thread of its own, the call answering with the last read.
@@ -4928,7 +4980,19 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply(lgx_sha256(&path).map(Value::from))
+        // Hashed on a thread of its own (the shipped bridge is about 10 MB, and the app asks as
+        // Names opens), kept per file as it is (its length and time); busy until it is done.
+        let checked = std::path::Path::new(&path);
+        let Some((len, modified)) = std::fs::metadata(checked).ok().filter(|meta| meta.is_file()).map(|meta| (meta.len(), meta.modified().ok())) else {
+            return reply(lgx_sha256(&path).map(Value::from));
+        };
+        let key = format!("sha256:{path}:{len}:{modified:?}");
+        let snap = self.served.read(&key, std::time::Duration::from_secs(3600), served::Lane::Own("hash".to_owned()), move || lgx_sha256(&path).map(Value::from));
+        match snap.value_or("the package file's hash") {
+            Ok(sha) => reply(Ok(sha.clone())),
+            Err(Ok(busy)) => busy,
+            Err(Err(why)) => reply(Err(why)),
+        }
     }
 
     fn faucet_info(&mut self) -> String {
@@ -5181,7 +5245,7 @@ impl NamesModule for Names {
         }
         let setup = match self.names_setup() {
             Ok(setup) => setup,
-            Err(why) => return reply(Err(why)),
+            Err(why) => return busy_or_reply(Err(why)),
         };
         // Names this wallet registered through the module (a public registration on LEZ 0.4)
         // and the CLI doesn't list yet: the CLI is asked to add each (it checks the chain).
@@ -5334,7 +5398,7 @@ impl NamesModule for Names {
         }
         match self.lez_read() {
             Ok(snap) => served::reply_marked_of(&snap, "Your balance"),
-            Err(why) => reply(Err(why)),
+            Err(why) => busy_or_reply(Err(why)),
         }
     }
 
@@ -5658,7 +5722,8 @@ impl NamesModule for Names {
             let dir = config_dir().ok_or("no folder for the Wallet's history")?;
             // What settled from the chain and the jobs, then the last LEZ balance read's History work
             // (`lez_read`: the read and the receipts' asks on a thread of their own, never here).
-            self.settle_entries(&dir);
+            // Its node reads (a send still on its way, a cut-off deposit) never wait: a poll.
+            node::polled(|| self.settle_entries(&dir));
             if self.lez_read().is_err() {
                 self.receipts_read();
             }
@@ -5750,7 +5815,7 @@ impl NamesModule for Names {
                 return reply(Err(refused));
             }
         }
-        reply((|| {
+        busy_or_reply((|| {
             let setup = self.names_setup()?;
             if following && self.follows.is_empty() {
                 return Ok(json!({ "posts": [], "updating": false, "error": null }));
@@ -5839,7 +5904,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        busy_or_reply((|| {
             let setup = self.names_setup()?;
             let saved: Value = std::fs::read_to_string(setup.wallet.join("names.json"))
                 .ok()
@@ -6414,7 +6479,7 @@ impl NamesModule for Names {
         // named beside the list (balance-accounts-zeroed-with-success-on-partial-failure).
         let setup = match self.cli_setup() {
             Ok(setup) => setup,
-            Err(why) => return reply(Err(why)),
+            Err(why) => return busy_or_reply(Err(why)),
         };
         // The CLI lists them (seconds when it catches the wallet up): on a thread of its own.
         let key = self.served_key("cli_accounts", &format!("{}|{}", setup.wallet.display(), setup.sequencer));
@@ -6472,7 +6537,7 @@ impl NamesModule for Names {
         }
         let setup = match self.cli_setup() {
             Ok(setup) => setup,
-            Err(why) => return reply(Err(why)),
+            Err(why) => return busy_or_reply(Err(why)),
         };
         // The CLI reads the chain's fee state: on a thread of its own, kept for half a minute.
         let key = self.served_key("cli_fee", &format!("{}|{}", setup.wallet.display(), setup.sequencer));
@@ -6486,32 +6551,44 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
-            let info = node::call("get_cryptarchia_info", json!([]), node::QUICK)?;
-            let time = node::call("get_time_info", json!([]), node::QUICK)?;
-            Ok(chain::status(&info, &time))
-        })())
+        // A poll (`loadChain`, every 5 s): the node is asked without waiting (`node::polled`).
+        busy_or_reply(node::polled(|| {
+            // Asked together while the first is still on its way; a node that says no stops here.
+            let info = still_or(node::call("get_cryptarchia_info", json!([]), node::QUICK))?;
+            let time = node::call("get_time_info", json!([]), node::QUICK);
+            Ok(chain::status(&info?, &time?))
+        }))
     }
 
     fn chain_accounts(&mut self) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        // A poll (`loadChain`): the node is asked without waiting (`node::polled`); every key's
+        // balance is asked at once, and the list waits (busy) until all have answered.
+        busy_or_reply(node::polled(|| {
             let keys = node::call("wallet_get_known_addresses", json!([]), node::QUICK)?;
             let keys: Vec<String> = keys.as_array().map(|k| k.iter().filter_map(|k| k.as_str().and_then(chain::parse_key)).collect()).unwrap_or_default();
             let known = keys.clone();
+            let mut reading = None;
             // The node lists some keys its wallet can't spend from; those are left out.
-            Ok(Value::from(
-                keys.into_iter()
-                    .take(MAX_WALLET_ACCOUNTS)
-                    .filter_map(|key| match node::call("wallet_get_balance", json!([key]), node::QUICK) {
-                        Ok(balance) => Some(json!({ "key": key, "balance": chain::balance_of(&balance).to_string() })),
-                        Err(error) if chain::not_held(&error) => None,
-                        Err(_) => Some(json!({ "key": key, "balance": null })),
-                    })
-                    .collect::<Vec<_>>(),
-            ))
+            let rows: Vec<Value> = keys
+                .into_iter()
+                .take(MAX_WALLET_ACCOUNTS)
+                .filter_map(|key| match node::call("wallet_get_balance", json!([key]), node::QUICK) {
+                    Ok(balance) => Some(json!({ "key": key, "balance": chain::balance_of(&balance).to_string() })),
+                    Err(error) if chain::not_held(&error) => None,
+                    Err(error) if is_busy(&error) => {
+                        reading = Some(error);
+                        None
+                    }
+                    Err(_) => Some(json!({ "key": key, "balance": null })),
+                })
+                .collect();
+            if let Some(busy) = reading {
+                return Err(busy);
+            }
+            Ok(Value::from(rows))
             // Labels, and the accounts made here (no notes yet, or not used before the node restarts).
             .map(|rows| chain_keys::annotate(rows, &known, &chain_keys::records(&known)))
             .inspect(|rows| {
@@ -6523,19 +6600,20 @@ impl NamesModule for Names {
                     .collect();
                 note_balances("logos", "", &held);
             })
-        })())
+        }))
     }
 
     fn chain_stake(&mut self) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
-            let aged = node::call("wallet_get_leader_aged_notes", json!([""]), node::QUICK)?;
-            let vouchers = node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK)?;
-            let time = node::call("get_time_info", json!([]), node::QUICK)?;
-            Ok(chain::stake(&aged, &vouchers, &time))
-        })())
+        // A poll (`loadChain`): the node is asked without waiting, all three at once.
+        busy_or_reply(node::polled(|| {
+            let aged = still_or(node::call("wallet_get_leader_aged_notes", json!([""]), node::QUICK))?;
+            let vouchers = still_or(node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK))?;
+            let time = node::call("get_time_info", json!([]), node::QUICK);
+            Ok(chain::stake(&aged?, &vouchers?, &time?))
+        }))
     }
 
     fn chain_recipient(&mut self, to: String) -> String {
@@ -6833,7 +6911,9 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        // A job's poll (the app asks every few seconds while a send is on its way): the node is
+        // asked without waiting.
+        busy_or_reply(node::polled(|| {
             let hash = chain::parse_key(&hash).ok_or("a transaction hash is 64 hex characters")?;
             // A send made here is in a block once its input notes leave the sender's wallet
             // (the node stores a transaction as soon as it takes it, so finding it says nothing).
@@ -6865,14 +6945,16 @@ impl NamesModule for Names {
                 "state": if landed { "in_block" } else { "pending" },
                 "fee": known["fee"],
             }))
-        })())
+        }))
     }
 
     fn chain_claim(&mut self, send: bool) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply((|| {
+        // The plan (`send` false) is a poll (`loadChain`): its reads of the node never wait. The
+        // claim itself reads the node afresh and waits for it, as before.
+        let body = || {
             let vouchers = node::call("wallet_get_claimable_vouchers", json!([]), node::QUICK)?;
             let count = vouchers["vouchers"].as_array().map_or(0, Vec::len);
             if !send {
@@ -6907,7 +6989,8 @@ impl NamesModule for Names {
             let stored = hash.as_ref().and_then(|hash| node::call("get_transaction", json!([hash]), node::QUICK).ok());
             let fee = stored.as_ref().and_then(|tx| chain::transfer_fee(tx, &before));
             Ok(chain::claim_result(hash, &vouchers, fee))
-        })())
+        };
+        if send { reply(body()) } else { busy_or_reply(node::polled(body)) }
     }
 
     fn chain_account_new(&mut self, label: String) -> String {
@@ -7389,7 +7472,7 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        reply(self.source_holdings())
+        busy_or_reply(self.source_holdings())
     }
 
     fn cli_token_send_source(&mut self, token_program: String, definition: String, amount: String, to: String, from_private: bool, to_public: bool) -> String {
@@ -8160,6 +8243,8 @@ impl Names {
         let setup = match setup {
             Ok(setup) => setup,
             Err(why) => {
+                // Said in words, never the busy envelope (the CLI's version still being read).
+                let why = if is_busy(&why) { STILL_STARTING.to_owned() } else { why };
                 checks.lock().expect("the private checks lock").insert(id, Err(why));
                 return;
             }
@@ -9535,7 +9620,22 @@ mod node {
     pub const NO_ANSWER: &str = "Basecamp's Logos Blockchain node didn't answer. Install the Blockchain app and start its node.";
 
     pub fn call(method: &str, args: Value, wait: Duration) -> Result<Value, String> {
-        let answer = peer::call(chain::MODULE, method, &args, wait).map_err(|failure| match failure {
+        // A read made for a poll (`polled`): answered from what the node last said, asked
+        // without waiting (`kept`). A send's or a claim's own reads are never: they wait for
+        // the node's answer now, as before.
+        if wait <= QUICK && POLLED.with(std::cell::Cell::get) && kept_reads() {
+            return kept(method, args);
+        }
+        let answer = answer_of(method, peer::call(chain::MODULE, method, &args, wait));
+        // A call outside a poll is a press (a send, a claim, an account made or renamed, a plan):
+        // what was kept for the polls is asked again, and an answer still on its way is dropped.
+        forget();
+        answer
+    }
+
+    /// What `call` makes of the module's answer (or of why there is none).
+    fn answer_of(method: &str, answer: Result<Value, peer::Failure>) -> Result<Value, String> {
+        let answer = answer.map_err(|failure| match failure {
             peer::Failure::NotLoaded => NOT_LOADED.to_owned(),
             peer::Failure::Held => HELD.to_owned(),
             peer::Failure::OffThread => OFF_THREAD.to_owned(),
@@ -9543,6 +9643,203 @@ mod node {
             peer::Failure::Refused(why) => chain::problem(method, &why),
         })?;
         chain::unwrap(method, answer)
+    }
+
+    // ── The polls' reads: asked without waiting, answered from what the node last said ──
+    //
+    // The third stall (2026-11-18, build 31153da, on a Basecamp with blockchain_module loaded):
+    // as Names opened, `loadChain` made chain_status, chain_accounts, chain_stake and chain_claim
+    // ask the node and wait for it (up to 15 s each ask) on the module's one thread. A node that
+    // is loaded and slow (or silent) held every call the app had sent behind them past
+    // Basecamp's 20 s: app_grants, backup_status, file_sha256, the 3 s polls. A wait for another
+    // module's answer can't move to a thread names spawns (peer.rs: such a thread waits for the
+    // main thread, the 2026-11-18 hang), so a poll's read is an ask (`peer::ask`): sent from the
+    // call's thread, answered later by the host's event loop into `Reads`, and the call answers
+    // at once with what the node said last (`KEEP` old at most, else asked again meanwhile), or
+    // busy ("still reading") before its first answer; the app reads again on its next poll.
+
+    thread_local! {
+        /// Set while a poll runs (`polled`): its node reads are `kept` reads.
+        static POLLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Runs `body`, a poll (chain_status, chain_accounts, …): its reads of the node never wait.
+    pub fn polled<R>(body: impl FnOnce() -> R) -> R {
+        let was = POLLED.with(|polled| polled.replace(true));
+        let out = body();
+        POLLED.with(|polled| polled.set(was));
+        out
+    }
+
+    /// How long an answer is used before the node is asked again (the app polls every 5 s).
+    pub const KEEP: Duration = Duration::from_secs(5);
+    /// The oldest answer shown while a newer one is on its way; older, the poll answers busy.
+    const STALE_AT_MOST: Duration = Duration::from_secs(30);
+    /// For an answer that never changes (a block, its events, a transaction by its hash).
+    const KEEP_FIXED: Duration = Duration::from_secs(3600);
+    const FIXED: [&str; 3] = ["get_block", "get_block_events", "get_transaction"];
+    /// How long an ask may wait for the node.
+    const ASK_WAIT: Duration = QUICK;
+    /// How long the first ask may take, until an ask was sent without the host first acquiring
+    /// the module's object (which happens on the call's thread, and waits as long as the ask may
+    /// for a module that is loaded but busy): a short first ask holds the thread a second at most.
+    const FIRST_ASK_WAIT: Duration = Duration::from_secs(1);
+    /// A sending this quick found the module's object already acquired.
+    const QUICK_SEND: Duration = Duration::from_millis(100);
+    /// An ask whose sending held the call's thread this long (the host acquiring the module's
+    /// object before it sends) leaves the node alone for `peer::HOLD`.
+    const SLOW_ASK: Duration = Duration::from_millis(500);
+    /// The most answers kept (the oldest go first).
+    const MOST: usize = 1024;
+
+    #[derive(Default)]
+    struct Kept {
+        answer: Option<(Result<Value, String>, std::time::Instant)>,
+        asked: Option<std::time::Instant>,
+    }
+
+    #[derive(Default)]
+    pub struct Store {
+        kept: std::collections::HashMap<String, Kept>,
+        /// Bumped by `forget`: an answer to an ask sent before it is dropped.
+        generation: u64,
+        /// An ask was sent without the host acquiring the module's object first (QUICK_SEND).
+        reached: bool,
+    }
+
+    #[derive(Default)]
+    pub struct Reads(std::sync::Mutex<Store>);
+
+    fn lock(reads: &Reads) -> std::sync::MutexGuard<'_, Store> {
+        reads.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The answer kept for `method(args)`: fresh, or the last one while it is asked again, or
+    /// busy before the first. Never waits: the ask is sent and its answer stored when it comes.
+    /// No lock is held while it is sent (its answer may come back at once).
+    fn kept(method: &str, args: Value) -> Result<Value, String> {
+        let reads = store();
+        let key = format!("{method}\u{0}{args}");
+        let keep = if FIXED.contains(&method) { KEEP_FIXED } else { KEEP };
+        let (generation, wait) = {
+            let mut store = lock(&reads);
+            let generation = store.generation;
+            let wait = if store.reached { ASK_WAIT } else { FIRST_ASK_WAIT };
+            let kept = &mut store.kept;
+            if let Some(slot) = kept.get(&key) {
+                if let Some((answer, at)) = &slot.answer {
+                    if at.elapsed() < keep {
+                        return answer.clone();
+                    }
+                }
+                // Asked already, its answer not back yet (the host gives it up after its wait).
+                if slot.asked.is_some_and(|at| at.elapsed() < ASK_WAIT + Duration::from_secs(5)) {
+                    return last_or_busy(slot);
+                }
+            }
+            if kept.len() >= MOST {
+                let oldest = kept.iter().min_by_key(|(_, slot)| slot.answer.as_ref().map(|(_, at)| *at)).map(|(key, _)| key.clone());
+                if let Some(oldest) = oldest {
+                    kept.remove(&oldest);
+                }
+            }
+            kept.entry(key.clone()).or_default().asked = Some(std::time::Instant::now());
+            (generation, wait)
+        };
+        let sending = std::time::Instant::now();
+        let into = std::sync::Arc::clone(&reads);
+        let (stored, asked_for) = (key.clone(), method.to_owned());
+        let answered_at_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let at_once = std::sync::Arc::clone(&answered_at_once);
+        peer::ask(
+            chain::MODULE,
+            method,
+            &args,
+            wait,
+            Box::new(move |answer| {
+                at_once.store(true, std::sync::atomic::Ordering::SeqCst);
+                let answer = answer_of(&asked_for, answer);
+                let mut store = lock(&into);
+                if store.generation != generation {
+                    return;
+                }
+                let slot = store.kept.entry(stored).or_default();
+                slot.answer = Some((answer, std::time::Instant::now()));
+                slot.asked = None;
+            }),
+        );
+        let took = sending.elapsed();
+        let mut store = lock(&reads);
+        // Refused before it was sent (not loaded, held): nothing is learnt about the host.
+        let sent = !answered_at_once.load(std::sync::atomic::Ordering::SeqCst);
+        if took >= SLOW_ASK {
+            // The host held the thread acquiring the module's object: leave it alone a while, and
+            // ask with the short wait again once it may be asked.
+            store.reached = false;
+            drop(store);
+            peer::hold(chain::MODULE);
+            store = lock(&reads);
+        } else if sent && took < QUICK_SEND {
+            store.reached = true;
+        }
+        store.kept.get(&key).map_or_else(|| Err(busy()), last_or_busy)
+    }
+
+    /// The last answer while a newer one is on its way (if it isn't too old), else busy.
+    fn last_or_busy(slot: &Kept) -> Result<Value, String> {
+        match &slot.answer {
+            Some((answer, at)) if at.elapsed() < STALE_AT_MOST => answer.clone(),
+            _ => Err(busy()),
+        }
+    }
+
+    fn busy() -> String {
+        super::still_reading("what the Logos Blockchain node says")
+    }
+
+    /// Forgets every answer kept, and drops the answers on their way (a press changed the node).
+    pub fn forget() {
+        if kept_reads() {
+            let reads = store();
+            let mut store = lock(&reads);
+            store.kept.clear();
+            store.generation += 1;
+        }
+    }
+
+    #[cfg(not(test))]
+    fn kept_reads() -> bool {
+        true
+    }
+
+    #[cfg(not(test))]
+    fn store() -> std::sync::Arc<Reads> {
+        static READS: std::sync::OnceLock<std::sync::Arc<Reads>> = std::sync::OnceLock::new();
+        std::sync::Arc::clone(READS.get_or_init(Default::default))
+    }
+
+    // In unit tests a poll's reads wait for the stand-in node, as before, unless the test runs the
+    // module as the host does (`reads_as_in_a_build`); each test thread keeps its own answers.
+    #[cfg(test)]
+    thread_local! {
+        static KEPT_READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static READS: std::cell::RefCell<std::sync::Arc<Reads>> = std::cell::RefCell::new(Default::default());
+    }
+
+    /// From now on in this test thread a poll's node reads are asked and kept, as in a build.
+    #[cfg(test)]
+    pub fn reads_as_in_a_build() {
+        KEPT_READS.with(|on| on.set(true));
+    }
+
+    #[cfg(test)]
+    fn kept_reads() -> bool {
+        KEPT_READS.with(std::cell::Cell::get)
+    }
+
+    #[cfg(test)]
+    fn store() -> std::sync::Arc<Reads> {
+        READS.with(|reads| std::sync::Arc::clone(&reads.borrow()))
     }
 
     // Stands in for the node in unit tests: a test sets each method's answer, and what was
@@ -10568,6 +10865,59 @@ mod tests {
         // A key the node lists but its wallet doesn't hold, as the M2 node does with three of six.
         node::ANSWERS.with(|answers| answers.borrow_mut().insert("wallet_get_balance".into(), json!({ "success": false, "error": "Unknown wallet address." })));
         assert_eq!(parsed(&names.chain_accounts())["value"], json!([]));
+    }
+
+    /// The node's answers to the polls (chain_status, chain_accounts, …) as in a module build: the
+    /// node is asked without waiting and its answer kept for `node::KEEP`, so a poll inside that
+    /// asks nothing; a balance still being asked makes the list wait (busy), never a key shown
+    /// with no balance; a send (a proving call) forgets what was kept, and the next poll asks.
+    #[test]
+    fn a_polls_node_reads_are_asked_without_waiting_and_kept_a_moment() {
+        let mut names = fresh();
+        node::reads_as_in_a_build();
+        node_answers("get_cryptarchia_info", json!({ "tip": "ab", "height": 7, "slot": 9, "mode": "Online" }));
+        node_answers("get_time_info", json!({ "slot": 9, "epoch": 0 }));
+        let first = parsed(&names.chain_status());
+        assert_eq!(first["success"], true, "{first}");
+        assert_eq!(parsed(&names.chain_status()), first, "the kept answer");
+        assert_eq!(node_asked(), ["get_cryptarchia_info", "get_time_info"], "asked once");
+        // A balance not back yet: the whole list waits.
+        node_answers("wallet_get_known_addresses", json!([NODE_KEY]));
+        peer::stand_in::set_silent(chain::MODULE, true);
+        let started = std::time::Instant::now();
+        let waiting = parsed(&names.chain_accounts());
+        assert!(started.elapsed() < std::time::Duration::from_millis(400), "{:?}", started.elapsed());
+        assert_eq!(waiting["busy"], true, "{waiting}");
+        peer::stand_in::set_silent(chain::MODULE, false);
+        // A press (here a send) forgets what was kept: the next poll asks the node again, and an
+        // answer that was on its way before it is dropped.
+        let _ = node::call("leader_claim", json!([]), node::PROVING);
+        assert_eq!(parsed(&names.chain_status()), first);
+        assert_eq!(node_asked().iter().filter(|method| *method == "get_cryptarchia_info").count(), 2, "{:?}", node_asked());
+        // A slow node (it answers, after 2 s): the polls answer busy at once meanwhile, then its
+        // answer (and a node's own refusal stops a poll, never shown as busy).
+        node::forget();
+        node_answers("wallet_get_balance", json!("1191220464"));
+        peer::stand_in::set_slow(chain::MODULE, Some(std::time::Duration::from_secs(2)));
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            for answer in [names.chain_status(), names.chain_accounts(), names.chain_stake(), names.chain_claim(false)] {
+                assert_eq!(parsed(&answer)["busy"], true, "{answer}");
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_millis(400), "{:?}", started.elapsed());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let accounts = loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let accounts = parsed(&names.chain_accounts());
+            if accounts["busy"] != true {
+                break accounts;
+            }
+            assert!(std::time::Instant::now() < until, "the slow node's answers never came: {accounts}");
+        };
+        assert_eq!(accounts["value"], json!([{ "key": NODE_KEY, "balance": "1191220464" }]), "{accounts}");
+        assert_eq!(parsed(&names.chain_status()), first, "the slow node's answer, once it came");
+        peer::stand_in::set_slow(chain::MODULE, None);
     }
 
     #[test]
@@ -15080,6 +15430,8 @@ mod tests {
         names.net = Net::Lez04;
         names.sequencer = url.to_owned();
         BRIDGE_HTTP.with(|on| on.set(true));
+        // The node's answers to the polls are asked for and kept, as in a module build.
+        node::reads_as_in_a_build();
         // The bridge module is connected (a disconnected app's call bytes are dropped).
         connect(&mut names, "lez_bridge", &format!("Public/{PUBLIC}"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
@@ -15349,6 +15701,7 @@ mod tests {
         let init = std::time::Instant::now();
         let mut bursts = Vec::new();
         let mut blocked = Vec::new();
+        let mut words = std::collections::BTreeMap::new();
         let mut kind = "opening";
         let mut calls = &opening;
         while init.elapsed() < std::time::Duration::from_secs(30) {
@@ -15356,9 +15709,16 @@ mod tests {
             eprintln!("{:>5.1} s: {kind} burst of {} calls held the module {:?} (longest {} {:?})", init.elapsed().as_secs_f64(), calls.len(), made.took, made.longest.0, made.longest.1);
             bursts.push((kind, made.took, made.longest));
             blocked.extend(made.blocked);
+            for (what, answer) in &made.answers {
+                if answer["busy"] != true && answer["error"].as_str().is_some_and(|why| why.contains("still reading")) {
+                    words.insert(*what, answer.to_string());
+                }
+            }
             std::thread::sleep(std::time::Duration::from_secs(3).saturating_sub(made.took));
             (kind, calls) = ("polls", &polls);
         }
+        let worded: Vec<_> = words.iter().collect();
+        assert!(worded.is_empty(), "polls that said a read under way as an error, not busy: {worded:?}");
         let slow: Vec<_> = bursts.iter().filter(|(_, took, _)| *took >= std::time::Duration::from_secs(1)).collect();
         assert!(slow.is_empty() && blocked.is_empty(), "bursts that held the module a second or more (burst, its length, its longest call): {slow:?}; calls that waited on their own thread: {blocked:?}");
         // The reads end on their own threads (the node's asks are given up on after their wait).

@@ -31,8 +31,11 @@
 //! 3. A module that is there but gave no answer is not asked again for `HOLD`
 //!    (`Failure::Held`), unless it is seen to come back up first.
 //! 4. Asks whose answers are only kept for later (the Program Registry's labels and
-//!    publishers, package_manager's list) are asynchronous (`ask`): sent from the call thread,
-//!    answered later by the host's event loop, never waited for.
+//!    publishers, package_manager's list, and since names-stall-3 the node's answers to the
+//!    app's polls, `node::polled`) are asynchronous (`ask`): sent from the call thread,
+//!    answered later by the host's event loop, never waited for. An ask whose sending itself
+//!    held the call thread (the host acquiring the module's object first) holds the module
+//!    (`hold`), so that happens at most once per `HOLD`.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -179,6 +182,12 @@ impl Gate {
             }),
         );
     }
+}
+
+/// `module` is left alone for `HOLD` (an ask whose sending held the call's thread: the host
+/// was acquiring the module's object, which a module that is loaded but busy may not give).
+pub fn hold(module: &str) {
+    with_gate(|gate| lock(&gate.failed).insert(module.to_owned(), Instant::now()));
 }
 
 /// `module` called, its answer waited for (see `Gate::call`).
@@ -347,14 +356,32 @@ mod qt {
         }
 
         fn call(&self, module: &str, method: &str, args: &Value, wait: Duration) -> Result<Value, Failure> {
-            LogosModuleSDK::new().plugin(module).call_json_with_timeout(method, args, wait).map_err(|error| classify(&error))
+            client(module).call_json_with_timeout(method, args, wait).map_err(|error| classify(&error))
         }
 
         fn ask(&self, module: &str, method: &str, args: &Value, wait: Duration, done: Done) {
-            LogosModuleSDK::new()
-                .plugin(module)
-                .call_json_async_with_timeout(method, args, wait, move |answer| done(answer.map_err(|error| classify(&error))));
+            client(module).call_json_async_with_timeout(method, args, wait, move |answer| done(answer.map_err(|error| classify(&error))));
         }
+    }
+
+    thread_local! {
+        /// One client per module for the life of the host, on the call thread (the only one that
+        /// calls other modules, rule 1). The protocol keeps the module's object acquired in its
+        /// client (`LogosAPIConsumer::acquireCachedObject`, logos-protocol 8bbc027c), and
+        /// acquiring it waits on the call's thread (`requestObject` → `waitForSource`) for as long
+        /// as the call may, when the module is loaded but its host is busy. A client made per call
+        /// (as before) acquired it again for every call; this one does once (and again only when
+        /// the module went away, which the protocol notices itself).
+        static CLIENTS: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<logos_rust_sdk::PluginProxy>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+
+    /// The kept client for `module` (no borrow is held while it is used: a call's wait runs the
+    /// host's event loop, where an ask's answer may come back).
+    fn client(module: &str) -> std::rc::Rc<logos_rust_sdk::PluginProxy> {
+        CLIENTS.with(|clients| {
+            std::rc::Rc::clone(clients.borrow_mut().entry(module.to_owned()).or_insert_with(|| std::rc::Rc::new(LogosModuleSDK::new().plugin(module))))
+        })
     }
 }
 
@@ -372,6 +399,21 @@ pub mod stand_in {
     thread_local! {
         static DOWN: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
         static SILENT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+        static SLOW: RefCell<std::collections::HashMap<String, Duration>> = RefCell::new(std::collections::HashMap::new());
+    }
+
+    /// `module` answers, but only after `after` (None: at once again), for the rest of this test
+    /// thread: a call waits for it (or its whole `wait`, then no answer); an ask's `done` gets it
+    /// then, from a thread of its own (the host's event loop).
+    pub fn set_slow(module: &str, after: Option<Duration>) {
+        SLOW.with(|slow| match after {
+            Some(after) => slow.borrow_mut().insert(module.to_owned(), after),
+            None => slow.borrow_mut().remove(module),
+        });
+    }
+
+    fn slow(module: &str) -> Option<Duration> {
+        SLOW.with(|slow| slow.borrow().get(module).copied())
     }
 
     /// `module` is loaded but never answers (the owner's Basecamp, 2026-11-18: blockchain_module
@@ -430,6 +472,12 @@ pub mod stand_in {
                 std::thread::sleep(wait);
                 return Err(Failure::NoAnswer(format!("{module} gave no answer within {wait:?}")));
             }
+            if let Some(after) = slow(module) {
+                std::thread::sleep(after.min(wait));
+                if after > wait {
+                    return Err(Failure::NoAnswer(format!("{module} gave no answer within {wait:?}")));
+                }
+            }
             match module {
                 crate::chain::MODULE => crate::node::answer(method, args),
                 _ => Err(Failure::NoAnswer(format!("no stand-in for {module}"))),
@@ -446,10 +494,20 @@ pub mod stand_in {
                 return;
             }
             // The node answers an ask as it answers a call (`node::ANSWERS`), as soon as the
-            // host's event loop runs, which here is at once.
-            match module {
-                crate::chain::MODULE => done(crate::node::answer(method, args)),
-                _ => done(Err(Failure::NoAnswer(format!("no stand-in for {module}")))),
+            // host's event loop runs, which here is at once (or once it is slow's `after`).
+            let answer = match module {
+                crate::chain::MODULE => crate::node::answer(method, args),
+                _ => Err(Failure::NoAnswer(format!("no stand-in for {module}"))),
+            };
+            match slow(module) {
+                Some(after) => {
+                    let module = module.to_owned();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(after.min(wait));
+                        done(if after > wait { Err(Failure::NoAnswer(format!("{module} gave no answer within {wait:?}"))) } else { answer });
+                    });
+                }
+                None => done(answer),
             }
         }
     }

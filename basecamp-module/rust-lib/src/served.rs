@@ -29,6 +29,16 @@ use std::time::{Duration, Instant};
 /// hold the module.
 pub const FIRST_WAIT: Duration = Duration::from_millis(600);
 
+/// How much waiting for first reads the module's thread may do in a burst, and how fast that
+/// comes back (per second). The app sends its calls in bursts (about 25 as Names opens, the
+/// polls every few seconds) and the host answers them one after the other: a call's wait is
+/// also every later call's. Without this a burst of reads that were all slow cost 600 ms each,
+/// one after the other (the third stall, 2026-11-18: ~12 of them, 7.5 s, before the node's
+/// 15 s). With it a whole burst waits 400 ms at most, and a read that is fast still answers on
+/// the first call (it uses only what it waited).
+pub const WAIT_BUDGET: Duration = Duration::from_millis(400);
+pub const WAIT_REFILL_PER_S: Duration = Duration::from_millis(200);
+
 /// What a call answers while the first read is under way (the busy envelope: not taken).
 pub fn still_reading(what: &str) -> String {
     json!({ "success": false, "busy": true, "value": null, "error": format!("still reading {what}; this updates in a moment") }).to_string()
@@ -47,22 +57,29 @@ pub enum Lane {
     Own(String),
 }
 
+/// The turn `lane` takes (None: it never waits). Found on the call's thread, when the read starts.
 fn lane_lock(lane: &Lane) -> Option<Arc<Mutex<()>>> {
-    static CLI: Mutex<Option<Arc<Mutex<()>>>> = Mutex::new(None);
-    static HOSTS: Mutex<Option<HashMap<String, Arc<Mutex<()>>>>> = Mutex::new(None);
-    match lane {
-        Lane::Cli => Some(lock(&CLI).get_or_insert_with(Default::default).clone()),
-        Lane::Host(url) => Some(lock(&HOSTS).get_or_insert_with(HashMap::new).entry(host_of(url)).or_default().clone()),
-        Lane::Free => None,
-        Lane::Own(name) => Some(lock(&HOSTS).get_or_insert_with(HashMap::new).entry(format!("own:{name}")).or_default().clone()),
-    }
+    static LANES: Mutex<Option<HashMap<String, Arc<Mutex<()>>>>> = Mutex::new(None);
+    let key = match lane {
+        Lane::Cli => "cli".to_owned(),
+        Lane::Host(url) => format!("host:{}", host_of(url)),
+        Lane::Free => return None,
+        Lane::Own(name) => format!("own:{name}"),
+    };
+    Some(lock(&LANES).get_or_insert_with(HashMap::new).entry(lane_scope() + &key).or_default().clone())
 }
 
-/// Runs `work` in `lane`'s turn: after the background read of that kind under way, if any.
-pub fn in_lane<R>(lane: &Lane, work: impl FnOnce() -> R) -> R {
-    let Some(turn) = lane_lock(lane) else { return work() };
-    let _turn = lock(&turn);
-    work()
+/// The lanes are the module's (one names instance per host process).
+#[cfg(not(test))]
+fn lane_scope() -> String {
+    String::new()
+}
+
+/// In unit tests each test thread has lanes of its own, so one test's slow CLI (20 s a run in
+/// the owner's test) never holds another test's reads.
+#[cfg(test)]
+fn lane_scope() -> String {
+    format!("{:?}:", std::thread::current().id())
 }
 
 /// The scheme and host of `url`, which an endpoint's limit counts by.
@@ -157,6 +174,24 @@ impl Snap {
 struct Shared {
     slots: Mutex<(u64, HashMap<String, Slot>)>,
     ended: Condvar,
+    /// What is left of `WAIT_BUDGET`, and when it was last topped up.
+    budget: Mutex<(Duration, Instant)>,
+}
+
+impl Shared {
+    /// What the call thread may wait now: `FIRST_WAIT` at most, less what this burst waited.
+    fn wait_allowed(&self) -> Duration {
+        let mut budget = lock(&self.budget);
+        let (left, at) = *budget;
+        let refilled = WAIT_REFILL_PER_S.mul_f64(at.elapsed().as_secs_f64());
+        *budget = ((left + refilled).min(WAIT_BUDGET), Instant::now());
+        budget.0.min(FIRST_WAIT)
+    }
+
+    fn spend(&self, waited: Duration) {
+        let mut budget = lock(&self.budget);
+        budget.0 = budget.0.saturating_sub(waited);
+    }
 }
 
 /// The served reads of one module instance.
@@ -169,7 +204,10 @@ pub struct Served {
 
 impl Default for Served {
     fn default() -> Self {
-        Served { shared: Arc::new(Shared { slots: Mutex::new((0, HashMap::new())), ended: Condvar::new() }), inline: cfg!(test) }
+        Served {
+            shared: Arc::new(Shared { slots: Mutex::new((0, HashMap::new())), ended: Condvar::new(), budget: Mutex::new((WAIT_BUDGET, Instant::now())) }),
+            inline: cfg!(test),
+        }
     }
 }
 
@@ -181,7 +219,9 @@ impl Served {
     }
 
     /// The read kept under `key`, starting a newer one (`fetch`, in `lane`) when none is under way
-    /// and the last ended `every` ago or more. With no value yet, waits `FIRST_WAIT` at most for it.
+    /// and the last ended `every` ago or more. With no value yet, waits for the read this call
+    /// started `FIRST_WAIT` at most, within what is left of the burst's `WAIT_BUDGET`; a read
+    /// already under way (an earlier call started it) is never waited for again.
     pub fn read(&self, key: &str, every: Duration, lane: Lane, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Snap {
         if self.inline {
             let result = fetch();
@@ -205,8 +245,13 @@ impl Served {
         if due {
             slot.updating = true;
             let (shared, key_owned, id) = (Arc::clone(&self.shared), key.to_owned(), slot.id);
+            let turn = lane_lock(&lane);
             spawn(move || {
-                let result = in_lane(&lane, fetch);
+                // In `lane`'s turn: after the background read of that kind under way, if any.
+                let result = {
+                    let _turn = turn.as_ref().map(|turn| lock(turn));
+                    fetch()
+                };
                 let mut slots = lock(&shared.slots);
                 if let Some(slot) = slots.1.get_mut(&key_owned).filter(|slot| slot.id == id) {
                     match result {
@@ -225,9 +270,10 @@ impl Served {
                 shared.ended.notify_all();
             });
         }
-        let first = slot.value.is_none() && slot.error.is_none();
+        let first = slot.value.is_none() && slot.error.is_none() && due;
         if first || started.is_some() {
-            let until = Instant::now() + FIRST_WAIT;
+            let began = Instant::now();
+            let until = began + self.shared.wait_allowed();
             loop {
                 let waiting = slots.1.get(key).is_some_and(|slot| {
                     slot.updating && (started.is_some_and(|seq| slot.seq == seq) || (slot.value.is_none() && slot.error.is_none()))
@@ -238,6 +284,7 @@ impl Served {
                 }
                 slots = self.shared.ended.wait_timeout(slots, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
             }
+            self.shared.spend(began.elapsed());
         }
         Self::snap(slots.1.get(key))
     }
@@ -441,6 +488,30 @@ mod tests {
         assert_eq!(shown["updating"], true);
         std::thread::sleep(Duration::from_millis(1300));
         assert_eq!(served.peek("v").value, Some(json!(3)));
+    }
+
+    /// The third stall: a burst of calls whose first reads are all slow waits `WAIT_BUDGET` in all,
+    /// not 600 ms each; asked again while those reads are under way, no call waits at all.
+    #[test]
+    fn a_burst_of_slow_first_reads_waits_the_budget_at_most_and_never_again_for_a_read_under_way() {
+        let served = Served::threaded();
+        let slow = || {
+            std::thread::sleep(Duration::from_millis(2000));
+            Ok(json!(1))
+        };
+        let started = Instant::now();
+        for n in 0..10 {
+            assert!(served.read(&format!("k{n}"), Duration::from_secs(60), Lane::Free, slow).value.is_none());
+        }
+        assert!(started.elapsed() < WAIT_BUDGET + Duration::from_millis(300), "{:?}", started.elapsed());
+        std::thread::sleep(Duration::from_millis(500));
+        let again = Instant::now();
+        for n in 0..10 {
+            assert!(served.read(&format!("k{n}"), Duration::from_secs(60), Lane::Free, slow).updating);
+        }
+        assert!(again.elapsed() < Duration::from_millis(150), "{:?}", again.elapsed());
+        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(served.peek("k9").value, Some(json!(1)));
     }
 
     #[test]

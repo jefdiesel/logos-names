@@ -53,8 +53,10 @@ impl Names {
         }
         // Without the node (stopped, say) the requests are still listed, with no choices and
         // why, so the person can see and turn them down (pending-inscriptions-fails-node-stopped).
-        let (choices, node) = match chain_choices() {
+        // A poll (every 3 s while the sheet is open): the node is asked without waiting.
+        let (choices, node) = match crate::node::polled(chain_choices) {
             Ok(choices) => (choices, None),
+            Err(error) if crate::is_busy(&error) => (json!([]), Some(STILL_ASKING.to_owned())),
             Err(error) => (json!([]), Some(error)),
         };
         let mut views = Vec::new();
@@ -110,6 +112,9 @@ impl Names {
         Ok(view)
     }
 }
+
+/// What the sheet says while the node's first answer about its accounts is on its way.
+const STILL_ASKING: &str = "Still asking Basecamp's Logos Blockchain node which accounts it holds; this updates in a moment.";
 
 /// The chain accounts an inscription can come from: the keys the node's wallet holds,
 /// `[{key, balance, label?, title?}]`, as `chain_accounts` lists them: with the label the person
