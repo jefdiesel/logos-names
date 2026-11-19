@@ -1,0 +1,106 @@
+   Compiling names_methods v0.1.0 (/Volumes/exos162/logos/fix-1119/lns-deeds/src/methods)
+   Compiling names_core v0.1.0 (/Volumes/exos162/logos/fix-1119/lns-deeds/src/core)
+   Compiling names_engine_test v0.1.0 (/Volumes/exos162/logos/fix-1119/lns-deeds/src/tools/engine-test)
+    Finished `release` profile [optimized] target(s) in 7m 32s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running `/Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names_engine_test`
+ok   the NFT program loaded is the pinned image 4fbb28723a040e0f6da48d8c8c5f839f181086112673cb210fabb6047bbddf58
+
+thread 'main' (1) panicked at core/src/lib.rs:1347:25:
+the first settings must be signed by the program's own account
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   a stranger cannot configure a fresh registry (refused: the first settings must be signed)
+ok   the deployer configures the registry
+ok   alice commits to a name
+ok   alice registers with a deposit
+ok   a registration has no deed until its holder claims one
+
+thread 'main' (1) panicked at core/src/lib.rs:1220:5:
+signer does not own this name
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   bob cannot claim the deed of alice's name (refused: signer does not own this name)
+ok   alice claims her name's deed
+
+thread 'main' (1) panicked at core/src/lib.rs:1441:13:
+this name already has a deed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   a second claim is refused (refused: this name already has a deed)
+ok   the deposit moved atomically
+ok   N1: the claim minted a 1-of-1 deed into alice's deed account (nested grant)
+
+thread 'main' (1) panicked at core/src/lib.rs:886:13:
+only this program may send an effect
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   outsiders cannot send an effect (refused: only this program may send an effect)
+
+thread 'main' (1) panicked at core/src/lib.rs:1220:5:
+signer does not own this name
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   bob cannot take alice's name (refused: signer does not own this name)
+ok   alice updates her profile
+ok   a transfer that leaves the deed out is refused (refused: InvalidProgramBehavior(Execution(UndeclaredActor { actor: Actor { account_id: J8LtyDhEta5y8bo52XijtFKnhJP8S6eo5Pg9MdWe6Zaf, program_account_id: CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G } })))
+ok   alice transfers the name to bob
+ok   N3: the transfer moved the deed alice -> bob in one transaction
+
+thread 'main' (1) panicked at /Volumes/exos162/logos/lp0001/job-a/lez-programs/programs/nft/src/transfer.rs:17:5:
+sender holding must authorize the transfer
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   N2: bob cannot move his deed through the NFT program (refused by the NFT program: sender holding must authorize the transfer)
+
+thread 'main' (1) panicked at /Volumes/exos162/logos/lp0001/job-a/lez-programs/programs/nft/src/burn.rs:17:5:
+holding must authorize the burn
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   N2: bob cannot burn his deed through the NFT program (refused by the NFT program: holding must authorize the burn)
+
+thread 'main' (1) panicked at /Volumes/exos162/logos/lp0001/job-a/lez-programs/programs/nft/src/initialize_holding.rs:16:5:
+holding account must authorize its initialization
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   N2: alice cannot use her old deed account through the NFT program either
+ok   bob hands the name back to alice
+ok   and alice gives it to bob again
+ok   A -> B -> A -> B: the deed lands again in an emptied deed account each time
+ok   bob releases the name and collects the deposit
+ok   the refund moved atomically
+ok   the release burned the deed (supply 0)
+
+thread 'main' (1) panicked at core/src/lib.rs:1366:13:
+this account did not hold this name
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   bob cannot claim alice's name (refused: this account did not hold this name)
+ok   alice claims her old name for free
+
+thread 'main' (1) panicked at core/src/lib.rs:1375:17:
+this name was already claimed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   a name is claimed once (refused: this name was already claimed)
+
+thread 'main' (1) panicked at core/src/lib.rs:1220:5:
+signer does not own this name
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   bob cannot claim the deed of alice's claimed name (refused: signer does not own this name)
+ok   alice claims the deed of a claimed (deedless) name
+ok   the claim gave the name its deed
+
+thread 'main' (1) panicked at core/src/lib.rs:1441:13:
+this name already has a deed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   a name has one deed (refused: this name already has a deed)
+
+thread 'main' (1) panicked at core/src/lib.rs:1104:13:
+this name is locked (one to four characters, or on the reserved list), so it has no deed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok   a locked name has no deed (refused: so it has no deed)
+ok   alice transfers a deeded name to a private account
+ok   the deed moved to the private recipient's deed account in one transaction
+ok   alice commits to jef again
+ok   alice registers jef again
+ok   alice claims a fresh deed
+ok   a name registered again gets a new deed definition and deed account
+ok   bob commits as an older client would
+ok   bob registers with plain Register and no deed actors
+ok   an older client's plain Register still registers (no deed, version 6 record)
+ok   bob transfers a deedless name with no deed actors, as today
+
+all scenarios passed
+exit 0

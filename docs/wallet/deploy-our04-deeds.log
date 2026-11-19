@@ -1,0 +1,127 @@
+$ asOP /Volumes/exos162/logos/names-deploy-our04/bin/names wallet auth-transfer send --from Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD --to-pk 4cfc7e5d95bb28b3c6ce5802b72adfaef3b56702c8f853c076ac8136333d5af7 --amount 40000000
+Transaction hash is 68bf8f39fa9c1c4725bbc7ab0210958dffba76dcb21a52253b210cfdbda56c46
+Transaction is included in block 33705
+fee paid: 4088
+$ asOP /Volumes/exos162/logos/names-deploy-our04/bin/names wallet auth-transfer send --from Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD --to-pk de3b9f215c35fff42d3492104093935e8c582d9d940b1923d9f5b1c919c8bfbf --amount 20000000
+Transaction hash is 523f98c3f5a51d8b5ca39b74d65a6a525ab65ce0766815dd8f4111a4aed77341
+Transaction is included in block 33706
+fee paid: 4352
+$ asLD /Volumes/exos162/logos/names-deploy-our04/bin/names wallet account get --account-id Public/27Hr9muaPKDS3z8KtFr6wyCuFpwGcBVcn8JV8XfNm4jq
+Balance 44496952, nonce 8
+$ asNFT /Volumes/exos162/logos/names-deploy-our04/bin/names wallet account get --account-id Public/FR65QLVuh8a7su2HtLY4jt9D5X6yfV5X5wSoWMpCdt4B
+Balance 20000000, nonce 0
+$ asNFT /Volumes/exos162/logos/names-deploy-our04/bin/names wallet program-loader deploy --elf /Volumes/exos162/logos/fix-1119/lns-deeds/nft.bin --header Public/CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G --segments Public/NmHFsSLi3mU7yoaw9kjaWtYcybrSvkUKxkV9fJcxTmv Public/GTBBN5fz4LGBqHzEeSQ4wD7yWR1DMXyoaHEzActK7x9a --payer Public/FR65QLVuh8a7su2HtLY4jt9D5X6yfV5X5wSoWMpCdt4B
+Transaction hash is cd9d8efa85c978ef19597bbee876a35a51f20db0e7156bcb7c2218d54458b154
+Transaction is included in block 33707
+Transaction hash is 96527d3faeea02bd5d48ed91b2f41d9dcac0785ac55acf886ba0165d18986575
+Transaction is included in block 33708
+Transaction hash is 71f8768e9e85d77da910408acc9f95d2262b34ab807947acc717bd24487d4801
+Transaction is included in block 33709
+Program deployed. Header account id: CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G
+$ header CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G
+image 4fbb28723a040e0f6da48d8c8c5f839f181086112673cb210fabb6047bbddf58 immutable 0
+$ asOP /Volumes/exos162/logos/names-deploy-our04/bin/names wallet auth-transfer send --from Public/BVDcg8SbSdCTKzx4mJbSpVgEuaoPEMhxmmRwvVCGyBnD --to-pk aa4891f61b0db2f768c6c790e56ed5bcca55a6bd1c7995a87f22b44592df5515 --amount 20000000
+Transaction hash is 80d3e6600e52a7aa6fbcb2ee93391b1cfa596b8f1638793dc9ba73458c5e79ba
+Transaction is included in block 33710
+fee paid: 4352
+$ asT /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names register lns-deed-check --owner Public/6SeHY2Nc9mqm6eFUydxio8c42rjWGFKoaJPA42rQsPwm --wait
+$ header 6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA
+image 00ad457122dbd1c88b62d45a6aee5bd38167cc331d562459e1c8885bc76dd2dd immutable 0
+segments needed: 5
+$ asLD /Volumes/exos162/logos/names-deploy-our04/bin/names wallet program-loader update --elf /Volumes/exos162/logos/fix-1119/lns-deeds/new_logos_names.bin --header Public/6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA --segments Public/7ZtQw2EHn31nk2V79oxWPPT2P8Lpan2WfXhpB65hZ7uq Public/6iKmmkLSzioqRWxkudRRGWsMjmTbvCYYR3HGcMXNhRN8 Public/CHKXKWwEGtMD7zBAHhFQfTNBeNU9d915rjh2gv5JFy81 Public/AGciDvQFRnNBqgrYrmAreKBCDCS3hrr3LdqoxH5Dotkb Public/2a8oCwpNg23qKChAy9ERgjATUQgkW1B2V3BX2MMu7ZNP --payer Public/27Hr9muaPKDS3z8KtFr6wyCuFpwGcBVcn8JV8XfNm4jq
+lns-deed-check takes a deposit of 1000000, held for as long as you keep the name and refunded when you release it
+(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)
+step 1 of 2: committing to lns-deed-check
+reading the registry's bytecode from the chain
+fee: about 178880, at most 297171 (gas: 21318 cycles, limit 31977)
+submitted 88d204e936da620ac197c75fd2b9628f5fc2d8667c67a9b8224644d64debe3a3
+applied in block 33711
+fee paid: 175096
+waiting 885s before revealing (the commitment must be 15 minutes old)
+waiting 855s before revealing (the commitment must be 15 minutes old)
+waiting 825s before revealing (the commitment must be 15 minutes old)
+waiting 795s before revealing (the commitment must be 15 minutes old)
+waiting 765s before revealing (the commitment must be 15 minutes old)
+waiting 735s before revealing (the commitment must be 15 minutes old)
+waiting 705s before revealing (the commitment must be 15 minutes old)
+waiting 675s before revealing (the commitment must be 15 minutes old)
+waiting 645s before revealing (the commitment must be 15 minutes old)
+waiting 615s before revealing (the commitment must be 15 minutes old)
+waiting 585s before revealing (the commitment must be 15 minutes old)
+waiting 555s before revealing (the commitment must be 15 minutes old)
+waiting 525s before revealing (the commitment must be 15 minutes old)
+waiting 495s before revealing (the commitment must be 15 minutes old)
+waiting 465s before revealing (the commitment must be 15 minutes old)
+waiting 435s before revealing (the commitment must be 15 minutes old)
+waiting 405s before revealing (the commitment must be 15 minutes old)
+waiting 375s before revealing (the commitment must be 15 minutes old)
+waiting 345s before revealing (the commitment must be 15 minutes old)
+waiting 315s before revealing (the commitment must be 15 minutes old)
+waiting 285s before revealing (the commitment must be 15 minutes old)
+waiting 255s before revealing (the commitment must be 15 minutes old)
+waiting 225s before revealing (the commitment must be 15 minutes old)
+waiting 195s before revealing (the commitment must be 15 minutes old)
+waiting 165s before revealing (the commitment must be 15 minutes old)
+waiting 135s before revealing (the commitment must be 15 minutes old)
+waiting 105s before revealing (the commitment must be 15 minutes old)
+waiting 75s before revealing (the commitment must be 15 minutes old)
+waiting 45s before revealing (the commitment must be 15 minutes old)
+waiting 15s before revealing (the commitment must be 15 minutes old)
+payments to lns-deed-check will arrive privately at Private/9sGy9Pq3SpmBYXkR39MHxw5fdn2heguLomvDK7e7Btzr
+step 2 of 2: registering lns-deed-check at 1795119814399 for a deposit of 1000000
+fee: about 1440872, at most 2414250 (gas: 176281 cycles, limit 264422)
+submitted 88aa1b8da514d2e9a13e53666f2be00c7e66cd0d6c67feec58c1e62f32a8533c
+applied in block 33771
+fee paid: 1440688
+lns-deed-check is registered
+$ asT /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deed-check
+{
+  "deed": null,
+  "name": "lns-deed-check",
+  "why": "no deed claimed: its holder can claim one for free with `names deed claim`"
+}
+Transaction hash is c5382086f5c3adad4404832d76ac55b58b8d88c2f85fcbe71104f798c99d8ac4
+Transaction is included in block 33771
+Transaction hash is d14ac5e56d5587867c893866aa4635ad0a445d62ebb4662bc75552acbaadda46
+Transaction is included in block 33772
+Transaction hash is be706cf9fd8fae01a2ddeed29bfee6be3ec5d7fbf9bf4fb47c9eed84f66407ad
+Transaction is included in block 33773
+Transaction hash is 0267d7d18b48bdf6d1fab1c053d91a5bcf0d3ad9f66213b0409b63e3e5106c5d
+Transaction is included in block 33774
+Transaction hash is 4628d68358da3571c1562b6b2a382b288063fd846be48fbebad84e0c3726a625
+Transaction is included in block 33775
+Transaction hash is 8a6226e2ae5696bbda4a878c3b74a61895a34f01d256d94eda77753be1dd5e32
+Transaction is included in block 33776
+Program 6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA updated
+$ header 6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA
+image 52a22df2cc078867a3478a3296b9327d224373cddde01086b386a990dc4fa5cc immutable 0
+$ asT /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed claim lns-deed-check
+claiming the deed of lns-deed-check (free): definition 9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro
+reading the registry's bytecode from the chain
+reading the NFT program deeds are minted on's bytecode from the chain
+fee: about 1339288, at most 2248848 (gas: 164922 cycles, limit 247383)
+submitted abafd3f3e0dfc64c33667efbe8eac7921071287106c50937d218e16558f696ef
+applied in block 33779
+fee paid: 1337560
+$ asT /Volumes/exos162/logos/fix-1119/lns-deeds/target/release/names deed show lns-deed-check
+{
+  "definition": "9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro",
+  "definition_state": {
+    "creators": "LNS registry",
+    "name": "LNS name deed",
+    "printable_supply": "1",
+    "standard": "Simple",
+    "uri": "https://nameswallet.app/lns/deed.png"
+  },
+  "holder_tag": "d107e2f112c3c74f8125eb659c53a8d17d853bdf6444631b2f61f88c4aca6234",
+  "holding": "B56NfHYKptfSXimHLuVX4S6nNBfhVkWP8GWVCWAWxFCC",
+  "holding_state": {
+    "balance": "1",
+    "definition": "9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro",
+    "holds_the_deed": true,
+    "kind": "master"
+  },
+  "name": "lns-deed-check",
+  "nft_program": "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G",
+  "nonce": "227820f30ec501b9f7151601e763f5fe9b684ba54a45144823773c0c7c0ede75"
+}

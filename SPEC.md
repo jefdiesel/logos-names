@@ -620,6 +620,40 @@ free of deposit until `claims_until`:
 ### 8.5 Proving a holder to another program
 
 A program can't read the registry's state. `Message::RequireHolder { tag }`, sent to a name's record actor, changes nothing and refuses unless `tag` holds that record. The board uses it to check that a poster holds the name.
+
+### 8.6 Deeds (optional NFTs)
+
+A name of the normal tier (5–32 characters, not on the locked list) can have a deed: a
+1-of-1 NFT of Logos's NFT program (`lez-programs` `dea23c2`, image `4fbb2872…df58`,
+deployed from header `CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G` on every chain this
+registry runs on; `core/src/deed.rs`). LNS stays the source of truth: the deed follows the
+name and nothing outside LNS can move it.
+
+- **Claiming** is optional and free: `Instruction::ClaimDeed { id, nonce, length }` from
+  the holder (no deposit, no fee beyond gas). Refused for anyone but the holder, for a name
+  that already has a deed, and for locked, reserved and short names (`length` proves the
+  tier). `nonce` is 32 random bytes. Registering never mints a deed.
+- **Where it lives.** Definition `D = PDA(registry, SHA-256("lns-deed/v1/definition/" ‖ id ‖ nonce))`,
+  printable supply 1; the deed is its master, held at
+  `PDA(registry, SHA-256("lns-deed/v1/holding/" ‖ D ‖ owner tag))`. A PDA has no key, so
+  only the registry's seed grant authorizes it: the NFT program refuses a holder's own
+  `Transfer` or `Burn` of a deed. The record (version 7) gains `deed: Option<{definition, nonce}>`;
+  a record without a deed is still written as version 6, byte for byte.
+- **Transfer** of a name with a deed moves the deed to the new holder's deed account in
+  the same transaction (to a private recipient too: the deed account depends only on the
+  tag). A name without one transfers as before. **Release** burns the deed (the
+  definition's supply goes to 0); a registration over a lapsed or claimed-over record
+  burns the old one. A new registration may claim a fresh deed (new nonce, new definition
+  and deed account); used accounts are never reused.
+- **Metadata** is the same for every deed and never names the name: name
+  `LNS name deed`, standard `Simple`, uri `https://nameswallet.app/lns/deed.png`,
+  creators `LNS registry`.
+- **Actors a client declares** (with PDA evidence for any it creates), besides the usual:
+  for `ClaimDeed`, the record, `(D, NFT)`, and the holder's deed account under both the
+  NFT program and the registry; for a `Transfer` of a deeded name, `(D, NFT)` and both deed
+  accounts under the NFT program; for a `Release` or a burn, `(D, NFT)` and the holder's
+  deed account under the NFT program. The transaction runs the NFT program too. A client
+  that leaves them out is refused (`UndeclaredActor`) and nothing moves.
 ## 9. Events
 
 The registry emits LEZ program events. The selector is the first 8 bytes of
@@ -1084,7 +1118,10 @@ stopped after 45 minutes, and finished jobs are forgotten after a week.
 ## 13. Versioning
 
 The `version` byte in each structure and the `v5` in each derivation string
-identify this version. A future version uses new strings, so its identifiers
+identify this version. Since deeds (§8.6) the registry writes version 7 in settings,
+pages, commitments and primary names (same layouts as version 6), and in a record that
+has a deed (which adds `deed` at the end); a record without a deed is still written as
+version 6. Readers must accept 6 and 7 and read a record's `deed` only at version 7. A future version uses new strings, so its identifiers
 and accounts never collide with this one's, and a client can support both.
 
 Record version 6 and the LEZ 0.4 transaction format keep every `v5` string, on
