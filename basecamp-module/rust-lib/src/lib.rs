@@ -1038,6 +1038,8 @@ pub trait NamesModule: Send + 'static {
     /// this wallet), by its public key (a never-used account can only be paid by key): `{ok: true,
     /// tx, block, amount, account}` once in a block, or `{ok: false, code (already_today |
     /// faucet_empty | busy | rate_limited | bad_key), reason, retry}`. Up to 2 minutes. Names app only.
+    /// `{ok: false, code: pending, retry: true, reason}` is asked again: the ask is under way on a
+    /// thread of its own, or (asking nothing yet) the names CLI's version is still being read.
     fn faucet_claim(&mut self, account: String) -> String;
 
     /// The accounts this app has been given: `{connected, accounts:
@@ -5379,7 +5381,17 @@ impl NamesModule for Names {
             }
             let id = bridge_net::public_account(&account)?;
             let written = format!("Public/{}", registry::account_text(&id));
-            let setup = self.cli_setup()?;
+            let setup = match self.cli_setup() {
+                // The names CLI's version is still being read (the module has just started, or the
+                // CLI is slow to answer `--version`): nothing is asked yet. Said as `pending`, which
+                // the app asks again, so the press goes on once the version is known; the busy words
+                // (`reply`'s rule for a call that isn't a poll) ended the press with "this updates in
+                // a moment" and nothing updating (wallet-1119-stallfix).
+                Err(why) if is_busy(&why) => {
+                    return Ok(json!({ "ok": false, "code": "pending", "retry": true, "reason": FAUCET_GETTING_READY }));
+                }
+                setup => setup?,
+            };
             let url = self.lez04_rpc();
             // The faucet answers once its transfer is in a block (up to 2 min): asked on a thread of
             // its own, one ask per account at a time. A call while it is under way answers that it
@@ -8010,6 +8022,8 @@ const ACCOUNTS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 const SETTINGS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// How often the faucet's state is read again.
 const FAUCET_INFO_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// What a faucet press answers (`pending`) while the names CLI's version is still being read.
+const FAUCET_GETTING_READY: &str = "Getting ready to ask the faucet… the wallet is still reading which names CLI it runs.";
 
 /// The app asking, as Basecamp names its credential: a module's name, or
 /// `host` for the host itself (Basecamp, or `logosctl` driving the module).
@@ -16886,6 +16900,62 @@ mod tests {
         assert_eq!(asked.lock().unwrap().len(), count, "nothing asked while it says to wait");
         BRIDGE_HTTP.with(|on| on.set(false));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// wallet-1119: the stall test's faucet press answered "still reading the names CLI's
+    /// version; this updates in a moment" on 3 of 4 full runs (and on names-stall-3 alone, 1 of
+    /// 3). The setup's first call waits 400 ms for the CLI's `--version` (`served::WAIT_BUDGET`);
+    /// past that, approve's 3 s CLI read is skipped, the polls answer at once, and the press comes
+    /// about 550 ms after the read began. The CLI is watched every 200 ms (`cli::wait_or_stop`), so
+    /// a `--version` read that took the third tick (600 ms) was still under way at the press. Those
+    /// words end the press in the app, and nothing updates. A press while the version is still
+    /// being read is `pending` (the app asks again every 3 s) and asks nothing yet; once the
+    /// version is known, the faucet is asked once, and its answer is the press's.
+    #[test]
+    fn a_faucet_press_while_the_cli_s_version_is_read_is_pending_then_asks_the_faucet_once() {
+        const KEY: &str = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let mine = registry::account_text(&deposit::key_account(&deposit::public_key_text(KEY).unwrap()));
+        let account = format!("Public/{mine}");
+        let accounts = json!({ "public": [mine], "private": [], "keys": { mine.clone(): KEY } });
+        // A CLI that takes 3 s to say its version (well past any call's wait).
+        let tail = format!("case \"$*\" in\n *--version*) sleep 3; echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n *) echo '{accounts}' ;;\n esac");
+        let (mut names, dir) = with_wallet("faucet-version", &tail);
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = asked.clone();
+        names.sequencer = registry::stub_rpc(move |request| {
+            if request["method"] == "bridge_faucet" {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return registry::rpc_ok(json!({ "ok": true, "amount": "10000000", "block": 9, "tx": "ab".repeat(32) }));
+            }
+            registry::rpc_ok(Value::Null)
+        });
+        names.served = served::Served::threaded();
+        names.net = Net::Lez04;
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let press = |names: &mut Names| {
+            let started = std::time::Instant::now();
+            let (claim, blocking) = served::on_dispatch(|| names.faucet_claim(account.clone()));
+            assert!(started.elapsed() < std::time::Duration::from_secs(1) && blocking.is_empty(), "{:?} {blocking:?}", started.elapsed());
+            parsed(&claim)
+        };
+        let first = press(&mut names);
+        assert_eq!(first["value"]["code"], "pending", "{first}");
+        assert_eq!(first["value"]["retry"], true, "{first}");
+        assert_eq!(first["value"]["reason"], FAUCET_GETTING_READY, "nothing is asked yet: {first}");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Asked again, as the app does, until it answers.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let answered = loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let again = press(&mut names);
+            if again["value"]["code"] != "pending" {
+                break again;
+            }
+            assert!(std::time::Instant::now() < deadline, "never answered: {again}");
+        };
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!((answered["value"]["ok"].clone(), answered["value"]["amount"].clone()), (json!(true), json!("10000000")), "{answered}");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "the faucet is asked once");
     }
 
     // ── The third stall (2026-11-18, build 31153da on the owner's Basecamp) ──
