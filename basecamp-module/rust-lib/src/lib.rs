@@ -6909,7 +6909,7 @@ impl NamesModule for Names {
         }
         // The plan (`send` false) never waits: the node's answers, LEZ's version and channel and
         // the account's key are read without waiting (busy until they are back).
-        let mut body = || {
+        let body = || {
             let from = chain::parse_key(&from_key).ok_or("choose the key to send from")?;
             let amount = chain::whole_amount(&amount)?;
             let to = match cli::bridge_to(&to)? {
