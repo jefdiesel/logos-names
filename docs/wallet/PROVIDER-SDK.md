@@ -276,9 +276,10 @@ gives the other.
 | Method | What it does | Value |
 |---|---|---|
 | `request_nft_access(reason)` | Asks to see which NFTs some accounts hold. The person ticks the accounts (private ones only if they tick them). The grant is shown as "which NFTs these accounts hold, with their collections and metadata". | a request (`kind: "nft_list"`), or `{request: null, state: "approved", accounts}` when already given |
-| `granted_nfts()` | The NFTs of the accounts you were given: `{accounts, nfts: [{program, account, account_kind, definition, token, print_balance, collection}]}`. `token` is `master` or `copy` (the program has no serial number); `collection` is `{definition, name, printable_supply, standard, uri, creators}`, or null when it can't be read. Answers busy until the wallet's first read is back. | as said |
-| `nft_membership(program_id, definition)` | Whether those accounts hold an NFT of that collection: `{member, count, accounts}`. It is a plain answer about the accounts you were given, not a private proof. | as said |
-| `propose_nft_transfer(program_id, from, destination, summary)` | Asks to send the one NFT `from` holds under that program (a copy, or the master with all its print rights) to an LNS name or `Public/<id>`. `from` must be an account you were given for the list. Someone's private receiving keys are refused: the wallet can't check that their account is ready. | a request (`kind: "nft_transfer"`) |
+| `granted_nfts()` | The NFTs of the accounts you were given: `{accounts, nfts: [{program, account, account_kind, definition, token, print_balance, collection}]}`. A public account is written `Public/<id>`; a private one only as a handle made for your app alone, `Private/~<40 hex>`, never its ID. `token` is `master` or `copy` (the program has no serial number); `collection` is `{definition, name, printable_supply, standard, uri, creators}`, or null when it can't be read. Answers busy until the wallet's first read is back. | as said |
+| `nft_membership(program_id, definition)` | Whether those accounts hold an NFT of that collection: `{member, count}`. A plain answer about the accounts you were given, not a private proof. | as said |
+| `request_nft_transfers(reason)` | Asks to be allowed to propose NFT transfers, a capability apart from the list. | a request (`kind: "nft_transfers"`), or `{request: null, state: "approved"}` |
+| `propose_nft_transfer(program_id, from, destination, summary)` | Asks to send the one NFT `from` holds under that program (a copy, or the master with all its print rights) to an LNS name or `Public/<id>`. `from` is an account (or a handle) you were given for the list, and you need `request_nft_transfers` too. Someone's private receiving keys are refused: the wallet can't check that their account is ready. | a request (`kind: "nft_transfer"`) |
 | `nft_request_status(request_id)` / `cancel_nft_request(request_id)` | How your NFT request stands / withdraw it while pending. | `{request, kind, state, program, from, destination, tx, error}` |
 | `drop_nft_access()` | Gives up the NFT list. | `{revoked}` |
 
@@ -293,12 +294,31 @@ gives the other.
   proven), `done` (with `tx`), `failed` (with one of the plain refusals, never the wallet's own
   text), `rejected`, `expired`, `cancelled`. Same limits as other requests (4 waiting per app,
   30 an hour, 10 minutes to answer).
+- Approval waits for the Program Registry's answer about who publishes your app, as for every
+  other request; a failed publisher check needs the person's extra tick.
 - Names app only: `pending_nft_requests()`, `approve_nft_request(id, accounts, digest,
   fee_payer)`, `reject_nft_request(id)`, `nft_grants()` (`[{app, accounts, since, capability,
-  discloses}]`) and `revoke_nft_access(app)`.
-- The NFT requests show on the Names app's Collectibles page while it is open.
-- A membership PROOF request (LP-0001's private proof) is not here yet. It will be a third,
-  separate capability that needs no account access.
+  discloses}]`), `revoke_nft_capability(app, capability)` and `revoke_nft_access(app)`.
+  "Remove access" (`revoke_app`) takes every NFT capability too, and cancels the app's
+  waiting NFT requests.
+- The Names app's Collectibles tab says "· N waiting" on every page while a request waits.
+
+### Membership proofs (LP-0001)
+
+A third capability, `membership_proof`, needs no account access and gives none
+(spec `~/logos/LP0001-OWNERSHIP-PROOF-SPEC.md` §4). UNRUN: no gate is pinned on any network
+yet, so every proof ends `failed` with `GATE_NOT_PINNED` and nothing is sent.
+
+| Method | Value |
+|---|---|
+| `request_membership_proof(request_json)`: `{program, collection, purpose, nonce (64 hex, yours), ttl (ms, default 1 h, at most 24 h)}`; on-chain use (`onchain`) is refused for now | `{request, state: "awaiting-approval"}` at once |
+| `membership_proof_status(request_id)` | `{request, kind, state, collection, status}`; `status.state` is `awaiting-approval`, `checking`, `proving` (with `elapsed_seconds`), `sending`, `waiting-for-block`, `ready` (with `proof: {gate, slot, not_before, expires_at, tx_hash}`), `failed` (with `code` and `plain_message`), `rejected`, `expired` or `cancelled` |
+| `cancel_membership_proof(request_id)` | until sending |
+
+- Errors (`code`): `NOT_A_MEMBER`, `FEE_RESERVE`, `ACCOUNT_BUSY`, `OUT_OF_WINDOW`,
+  `PROVER_OUT_OF_MEMORY`, `RPC_UNREACHABLE`, `GATE_NOT_PINNED`, `UNEXPECTED_OUTCOME`.
+- The wallet fills in the context's audience from your app's identity; you can't set it.
+- Nothing returns an account, a balance, a holding, a commitment or a nullifier.
 
 ### Inscriptions on the Logos Blockchain
 

@@ -156,6 +156,10 @@ The sheet shows the row that applies before Approve. Notes:
   name's private keys are used only when the person picks them, with the warning above.
 - **Receive of waiting credits** goes through the same sheet: one private transaction per NFT,
   each paid by the private account chosen there.
+- **Who pays a public action is named too.** When another public account pays the fee (a new
+  account holds nothing), the transaction names it, so anyone can see the two belong together.
+  The sheet says so; Receive says a new public account is tied to its fee payer, and a new
+  private account isn't.
 - **Burn** (two steps): a copy burns exactly 1; a master burns all its print rights, and the NFT
   with it. The definition is declared, as the program needs (§8: without it, refused).
 - **Print** (a master holder only): one copy to a ready holding; the master keeps the rest.
@@ -201,13 +205,15 @@ print."
 | `names nft …`, `names module nft …` on the stock wallet crate | `cli/src/nft.rs` | written; not yet compiled (RUN-AFTER-3AM.txt step 2) |
 | Collectibles page, the one sheet, apps' NFT requests | `basecamp/qml/Main.qml` (two marked blocks), `basecamp/qml/nft.mjs` | `node basecamp/nft.test.mjs`; 13 offscreen renders (`render.py collectibles-*`) |
 | End-to-end on the throwaway chain | `RUN-AFTER-3AM.txt` steps 4-5 | not run |
+| The CLI | compiled on the laptop (`RISC0_SKIP_BUILD_KERNELS=1`) | 12 NFT tests pass |
+| Sheets bound to what they showed | plan `pin` (state digest) + resolved recipient, `--expect-state` | tested in the module and the CLI |
+| Membership proofs, wallet side | `proof.rs` (gate rules ported, checked against the gate's vectors), `provider_proof.rs` | tested with a stand-in gate client; the real proving is UNRUN, fails closed `GATE_NOT_PINNED` |
 
 Known limits, on purpose for this step:
 
-- An app's NFT request shows on the Collectibles page while it is open; the app-wide request
-  sheet is left to merge with the provider work on other branches.
-- The image fetch checks the host's name or address as written; a name that resolves to a
-  private address is not caught (no DNS check). Off by default, per collection.
+- An app's NFT request is answered on the Collectibles page; the tab says it waits, on every
+  page (no poll of its own: it rides on the existing request read).
+- Apps get private accounts as per-app handles, never their IDs.
 - `nft_membership` is a plain answer about accounts the app was given, not a private proof.
 - One NFT per account per program means a wallet makes a new account per NFT received. The
   Receive form offers a new account first.

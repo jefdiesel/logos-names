@@ -21,7 +21,8 @@ rsync -a --delete --exclude target --exclude .git /Users/jef/logos/logos-names-n
    # includes basecamp-module/logos-rust-sdk-src (git-ignored, needed by the module tests)
 
 ------------------------------------------------------------------------------------------
-2. Compile and test the names CLI (NOT YET COMPILED ANYWHERE: the laptop's lock was busy)
+2. Compile and test the names CLI on the build host (it compiles and its 12 NFT tests pass on
+   the laptop since 2026-11-19, with RISC0_SKIP_BUILD_KERNELS=1; this builds the binary the e2e uses)
 ------------------------------------------------------------------------------------------
 ssh minim4 'bash -c ". /Volumes/exos162/logos/tools/sccache-env.sh; export PATH=\$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin CARGO_TARGET_DIR=/Volumes/exos162/logos/lp0001/wallet-nft/target TMPDIR=/Volumes/exos162/logos/lp0001/wallet-nft/tmp CARGO_BUILD_JOBS=4; mkdir -p \$TMPDIR; cd /Volumes/exos162/logos/lp0001/wallet-nft/names-nft && /Volumes/exos162/logos/dev/fix-names/mini-lock.sh nice -n 15 cargo test --locked -p names_cli nft > /Volumes/exos162/logos/lp0001/wallet-nft/cli-test.log 2>&1; echo exit \$? >> /Volumes/exos162/logos/lp0001/wallet-nft/cli-test.log"'
 ssh minim4 'grep -E "^error|test result|FAILED|panicked|^exit" -A5 /Volumes/exos162/logos/lp0001/wallet-nft/cli-test.log | head -60'
