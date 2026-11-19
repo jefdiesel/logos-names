@@ -104,8 +104,16 @@ fn native_program() -> AccountId {
 /// before inclusion makes the wallet price and prove again (up to twice), or the call is dropped.
 pub const PRIVATE_CALL_FEE_HEADROOM_BLOCKS: u64 = 0;
 
-/// The wallet's fee settings while it plans and proves a private call; put back to the defaults
-/// after each.
+/// Puts the wallet's headroom back to its configured value after a private call. Only the
+/// headroom is touched, so a fee payer or refund target set on this wallet (`set_private_fee_payer`)
+/// stays as it was.
+fn restore_fee_headroom<C: wallet::WalletSequencerClient>(wallet: &mut wallet::WalletCore<C>) {
+    let configured = wallet.config().fee_headroom_blocks;
+    wallet.set_fee_headroom_blocks(configured);
+}
+
+/// The fee settings a private call is priced with, as `FeeParams` (the test below checks that only
+/// the headroom differs from the defaults; the calls above set just the headroom).
 fn private_call_fee_params() -> wallet::FeeParams {
     wallet::FeeParams { headroom_blocks: Some(PRIVATE_CALL_FEE_HEADROOM_BLOCKS), ..wallet::FeeParams::default() }
 }
@@ -279,7 +287,7 @@ impl Client {
         let wallet_mentions: Vec<AccountMention> = call.mentions.iter().map(|(_, mention, _)| mention.clone()).collect();
         let programs: ProgramCatalog = catalog.iter().cloned().collect();
         self.wallet.set_dry_run(true);
-        self.wallet.set_fee_params(private_call_fee_params());
+        self.wallet.set_fee_headroom_blocks(PRIVATE_CALL_FEE_HEADROOM_BLOCKS);
         let (dry, mut printed) = captured(self.wallet.send_tx_with_pre_check(
             wallet_mentions,
             0,
@@ -292,7 +300,7 @@ impl Client {
         ))
         .await;
         self.wallet.set_dry_run(false);
-        self.wallet.set_fee_params(wallet::FeeParams::default());
+        restore_fee_headroom(&mut self.wallet);
         match dry {
             // rc3 hands the dry run's report back instead of printing it; its text is the
             // lines rc1 printed, which are read below.
@@ -567,7 +575,7 @@ impl Client {
         println!("phase: prove");
         println!("acting privately; proving it on this computer ({}), so the chain never learns your account", crate::proving_words());
         let started = std::time::Instant::now();
-        self.wallet.set_fee_params(private_call_fee_params());
+        self.wallet.set_fee_headroom_blocks(PRIVATE_CALL_FEE_HEADROOM_BLOCKS);
         let sent = self
             .wallet
             .send_tx_with_pre_check(wallet_mentions, 0, call.message.clone(), &programs, None, AsyncDelivery::default(), call.fee_payer, move |states| {
@@ -585,7 +593,7 @@ impl Client {
                 Ok(())
             })
             .await;
-        self.wallet.set_fee_params(wallet::FeeParams::default());
+        restore_fee_headroom(&mut self.wallet);
         self.proved_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         let (hash, _) = sent.map_err(|error| crate::refused_or(error, "the sequencer did not accept the transaction"))?;
         println!("phase: submit");
