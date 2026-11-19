@@ -60,6 +60,12 @@ say "deploy and configure the Names registry"
 size=$(wc -c < "$NAMES_ELF" | tr -d " "); count=$(( (size + SEGMENT - 1) / SEGMENT ))
 REG=$(N wallet account new public | id_of Public); segs=()
 for i in $(seq 1 "$count"); do segs+=("Public/$(N wallet account new public | id_of Public)"); done
+# The loader's own split can differ from size / SEGMENT (the deeds image splits into one fewer): ask
+# it with a dry run and supply exactly what it says, as scripts/deeds-deploy-our04.sh does.
+n=$(N wallet --dry-run program-loader deploy --elf "$NAMES_ELF" --header "Public/$REG" --segments "${segs[@]}" --payer "Public/$F" 2>&1 | grep -oE "splits into [0-9]+" | grep -oE "[0-9]+" || true)
+if [ -n "$n" ] && [ "$n" != "${#segs[@]}" ]; then
+  segs=(); for i in $(seq 1 "$n"); do segs+=("Public/$(N wallet account new public | id_of Public)"); done
+fi
 N wallet program-loader deploy --elf "$NAMES_ELF" --header "Public/$REG" --segments "${segs[@]}" --payer "Public/$F" | grep -vE "^(Stored|Transaction data)" | cut -c1-160
 export LOGOS_NAMES_PROGRAM=$REG
 N wallet auth-transfer send --from "Public/$F" --to "Public/$REG" --amount 10000000 | grep -vE "^(Stored|Transaction data)" | cut -c1-160
