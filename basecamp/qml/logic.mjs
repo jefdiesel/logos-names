@@ -1196,6 +1196,9 @@ export function requestRisky(request, publisherFailed, ownSendBack) {
         return false
     if (publisherFailed)
         return true
+    // Exit keys for an Ethereum address the person hasn't approved for this app: always the tick.
+    if (isExitAsk(request))
+        return true
     if (decodedBurn(request) && request.sheet.refused !== true)
         return ownSendBack !== true
     if (request.kind === "private_call" || request.kind === "relayed_call" || request.kind === "programs")
@@ -1223,6 +1226,43 @@ export function burnDestination(request, bridgeRecord) {
             ? "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + "; the address above is the LEZ Bridge's record of it, not checked by this wallet."
             : "Ethereum address: not in the call. It is sealed in the exit commitment " + exitShort + ", which the wallet can't open, so the wallet can't show or check it.",
     ]
+}
+
+/// Whether a request asks for exit keys (`RFP022/exit`) for an Ethereum address the person hasn't
+/// approved for that app and account (the module adds `exit`, exit_recipient.rs).
+export function isExitAsk(request) {
+    return !!request && request.kind === "secret" && !!request.exit && typeof request.exit === "object" && typeof request.exit.recipient === "string"
+}
+
+/// What the sheet shows of such an ask, made by the module from the context it decoded:
+/// `{halves, words, why, bridge}` (the address in two halves, the four words or why there are
+/// none, the bridge and its vault), each cleaned.
+export function exitShown(request) {
+    if (!isExitAsk(request))
+        return { halves: [], words: "", why: "", bridge: "" }
+    var e = request.exit
+    var bridge = e.bridge_label
+        ? "Bridge: " + clean(e.bridge_label) + " (vault " + clean(e.vault) + ", Ethereum chain " + clean(e.chain_id) + ")."
+        : "Bridge: one this wallet doesn't know (configuration " + clean(String(e.cfg_id || "").substr(0, 14)) + "…)."
+    return { halves: addressHalves(clean(e.recipient)), words: e.words_text ? clean(e.words_text) : "", why: e.words_why ? clean(e.words_why) : "", bridge: bridge }
+}
+
+/// The tick of an exit ask.
+export function exitTickText(request) {
+    var words = isExitAsk(request) && !!request.exit.words_text
+    return "This is my Ethereum address: I compared it" + (words ? ", and its four words," : "") + " with where I'm sending to. Tokens sent back to it can't be taken back."
+}
+
+/// Whether `recipient` is approved for `account` in `approved` (`exit_recipients`: {account:
+/// ["0x…"]}); accounts compared without their Public/ or Private/ mark, addresses in any case.
+export function recipientApproved(approved, account, recipient) {
+    var bare = function(a) { return String(a || "").replace(/^(Public|Private)\//, "") }
+    var want = String(recipient || "").toLowerCase()
+    if (want === "" || !approved || typeof approved !== "object")
+        return false
+    return Object.keys(approved).some(function(key) {
+        return bare(key) === bare(account) && Array.isArray(approved[key]) && approved[key].some(function(r) { return String(r).toLowerCase() === want })
+    })
 }
 
 /// The tick of a burn that isn't this app's own send-back. `bridgeRecord`: as in burnDestination.

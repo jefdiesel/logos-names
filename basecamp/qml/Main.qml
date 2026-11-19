@@ -1852,7 +1852,20 @@ Item {
     function sbContinue() {
         if (!sbAddressNow.canContinue || sbCheck === null || sbCheck.key !== Logic.addressBoxKey(sbCodeInput))
             return
-        sbPlan()
+        // The address was read back and ticked here: the names module keeps it as approved for the
+        // LEZ Bridge's exits from this account, so the plan's exit keys ask nothing more. If that
+        // fails (an older module), the plan goes on and the wallet's exit sheet asks instead.
+        var recipient = String(sbCheck.recipient || "")
+        sbAsking = true
+        askLater("approve_exit_recipient", ["lez_bridge", sbAccount, recipient], function() {
+            sbAsking = false
+            loadExitRecipients()
+            sbPlan()
+        }, function(message) {
+            sbAsking = false
+            console.log("names_ui: approve_exit_recipient:", message)
+            sbPlan()
+        })
     }
     /// "Save to my addresses": a short name for the address this send-back went to (kept by the
     /// bridge on this computer; never on chain).
@@ -1919,6 +1932,17 @@ Item {
     // step 2: id -> that address. Kept in memory for this run of Names: a send-back from before a
     // restart, or one another app planned through the LEZ Bridge, isn't here and its burn gets the tick.
     property var sbOwnPlans: ({})
+    // The Ethereum addresses the names module keeps as approved for the LEZ Bridge's exits, by
+    // account (`exit_recipients`): approved on the exit sheet or ticked at step 2, kept in the
+    // wallet folder, so a send-back is still this wallet's own after a restart.
+    property var sbApproved: ({})
+    function loadExitRecipients() {
+        askLater("exit_recipients", ["lez_bridge"], function(value) {
+            sbApproved = value && typeof value === "object" ? value : ({})
+        }, function(message) {
+            console.log("names_ui: exit_recipients:", message)
+        })
+    }
     property var sbStatuses: ({})          // id → send_back_status
     property var sendBacks: []             // Logic.sendBacksFrom rows
     property bool sendBacksLoaded: false
@@ -6887,6 +6911,9 @@ Item {
             return bridge ? "Let the bridge see this account?" : request.app + " asks to see an account"
         if (request.kind === "programs")
             return bridge ? "Allow the bridge's programs?" : request.app + " asks to allow its programs"
+        // Exit keys for an Ethereum address not approved yet: the address is the question.
+        if (Logic.isExitAsk(request))
+            return bridge ? "Let the bridge send back to this Ethereum address?" : request.app + " asks to send back to this Ethereum address"
         if (request.kind === "secret")
             return bridge ? (String(request.scope || "") === "RFP022/exit" ? "Allow the bridge's exit keys?" : "Allow the bridge's deposit keys?") : request.app + " asks for keys of its own"
         return appRequestTitle(request)
@@ -6939,6 +6966,9 @@ Item {
         // One the wallet refuses keeps the sheet's own warning (Approve stays dim anyway).
         if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
             return request.sheet.refused !== true ? Logic.burnTickText(request, appBurnUnderRecord(request)) : (request.sheet.warnings || []).length > 0 ? String(request.sheet.warnings[0]) : ""
+        // Exit keys for an address not approved yet: the person says it is theirs.
+        if (Logic.isExitAsk(request))
+            return Logic.exitTickText(request)
         return "The wallet can't decode this call; it shows only its hash. Tick to approve it anyway, if you trust " + (request.app === "lez_bridge" ? "the bridge" : request.app) + "."
     }
     property bool appBusy: false          // an answer is on its way to the module
@@ -6987,6 +7017,9 @@ Item {
     function loadAppRequests() {
         askLater("pending_requests", [], function(value) {
             appRequests = Array.isArray(value) ? value : []
+            // A burn's sheet reads which addresses are this wallet's own (kept by the module).
+            if (appRequests.some(function(r) { return Logic.isDecodedBurn(r) }))
+                loadExitRecipients()
             var request = appRequest
             if (request === null) {
                 appChosenFor = ""
@@ -7061,7 +7094,7 @@ Item {
     /// planned in this wallet with the address read back and ticked at step 2 (`sbOwnPlans`), and
     /// that address is the one drawn above the sheet (Logic.burnIsOwnSendBack).
     function appBurnOwn(request) {
-        return Logic.burnIsOwnSendBack(request, { inline: appInline, view: walletView, focus: sbFocus, recorded: sbOwnPlans[sbFocus] || "", shown: sbFocusRow !== null ? String(sbFocusRow.recipient || "") : "" })
+        return Logic.burnIsOwnSendBack(request, { inline: appInline, view: walletView, focus: sbFocus, recorded: sbOwnPlans[sbFocus] || (sbFocusRow !== null && Logic.recipientApproved(sbApproved, sbFocusRow.account, sbFocusRow.recipient) ? String(sbFocusRow.recipient) : ""), shown: sbFocusRow !== null ? String(sbFocusRow.recipient || "") : "" })
     }
     /// A decoded burn drawn inline under the LEZ Bridge's record of its send-back's address, which
     /// this wallet didn't tick (not appBurnOwn): the sheet says the address above is that record.
@@ -7964,6 +7997,23 @@ Item {
         Repeater {
             model: root.appSheetCompact && sheetBody.request !== null && !root.appBurnOwn(sheetBody.request) ? Logic.burnDestination(sheetBody.request, root.appBurnUnderRecord(sheetBody.request)) : []
             Hint { required property var modelData; color: root.ink; textFormat: Text.PlainText; text: modelData }
+        }
+        // Exit keys for an Ethereum address not approved yet: the address in full, the four words
+        // the wallet made itself, the bridge; then the tick.
+        ColumnLayout {
+            readonly property var e: Logic.exitShown(sheetBody.request)
+            visible: root.appSheetCompact && Logic.isExitAsk(sheetBody.request)
+            Layout.fillWidth: true
+            spacing: 4
+            Hint { color: root.ink; textFormat: Text.PlainText; text: "To this Ethereum address:" }
+            Repeater {
+                model: parent.e.halves
+                Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+            }
+            Text { visible: parent.e.words !== ""; Layout.fillWidth: true; text: parent.e.words; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(24); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+            Hint { visible: parent.e.words !== ""; textFormat: Text.PlainText; font.pixelSize: root.px(15); text: "Its four words, made by this wallet: they match the ones on the bridge page for the same address." }
+            Hint { visible: parent.e.why !== ""; textFormat: Text.PlainText; color: root.ink; text: parent.e.why }
+            Hint { textFormat: Text.PlainText; text: parent.e.bridge }
         }
         Hint { visible: root.appSheetCompact && root.publisherChecking(sheetBody.request); font.pixelSize: root.px(15); text: root.publisherShown(sheetBody.request) !== null ? root.publisherShown(sheetBody.request).text : "" }
         Tick {

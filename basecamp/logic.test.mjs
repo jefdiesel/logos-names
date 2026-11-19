@@ -605,6 +605,21 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("burnMatchesSendBack", [burnMatchesSendBack(ours, "sb-e2ba7765d0fbf247"), burnMatchesSendBack(ours, "sb-0000000000000000"), burnMatchesSendBack(ours, ""), burnMatchesSendBack(burnOf("other_app", "bridge v7", bridges[3][1]), "sb-e2ba7765d0fbf247"), burnMatchesSendBack({ kind: "connect", app: "lez_bridge" }, "sb-e2ba7765d0fbf247")],
     [true, false, false, false, false]);
   check("isDecodedBurn", [isDecodedBurn(ours), isDecodedBurn({ kind: "relayed_call", sheet: {} }), isDecodedBurn(null)], [true, false, false]);
+  // Exit keys for an address not approved (the module's sheet data, exit_recipient.rs).
+  const { isExitAsk, exitShown, exitTickText, recipientApproved } = await import("./qml/logic.mjs");
+  const exitAsk = { id: "r5", kind: "secret", app: "lez_bridge", account: "Private/AAA", scope: "RFP022/exit",
+    exit: { recipient: "0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8", bridge_label: "bridge v4", vault: "0xc2c6a059eab928966b24fa5549d441a3b17b54ed", chain_id: 11155111, words_text: "myth · nerve · session · until", words_why: null } };
+  check("an exit ask always needs the tick", [requestRisky(exitAsk, false, false), isExitAsk(exitAsk), isExitAsk({ kind: "secret", scope: "RFP022/exit" })], [true, true, false]);
+  check("an exit ask shows the address, words and bridge", exitShown(exitAsk), { halves: ["0x3c2f2c4baec708aee232", "379eb00e9ecfa1b351f8"], words: "myth · nerve · session · until", why: "",
+    bridge: "Bridge: bridge v4 (vault 0xc2c6a059eab928966b24fa5549d441a3b17b54ed, Ethereum chain 11155111)." });
+  check("an exit ask for an unknown bridge, no words", ((s) => [s.words, s.bridge])(exitShown({ ...exitAsk, exit: { recipient: exitAsk.exit.recipient, cfg_id: "0x1111111111111111111111", words_text: null, words_why: "can't make the four words" } })),
+    ["", "Bridge: one this wallet doesn't know (configuration 0x111111111111…)."]);
+  check("exit tick", [exitTickText(exitAsk), exitTickText({ ...exitAsk, exit: { ...exitAsk.exit, words_text: null } })],
+    ["This is my Ethereum address: I compared it, and its four words, with where I'm sending to. Tokens sent back to it can't be taken back.",
+     "This is my Ethereum address: I compared it with where I'm sending to. Tokens sent back to it can't be taken back."]);
+  check("recipientApproved", [recipientApproved({ "Private/AAA": ["0x3c2f2c4baec708aee232379eb00e9ecfa1b351f8"] }, "AAA", "0x3C2F2C4BAEC708AEE232379EB00E9ECFA1B351F8"),
+    recipientApproved({ "Private/AAA": ["0x3c"] }, "Private/BBB", "0x3c"), recipientApproved({}, "AAA", "0x3c"), recipientApproved(null, "AAA", "0x3c"), recipientApproved({ "Public/AAA": ["0x3c"] }, "Public/AAA", "")],
+    [true, false, false, false, false]);
   // A focus-matching burn this wallet didn't tick: the address above is the LEZ Bridge's record, said so.
   check("the tick when the address above is the bridge's record", burnTickText(ours, true),
     "The address above is the LEZ Bridge's record of this send-back; this wallet didn't read it back or tick it. Tick only if it is your address; the burn can't be undone.");
@@ -643,6 +658,11 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // Finding 1: Names keeps the address it ticked for each send-back it planned, and the exemption reads it.
   check("Main.qml: sbPlan records the ticked address", /plans\[id\] = ticked\s*sbOwnPlans = plans/.test(sheetQml), true);
   check("Main.qml: appBurnOwn passes the record", /recorded: sbOwnPlans\[sbFocus\]/.test(sheetQml), true);
+  // The record outlives a restart: an address approved on the exit sheet or ticked at step 2 is
+  // kept by the names module (exit_recipients), and step 2 approves it before the plan.
+  check("Main.qml: appBurnOwn reads the kept approvals", sheetQml.includes("Logic.recipientApproved(sbApproved, sbFocusRow.account, sbFocusRow.recipient)"), true);
+  check("Main.qml: step 2 approves the ticked address before the plan", /function sbContinue\(\)[\s\S]{0,600}approve_exit_recipient[\s\S]{0,400}sbPlan\(\)/.test(sheetQml), true);
+  check("Main.qml: the short sheet shows an exit ask's address", sheetQml.includes("Logic.exitShown(sheetBody.request)"), true);
   // Finding 2: a burn for another send-back than the one in focus is never drawn inline under its address.
   check("Main.qml: appInline on Bridge to Ethereum needs the burn to match the focus", sheetQml.includes("!Logic.isDecodedBurn(appRequest) || Logic.burnMatchesSendBack(appRequest, sbFocus)"), true);
   check("Main.qml: the address block above the sheet is the burn's own", sheetQml.includes("visible: sendBackScreen.burning && root.sbFocusRow !== null && (!Logic.isDecodedBurn(root.appRequest) || Logic.burnMatchesSendBack(root.appRequest, root.sbFocus))"), true);
