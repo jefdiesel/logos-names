@@ -44,6 +44,7 @@ use sha2::{Digest as _, Sha256};
 use wallet::{AccountIdentity, AccountMention, AsyncDelivery, ExecutionFailureKind};
 
 use crate::{Client, parse_account};
+use sequencer_service_rpc::RpcClient as _;
 
 /// What the module sends: the call as `provider_private::cli_input` writes it.
 #[derive(serde::Deserialize)]
@@ -365,7 +366,7 @@ impl Client {
         // proof (up to twice); it has no cap there, so a rise past this ceiling meanwhile is
         // reported after the send (`declared_fee_line`), never charged in silence.
         let quote = self.wallet.client().get_fee_state().await.context("could not read the chain's fee state")?;
-        let headroom = approved_ceiling(&quote, self.wallet.config().fee_headroom_blocks, cycles, reserve, about);
+        let headroom = approved_ceiling(&quote, self.wallet.config().fee_headroom_blocks, u64::try_from(cycles).unwrap_or(u64::MAX), reserve, about);
 
         // 2. The open replay.
         let own_account = self.wallet.get_account_private(call.account).map(|found| found.data).unwrap_or_default();

@@ -16,3 +16,7 @@ Already run on the MacBook (2026-11-18): node basecamp/logic.test.mjs (ALL PASS)
 Review 4 (2026-11-19): step 1 also runs private_call::tests::the_approved_at_most_is_a_ceiling_above_the_head_fee_and_the_send_holds_to_it;
 and the Basecamp module's provider tests (provider_private::, the approved "at most" passed back on send): see the bridge
 repository's RUN-AFTER-3AM.txt part F for the command. Node, already run: claimdelay.test.mjs ALL PASS (findings 2-4).
+
+2026-11-19, after the first build-host run: the compile errors in cli/src/private_call.rs (RpcClient import; cycles as u64) are
+fixed, and the whole names_cli suite was compiled and run on the MacBook: 111 passed, 0 failed
+(RISC0_SKIP_BUILD_KERNELS=1 cargo test -j 4 -p names_cli --features local-prove).
