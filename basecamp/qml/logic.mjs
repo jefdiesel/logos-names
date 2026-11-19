@@ -3317,3 +3317,17 @@ export function moveResultLine(plan, ended) {
     }
     return { kind: "problem", text: String(ended.problem || "The move didn't go through.") }
 }
+
+// ── Signed withdraw-to codes (rfp-022 WALLET-ROADMAP item 9) ──
+
+export const SIGNED_LINE = "Signed by this address on the bridge page. Still compare the four words."
+export const UNSIGNED_LINE = "Not signed: compare the four words."
+
+/// The line under the four words on Bridge to Ethereum, step 2, from `send_back_check`: `{kind,
+/// text}`. The LEZ Bridge module checked the signature (a broken one never gets here: it is refused
+/// with its words). A bridge module from before signed codes says nothing of it: no line.
+export function signatureLine(check) {
+    if (!check || (check.signed !== true && check.signed !== false))
+        return { kind: "", text: "" }
+    return check.signed === true ? { kind: "done", text: SIGNED_LINE } : { kind: "", text: UNSIGNED_LINE }
+}

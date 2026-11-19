@@ -1492,6 +1492,19 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("move: the old 'isn't in the wallet yet' line only without the feature", /text: root\.moveCan \? "Move beside a wrapped token/.test(qml), true);
 }
 
+// Roadmap 9: the signed withdraw-to code's line on step 2.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("signature line: signed / not signed / an older bridge module / nothing yet",
+    [L.signatureLine({ signed: true }), L.signatureLine({ signed: false }), L.signatureLine({ words_text: "a · b · c · d" }), L.signatureLine(null)],
+    [{ kind: "done", text: "Signed by this address on the bridge page. Still compare the four words." }, { kind: "", text: "Not signed: compare the four words." }, { kind: "", text: "" }, { kind: "", text: "" }]);
+  check("signature line: the module's own text is never shown (fixed words)", L.signatureLine({ signed: true, signature_line: "<b>x</b>" }).text, L.SIGNED_LINE);
+  const signed = "logoswd1qgqqqqqqqz4rdfa0hhceys6wnzytkg76umedzhh2vfrw6yrnluqczgjkarl95rrs7jk58am87gggjfsqht535d6mq4tkkf5zs4z4c03fwcyc7gyk9al6rl2784y0kuqyjsjx5e85ddvtkw89vjrfret5skh5wpew2mgaxaqrrdxnurahgfu6sjsm4xcna0";
+  check("a signed code (198 characters) is taken whole from the box, a link or chat text", [L.sendBackCode(signed), L.sendBackCode("https://nameswallet.app/bridge/#" + signed.substr(0, 90) + "\n" + signed.substr(90)), L.addressBoxKey(" " + signed.toUpperCase() + " ")], [signed, signed, signed]);
+  check("signature line: under the four words, as a status line", /StatusLine \{ readonly property var sig: Logic\.signatureLine\(root\.sbCheck\)/.test(qml), true);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);
 

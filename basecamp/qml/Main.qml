@@ -12048,6 +12048,8 @@ Item {
                                 Text { required property var modelData; Layout.fillWidth: true; text: modelData; textFormat: Text.PlainText; color: root.ink; font.family: root.mono; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
                             }
                             Text { Layout.fillWidth: true; text: root.sbCheck !== null ? String(root.sbCheck.words_text || "") : ""; color: root.ink; font.family: root.sans; font.pixelSize: root.px(30); font.weight: Font.Bold; wrapMode: Text.WordWrap }
+                            // A signed code (WALLET-ROADMAP item 9): checked by the LEZ Bridge module; the words stay required.
+                            StatusLine { readonly property var sig: Logic.signatureLine(root.sbCheck); visible: sig.text !== ""; kind: sig.kind; text: sig.text }
                             // What the words are, and where to compare them.
                             RowLayout {
                                 Layout.fillWidth: true
