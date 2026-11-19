@@ -147,16 +147,55 @@ pub fn split(call_json: &str) -> (String, Option<Value>) {
     }
 }
 
-/// What the sheet shows: the checked address and its words, when E matches the burn's memo; an
-/// error (the call refused) when it doesn't.
-pub fn checked(o: &Opening, k: &[u8; 32], memo: &[u8; 32]) -> Result<Value, String> {
+/// What the burn itself says, against which the opening's token and amount are checked: the
+/// Ethereum token of the burned definition (from the bridge's Config) and the amount burned, with the
+/// token's decimals and symbol for the fee line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Burned {
+    pub eth_token: [u8; 20],
+    pub amount: u128,
+    pub decimals: u8,
+    pub symbol: String,
+}
+
+/// The most relay fee a vault takes: 2% of the denomination (`BridgeVault.MAX_FEE_BPS`, rfp-022
+/// `lez-bridge/client/src/kdf.rs` `max_relay_fee_cap`).
+pub fn max_relay_fee_cap(denom: u128) -> u128 {
+    (denom / 10_000) * 200 + (denom % 10_000) * 200 / 10_000
+}
+
+/// The opening against the burn: the same token and amount, a fee the vault could take and that
+/// agrees with the fee choice. Each refusal is the wallet not signing.
+pub fn matches_burn(o: &Opening, burned: &Burned) -> Result<(), String> {
+    if o.token != burned.eth_token {
+        return Err("the burn's opening names another token than the one burned, so the wallet doesn't sign it".to_owned());
+    }
+    if o.denom != burned.amount {
+        return Err("the burn's opening names another amount than the one burned, so the wallet doesn't sign it".to_owned());
+    }
+    if o.max_relay_fee > max_relay_fee_cap(o.denom) {
+        return Err("the burn's opening lets a relay keep more than a vault allows, so the wallet doesn't sign it".to_owned());
+    }
+    if (o.fee_choice == 0) != (o.max_relay_fee == 0) {
+        return Err("the burn's opening has a relay fee that doesn't agree with its fee choice, so the wallet doesn't sign it".to_owned());
+    }
+    Ok(())
+}
+
+/// What the sheet shows: the checked address and its words, and what a relay may keep of the amount,
+/// when E matches the burn's memo; an error (the call refused) when it doesn't.
+pub fn checked(o: &Opening, k: &[u8; 32], memo: &[u8; 32], burned: &Burned) -> Result<Value, String> {
     if exit_commitment(k, o) != *memo {
         return Err("the burn's Ethereum address doesn't match its exit commitment, so the wallet doesn't sign it".to_owned());
     }
     let address = format!("0x{}", hex(&o.recipient));
+    let fee = crate::bridge_send::shown(o.max_relay_fee, burned.decimals);
+    let left = crate::bridge_send::shown(o.denom.saturating_sub(o.max_relay_fee), burned.decimals);
     Ok(json!({
         "v": VERSION, "checked": true, "recipient": address, "recipient_halves": [&address[..22], &address[22..]],
         "words_text": words_text(o), "chain_id": o.chain_id, "vault": format!("0x{}", hex(&o.vault)),
+        "amount": o.denom.to_string(), "max_relay_fee": o.max_relay_fee.to_string(), "fee_choice": o.fee_choice,
+        "max_relay_fee_text": format!("{fee} {}", burned.symbol), "at_least_text": format!("{left} {}", burned.symbol),
     }))
 }
 
@@ -173,19 +212,24 @@ pub fn unchecked(why: &str) -> Value {
 /// vault, chain id), or None when it can't be read now. E binds the cfgId but not the vault or the
 /// chain the four words are made of, so all three must be the bridge's own, or an app could pick a
 /// vault that gives another address someone's familiar words.
-pub fn for_burn(opening: Option<&Value>, memo: &[u8; 32], bridge: Option<([u8; 32], [u8; 20], u64)>, key: impl FnOnce(&Opening) -> Result<Option<[u8; 32]>, String>) -> Result<Value, String> {
+///
+/// `burned`: the burn's own token and amount ([`Burned`]), or None when the Config's token list
+/// can't be read now. E binds the token, the amount and the relay fee, but the app chose them: they
+/// must be the burn's own, and the fee is shown.
+pub fn for_burn(opening: Option<&Value>, memo: &[u8; 32], bridge: Option<([u8; 32], [u8; 20], u64)>, burned: Option<&Burned>, key: impl FnOnce(&Opening) -> Result<Option<[u8; 32]>, String>) -> Result<Value, String> {
     let Some(opening) = opening else {
         return Ok(unchecked("This LEZ Bridge sends no opening: the address is sealed in the burn and can't be checked here."));
     };
     let o = parse(opening).map_err(|why| format!("{why}; the wallet doesn't sign the burn"))?;
-    let Some((cfg, vault, chain)) = bridge else {
+    let (Some((cfg, vault, chain)), Some(burned)) = (bridge, burned) else {
         return Ok(unchecked("The address can't be checked now: the bridge's Config couldn't be read."));
     };
     if (o.cfg_id, o.vault, o.chain_id) != (cfg, vault, chain) {
         return Err("the burn's opening names another bridge than the one the burn goes to, so the wallet doesn't sign it".to_owned());
     }
+    matches_burn(&o, burned)?;
     match key(&o)? {
-        Some(k) => checked(&o, &k, memo),
+        Some(k) => checked(&o, &k, memo, burned),
         None => Ok(unchecked("The address can't be checked: this app has no exit values of this account to make it with.")),
     }
 }
@@ -195,6 +239,10 @@ mod tests {
     use super::*;
 
     const VECTOR: &str = include_str!("../testdata/burn-opening-v1.json");
+
+    fn burned_of(o: &Opening) -> Burned {
+        Burned { eth_token: o.token, amount: o.denom, decimals: 18, symbol: "wETH".to_owned() }
+    }
 
     fn key(text: &str) -> [u8; 32] {
         hex_bytes(&Value::from(text), "k").unwrap()
@@ -216,17 +264,17 @@ mod tests {
             let memo = hex_bytes::<32>(&c["exit"], "exit").unwrap();
             assert_eq!(exit_commitment(&k, &o), memo);
             assert_eq!(words_text(&o), c["words_text"].as_str().unwrap());
-            let shown = checked(&o, &k, &memo).unwrap();
+            let shown = checked(&o, &k, &memo, &burned_of(&o)).unwrap();
             assert_eq!(shown["checked"], true);
             assert_eq!(shown["recipient"], c["opening"]["recipient"].as_str().unwrap().to_lowercase());
             // Another key (another wallet), another address, another fee: refused.
-            assert!(checked(&o, &[7; 32], &memo).unwrap_err().contains("doesn't match"));
+            assert!(checked(&o, &[7; 32], &memo, &burned_of(&o)).unwrap_err().contains("doesn't match"));
             let mut moved = o.clone();
             moved.recipient[0] ^= 1;
-            assert!(checked(&moved, &k, &memo).is_err());
+            assert!(checked(&moved, &k, &memo, &burned_of(&moved)).is_err());
             let mut fee = o.clone();
             fee.max_relay_fee += 1;
-            assert!(checked(&fee, &k, &memo).is_err());
+            assert!(checked(&fee, &k, &memo, &burned_of(&fee)).is_err());
         }
     }
 
@@ -261,25 +309,44 @@ mod tests {
         // Checked: k' asked with the opening's index and context.
         let o = parse(&c["opening"]).unwrap();
         let bridge = Some((o.cfg_id, o.vault, o.chain_id));
-        let shown = for_burn(Some(&c["opening"]), &memo, bridge, |o| {
+        let burned = burned_of(&o);
+        let shown = for_burn(Some(&c["opening"]), &memo, bridge, Some(&burned), |o| {
             assert_eq!((o.index, hex(&context(o))), (7, c["context"].as_str().unwrap().to_owned()));
             Ok(Some(k))
         })
         .unwrap();
         assert_eq!((shown["checked"].as_bool(), shown["words_text"].as_str()), (Some(true), c["words_text"].as_str()));
         // No opening (an older LEZ Bridge), or no grant: sealed, said so.
-        assert_eq!(for_burn(None, &memo, bridge, |_| panic!("no key is made without an opening")).unwrap()["checked"], false);
-        assert_eq!(for_burn(Some(&c["opening"]), &memo, bridge, |_| Ok(None)).unwrap()["checked"], false);
+        assert_eq!(for_burn(None, &memo, bridge, Some(&burned), |_| panic!("no key is made without an opening")).unwrap()["checked"], false);
+        assert_eq!(for_burn(Some(&c["opening"]), &memo, bridge, Some(&burned), |_| Ok(None)).unwrap()["checked"], false);
         // The bridge's Config unread: unchecked; another vault, chain or cfgId than the burn's own: refused
         // (the words would be another vault's: an app could grind them to look familiar).
-        assert_eq!(for_burn(Some(&c["opening"]), &memo, None, |_| panic!("not asked")).unwrap()["checked"], false);
+        assert_eq!(for_burn(Some(&c["opening"]), &memo, None, Some(&burned), |_| panic!("not asked")).unwrap()["checked"], false);
         for other in [Some((o.cfg_id, [0x26; 20], o.chain_id)), Some((o.cfg_id, o.vault, 1)), Some(([1; 32], o.vault, o.chain_id))] {
-            assert!(for_burn(Some(&c["opening"]), &memo, other, |_| panic!("not asked")).unwrap_err().contains("another bridge"));
+            assert!(for_burn(Some(&c["opening"]), &memo, other, Some(&burned), |_| panic!("not asked")).unwrap_err().contains("another bridge"));
         }
         // Another wallet's k', or a malformed opening: refused.
-        assert!(for_burn(Some(&c["opening"]), &memo, bridge, |_| Ok(Some([9; 32]))).unwrap_err().contains("doesn't match"));
-        assert!(for_burn(Some(&json!({ "v": 1 })), &memo, bridge, |_| Ok(Some(k))).unwrap_err().contains("doesn't sign the burn"));
+        assert!(for_burn(Some(&c["opening"]), &memo, bridge, Some(&burned), |_| Ok(Some([9; 32]))).unwrap_err().contains("doesn't match"));
+        assert!(for_burn(Some(&json!({ "v": 1 })), &memo, bridge, Some(&burned), |_| Ok(Some(k))).unwrap_err().contains("doesn't sign the burn"));
+        // The burn's own token, amount and fee (review 2026-11-19): another token or amount than the one
+        // burned, a fee past 2%, or a fee that disagrees with the choice, each with a matching E: refused.
+        let mut other_token = burned.clone();
+        other_token.eth_token = [0xac; 20];
+        assert!(for_burn(Some(&c["opening"]), &memo, bridge, Some(&other_token), |_| panic!("not asked")).unwrap_err().contains("another token"));
+        let mut other_amount = burned.clone();
+        other_amount.amount += 1;
+        assert!(for_burn(Some(&c["opening"]), &memo, bridge, Some(&other_amount), |_| panic!("not asked")).unwrap_err().contains("another amount"));
+        let mut greedy = c["opening"].clone();
+        greedy["max_relay_fee"] = json!((max_relay_fee_cap(o.denom) + 1).to_string());
+        assert!(for_burn(Some(&greedy), &memo, bridge, Some(&burned), |_| panic!("not asked")).unwrap_err().contains("more than a vault allows"));
+        let mut mismatched = c["opening"].clone();
+        mismatched["fee_choice"] = json!(0);
+        assert!(for_burn(Some(&mismatched), &memo, bridge, Some(&burned), |_| panic!("not asked")).unwrap_err().contains("fee choice"));
+        // The Config's token list unread: unchecked.
+        assert_eq!(for_burn(Some(&c["opening"]), &memo, bridge, None, |_| panic!("not asked")).unwrap()["checked"], false);
+        // The fee is shown with what the address gets at least.
+        assert_eq!((shown["max_relay_fee_text"].as_str(), shown["at_least_text"].as_str()), (Some("0.002 wETH"), Some("0.998 wETH")));
         // A wallet that can't make k' now (the tool failed): the call isn't shown.
-        assert_eq!(for_burn(Some(&c["opening"]), &memo, bridge, |_| Err("busy".to_owned())), Err("busy".to_owned()));
+        assert_eq!(for_burn(Some(&c["opening"]), &memo, bridge, Some(&burned), |_| Err("busy".to_owned())), Err("busy".to_owned()));
     }
 }

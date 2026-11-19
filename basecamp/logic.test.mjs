@@ -1493,6 +1493,28 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("move: the old 'isn't in the wallet yet' line only without the feature", /text: root\.moveCan \? "Move beside a wrapped token/.test(qml), true);
 }
 
+// Review 2026-11-19 (1, 2, 3): no second send from a late answer; a name's account pinned at the check; a sent move never said failed plainly.
+{
+  const L = await import("./qml/logic.mjs");
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  const busy = "The wallet is busy; still working.", none = "No answer from the wallet yet: it may still be working on it. Look before trying again.";
+  check("move start failure: busy is a safe retry, no answer may have been taken, anything else a refusal",
+    [L.moveStartFailure(busy, busy, none), L.moveStartFailure(none, busy, none), L.moveStartFailure("That account has never been used", busy, none)], ["busy", "unclear", "refused"]);
+  check("move: an unclear start drops the review (no Approve again) and looks for the job", /if \(how === "unclear"\) \{[\s\S]{0,200}moveTurn\+\+\n\s*moveCheck = null[\s\S]{0,300}moveLookForSend\(plan, moveTurn\)/.test(qml), true);
+  check("move: the look follows a running bridge_send job, else reloads the balances", /busy\.kind === "bridge_send" && busy\.id[\s\S]{0,300}moveFollowSoon\(\)[\s\S]{0,300}loadBridgeNet\(\)/.test(qml), true);
+  const plan = { amount_shown: "0.5", symbol: "wETH", bridge_label: "bridge v5", to: "alice", to_name: "alice" };
+  const acct = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
+  const check0 = { args: ["B", "D", "0.5", "Public/F", "alice"], plan: plan, to_account: "", forwarded_to: "" };
+  check("move: a name with no resolved account isn't sent", L.moveSendArgs(check0), null);
+  check("move: sent to the account the check resolved, never the name", L.moveSendArgs(Object.assign({}, check0, { to_account: acct })), ["B", "D", "0.5", "Public/F", acct]);
+  check("move: an account recipient goes as it was", L.moveSendArgs({ args: ["B", "D", "0.5", "Public/F", acct], plan: { to: acct } }), ["B", "D", "0.5", "Public/F", acct]);
+  check("move: the sheet shows the account a name pays, and its forward", [L.moveToLine(plan, check0), L.moveToLine(plan, Object.assign({}, check0, { to_account: acct })), L.moveToLine(plan, Object.assign({}, check0, { to_account: acct, forwarded_to: "bob" }))],
+    ["alice's public account (checking which…)", "alice's public account 7wx3U7…LznR", "alice's public account 7wx3U7…LznR: alice forwards to bob, so this pays bob"]);
+  check("move: the result names the account paid", L.moveResultLine(Object.assign({}, plan, { paid: acct }), { state: "done", block: 9 }).text, "Moved 0.5 wETH (bridge v5) to alice's public account 7wx3U7…LznR, in block 9.");
+  check("move: a sent but unconfirmed move is a wait, with its hash", L.moveResultLine(plan, { state: "unclear", problem: "The move was sent but isn't confirmed yet.", tx: "ab12" }), { kind: "waiting", text: "The move was sent but isn't confirmed yet. Its transaction: ab12." });
+  check("move: Approve needs the resolved account", /enabledNow: root\.moveCheck !== null && root\.moveCheck\.state === "ready" && !moveScreen\.sending && Logic\.moveSendArgs\(root\.moveCheck\) !== null/.test(qml), true);
+}
+
 // Roadmap 9: the signed withdraw-to code's line on step 2.
 {
   const L = await import("./qml/logic.mjs");
@@ -1535,7 +1557,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
 {
   const L = await import("./qml/logic.mjs");
   const checked = { burn_opening: { v: 1, checked: true, recipient: "0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2", recipient_halves: ["0xb0275f9e94b2a437c834", "bf7dea5699f0b8707ec2"], words_text: "a · b · c · d" } };
-  check("burn address: checked", L.burnAddressLine(checked), "Ethereum address: 0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2, checked by this wallet against the burn's exit commitment. Its four words: a · b · c · d. Compare them on the bridge page with that Ethereum wallet connected.");
+  check("burn address: checked", L.burnAddressLine(checked), "Ethereum address: 0xb0275f9e94b2a437c834bf7dea5699f0b8707ec2, checked by this wallet against the burn's exit commitment, with the token and amount burned. Its four words: a · b · c · d. Compare them on the bridge page with that Ethereum wallet connected.");
+  check("burn address: the relay fee is shown (review 2026-11-19)", [L.burnAddressLine({ burn_opening: Object.assign({}, checked.burn_opening, { max_relay_fee: "2000000000000000", max_relay_fee_text: "0.002 wETH", at_least_text: "0.998 wETH" }) }).endsWith(" A relay may keep up to 0.002 wETH; the address gets at least 0.998 wETH (less the vault's own fee)."),
+    L.burnAddressLine({ burn_opening: Object.assign({}, checked.burn_opening, { max_relay_fee: "0", max_relay_fee_text: "0 wETH", at_least_text: "0.01 wETH" }) }).endsWith(" No relay fee: the address gets the whole 0.01 wETH (less the vault's own fee).")], [true, true]);
   check("burn address: halves only when checked", [L.burnAddressHalves(checked), L.burnAddressHalves({ burn_opening: { checked: false } }), L.burnAddressHalves({})], [["0xb0275f9e94b2a437c834", "bf7dea5699f0b8707ec2"], [], []]);
   check("burn address: unchecked says so, the module's why cleaned", L.burnAddressLine({ burn_opening: { v: 1, checked: false, why: "No opening.\u202e" } }), "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. No opening.");
   check("burn address: an older request keeps the sheet's own line", [L.burnAddressLine({}), L.burnAddressLine(null)], ["", ""]);

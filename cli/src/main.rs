@@ -2985,6 +2985,16 @@ fn take_in_saved_accounts<C: wallet::WalletSequencerClient>(wallet: &mut WalletC
             }
         }
     }
+    // Imported public accounts another process saved (`module account-import`): their keys are in
+    // no tree, so they can't be made again; a process that loaded before the import and saved after
+    // it would erase them. Taken in with their keys. (Imported private accounts: not yet.)
+    let mine: std::collections::BTreeSet<AccountId> = wallet.storage().key_chain().public_account_ids().map(|(id, _)| id).collect();
+    let imported: Vec<AccountId> = saved.public_account_ids().filter(|(id, at)| at.is_none() && !mine.contains(id)).map(|(id, _)| id).collect();
+    for id in imported {
+        if let Some(key) = saved.pub_account_signing_key(id) {
+            wallet.storage_mut().key_chain_mut().add_imported_public_account(key.clone());
+        }
+    }
     Ok(())
 }
 
@@ -4047,6 +4057,11 @@ async fn main() -> Result<()> {
         }
         Command::Module(request) => client.module(request).await,
         Command::Balance => {
+            // The sync saves the whole storage after every block: under the wallet's lock, with what
+            // other processes saved since this one loaded taken in first, so it never writes back a
+            // copy older than an import (imported keys can't be made again).
+            let _lock = wallet_lock(client.wallet.storage_path())?;
+            take_in_saved_accounts(&mut client.wallet)?;
             // A sequencer that doesn't answer is said so, never read as balances of 0: the
             // Basecamp module takes every rise between two reads for money that arrived.
             let synced = client.wallet.sync_to_latest_block().await;
@@ -5153,6 +5168,33 @@ mod wallet_storage_tests {
         let saved = saved_private(&dir);
         assert!(made.iter().all(|id| saved.contains(id)), "every account made is still in the wallet: {made:?} vs {saved:?}");
         assert_eq!(saved.len(), before + 4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An imported account's key survives a process that loaded the wallet before the import and
+    /// saves after it (review 2026-11-19: a stale `save_wallet` dropped it; imported keys can't be
+    /// made again from the phrase).
+    #[test]
+    fn an_imported_key_survives_a_stale_process_saving_after_the_import() {
+        let dir = std::env::temp_dir().join(format!("names-wallet-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wallet_config.json"), serde_json::to_vec(&wallet::config::WalletConfig::default()).unwrap()).unwrap();
+        let (first, _) = WalletCore::<SequencerClient>::new_init_storage(dir.join("wallet_config.json"), dir.join("storage.json"), None, "").unwrap();
+        first.store_persistent_data().unwrap();
+        // A long process (a balance read, a move to private) loads first.
+        let mut stale = wallet_at(&dir);
+        // Another imports a key and saves.
+        let mut importer = wallet_at(&dir);
+        let key = lee::PrivateKey::try_new([0x5e; 32]).unwrap();
+        let id = AccountId::from(&lee::PublicKey::new_from_private_key(&key));
+        importer.storage_mut().key_chain_mut().add_imported_public_account(key);
+        save_wallet(&mut importer).unwrap();
+        // The stale one saves its older copy: the imported key is kept, with its key.
+        save_wallet(&mut stale).unwrap();
+        let after = wallet_at(&dir);
+        assert!(after.get_account_public_signing_key(id).is_some(), "the imported key is still in the wallet");
+        assert!(after.storage().key_chain().public_account_ids().any(|(found, at)| found == id && at.is_none()), "still as imported");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

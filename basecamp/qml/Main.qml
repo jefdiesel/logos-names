@@ -6954,22 +6954,65 @@ Item {
             moveProblem = sentence(message)
         })
     }
-    /// Approve: the same move, sent. Only from a check that priced it.
+    /// Approve: the move the check priced, sent to the account the check resolved (an LNS name is
+    /// never resolved again at send time). Only from a check that priced it.
     function moveApprove() {
         if (moveCheck === null || moveCheck.state !== "ready" || (moveSent !== null && moveSent.state === "sending"))
             return
-        var plan = moveCheck.plan
+        var args = Logic.moveSendArgs(moveCheck)
+        if (args === null) {
+            moveCheck = Object.assign({}, moveCheck, { state: "failed", problem: "The check didn't say which account this pays. Nothing was sent; review it again." })
+            return
+        }
+        var plan = Object.assign({}, moveCheck.plan, { paid: moveCheck.to_account || "", forwarded_to: moveCheck.forwarded_to || "" })
         var turn = moveTurn
         moveSent = { id: "", plan: plan, state: "sending", block: null, tx: null, problem: "" }
-        askLater("bridge_token_send", moveCheck.args.concat([true]), function(value) {
+        askLater("bridge_token_send", args.concat([true]), function(value) {
             if (turn !== moveTurn)
                 return
-            moveSent = { id: String(value.id || ""), plan: value.plan || plan, state: "sending", block: null, tx: null, problem: "" }
+            moveSent = { id: String(value.id || ""), plan: plan, state: "sending", block: null, tx: null, problem: "" }
             moveFollowSoon()
         }, function(message) {
             if (turn !== moveTurn)
                 return
+            var how = Logic.moveStartFailure(message, moduleBusy, moduleNoAnswer)
+            if (how === "busy") {
+                // Not taken (the module answered busy before running anything): press again.
+                moveSent = null
+                moveProblem = "The wallet is busy with something else; nothing was sent. Press Approve and move again."
+                return
+            }
+            if (how === "unclear") {
+                // May have been taken: never Approve again on this review. Look for the move's job.
+                moveTurn++
+                moveCheck = null
+                moveSent = { id: "", plan: plan, state: "unclear", block: null, tx: null, problem: "No answer from the wallet in time: the move may still be on its way. Looking…" }
+                moveLookForSend(plan, moveTurn)
+                return
+            }
             moveSent = { id: "", plan: plan, state: "failed", block: null, tx: null, problem: sentence(message) }
+        })
+    }
+    /// After an unclear start: follow the move's job if the wallet runs one, else read the balances
+    /// again and say what to check before moving again.
+    function moveLookForSend(plan, turn) {
+        askLater("cli_status", [], function(value) {
+            if (turn !== moveTurn)
+                return
+            var busy = value && value.busy ? value.busy : null
+            if (busy && busy.kind === "bridge_send" && busy.id) {
+                moveSent = { id: String(busy.id), plan: plan, state: "sending", block: null, tx: null, problem: "" }
+                moveFollowSoon()
+                return
+            }
+            moveSent = { id: "", plan: plan, state: "unclear", block: null, tx: null, problem: Logic.MOVE_UNCLEAR }
+            loadBridgeNet()
+            loadActivity()
+        }, function() {
+            if (turn !== moveTurn)
+                return
+            moveSent = { id: "", plan: plan, state: "unclear", block: null, tx: null, problem: Logic.MOVE_UNCLEAR }
+            loadBridgeNet()
         })
     }
     /// Follows the check or the move until its job ends.
@@ -6984,12 +7027,13 @@ Item {
             if (turn !== moveTurn || value.state === "running")
                 return
             if (following === sent) {
-                moveSent = { id: sent.id, plan: sent.plan, state: value.state === "done" && !value.problem ? "done" : "failed", block: value.block, tx: value.tx, problem: value.problem || "" }
+                moveSent = { id: sent.id, plan: sent.plan, state: value.state === "done" && !value.problem ? "done" : value.tx ? "unclear" : "failed", block: value.block, tx: value.tx, problem: value.problem || "" }
                 moveCheck = null
                 try { if (moveSent.state === "done") moveAmountField.text = "" } catch (e) {}
                 loadBridgeNet()
             } else {
-                moveCheck = { id: check.id, plan: check.plan, args: check.args, state: value.ready === true ? "ready" : "failed", fee: value.fee || null, problem: value.ready === true ? "" : String(value.problem || "The check didn't finish.") }
+                moveCheck = { id: check.id, plan: check.plan, args: check.args, state: value.ready === true ? "ready" : "failed", fee: value.fee || null, problem: value.ready === true ? "" : String(value.problem || "The check didn't finish."),
+                              to_account: value.to_account ? String(value.to_account) : "", forwarded_to: value.forwarded_to ? String(value.forwarded_to) : "" }
             }
         }, function() { following.asking = false })
     }
@@ -10920,7 +10964,7 @@ Item {
                         Fact { label: "Moves"; value: moveSheet.plan ? moveSheet.plan.amount_shown + " " + moveSheet.plan.symbol + (moveSheet.plan.bridge_label ? " (" + moveSheet.plan.bridge_label + ")" : "") : "" }
                         Fact { label: "Token"; code: true; value: moveSheet.plan ? Logic.keyShown(moveSheet.plan.definition) : ""; full: moveSheet.plan ? String(moveSheet.plan.definition) : "" }
                         Fact { label: "From"; value: moveSheet.plan ? Logic.idShort(moveSheet.plan.from) + ", which signs it" : "" }
-                        Fact { label: "To"; value: moveSheet.plan ? (moveSheet.plan.to_name ? moveSheet.plan.to_name + "'s public account" : Logic.idShort(moveSheet.plan.to)) + (moveScreen.importedTo ? " (imported)" : "") : "" }
+                        Fact { label: "To"; value: Logic.moveToLine(moveSheet.plan, root.moveCheck) + (moveScreen.importedTo ? " (imported)" : ""); full: root.moveCheck !== null && root.moveCheck.to_account ? root.moveCheck.to_account : "" }
                         Fact { label: "Fee"; value: Logic.moveFeeLine(moveSheet.plan, root.moveCheck, root.moveNative()) }
                         Hint { font.pixelSize: root.px(16); text: "Public: everyone can see both accounts and the amount. One block, about 30 seconds. It can't be undone." }
                         StatusLine { visible: root.moveCheck !== null && root.moveCheck.state === "failed"; kind: "problem"; text: root.moveCheck !== null ? root.moveCheck.problem : "" }
@@ -10929,7 +10973,7 @@ Item {
                             Action {
                                 label: moveScreen.sending ? "Moving…" : moveScreen.checking ? "Checking the fee…" : "Approve and move"
                                 strong: true
-                                enabledNow: root.moveCheck !== null && root.moveCheck.state === "ready" && !moveScreen.sending
+                                enabledNow: root.moveCheck !== null && root.moveCheck.state === "ready" && !moveScreen.sending && Logic.moveSendArgs(root.moveCheck) !== null
                                 onPressed: root.moveApprove()
                             }
                             Action { label: "Change something"; enabledNow: !moveScreen.sending; onPressed: root.moveReset() }

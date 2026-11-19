@@ -192,7 +192,8 @@ impl Client {
                 self.app_secret(&request)
             }
             Request::AccountImport => {
-                let mut input = Vec::new();
+                // Room up front, so growing the buffer never leaves an unzeroed copy of the key behind.
+                let mut input = Vec::with_capacity(64 * 1024);
                 let read = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input);
                 let done = match read {
                     Ok(_) => self.module_account_import(&input).await,
@@ -334,14 +335,27 @@ impl Client {
     /// See [`Request::AccountImport`]. Every refusal is a fixed sentence: nothing of the input is
     /// ever printed.
     async fn module_account_import(&mut self, input: &[u8]) -> Result<()> {
-        let request: serde_json::Value = serde_json::from_slice(input).map_err(|_| anyhow!("not an import request"))?;
-        let mut key = [0u8; 32];
-        let parsed = request["private_key"].as_str().map(|t| t.trim().trim_start_matches("0x")).filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()));
-        let Some(hex_key) = parsed else {
-            bail!("that isn't a signing key: a public account's key is 64 hex digits");
+        let mut request: serde_json::Value = serde_json::from_slice(input).map_err(|_| anyhow!("not an import request"))?;
+        // The key's text is taken out of the parsed request and zeroed as soon as its 32 bytes are read.
+        let mut key_text = match request.get_mut("private_key").map(serde_json::Value::take) {
+            Some(serde_json::Value::String(text)) => text,
+            _ => String::new(),
         };
-        for (i, byte) in key.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&hex_key[2 * i..2 * i + 2], 16).map_err(|_| anyhow!("that isn't a signing key"))?;
+        let mut key = [0u8; 32];
+        let read = {
+            let t = key_text.trim().trim_start_matches("0x");
+            if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+                key.iter_mut().enumerate().all(|(i, byte)| u8::from_str_radix(&t[2 * i..2 * i + 2], 16).map(|v| *byte = v).is_ok())
+            } else {
+                false
+            }
+        };
+        // SAFETY: zero bytes are valid UTF-8; the string is emptied right after.
+        unsafe { key_text.as_bytes_mut() }.fill(0);
+        key_text.clear();
+        if !read {
+            key.iter_mut().for_each(|b| *b = 0);
+            bail!("that isn't a signing key: a public account's key is 64 hex digits");
         }
         let private_key = lee::PrivateKey::try_new(key).map_err(|_| anyhow!("that isn't a usable signing key"));
         key.iter_mut().for_each(|b| *b = 0);
@@ -355,6 +369,13 @@ impl Client {
         }
         if self.wallet.get_account_public_signing_key(id).is_some() {
             bail!("this wallet has that account already; nothing was imported");
+        }
+        // A key this wallet's own recovery phrase makes (an account a smaller restore didn't make
+        // yet): imported, its bridge values would follow the imported scheme until "New account"
+        // reached it and turned them into the phrase scheme's. It is added the phrase's way instead.
+        let key_chain = self.wallet.storage().key_chain();
+        if crate::private_call::scheme_classify::phrase_gives(key_chain, false, id, None, crate::private_call::LOOK_AHEAD) {
+            bail!("that key is an account of this wallet's own recovery phrase; add it with New account instead; nothing was imported");
         }
         let label = checked_label(request["label"].as_str().unwrap_or(""))?;
         self.wallet.storage_mut().key_chain_mut().add_imported_public_account(private_key);

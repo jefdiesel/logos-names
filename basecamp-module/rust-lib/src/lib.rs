@@ -872,7 +872,9 @@ pub trait NamesModule: Send + 'static {
     /// digits) or its key-chain JSON (`{"Public": …}`, `{"ImportedPublic": …}`, `{private_key,
     /// account?}`), with an optional nickname. The names tool reads the key on standard input
     /// (`names module account-import`), never on a command line; nothing of `text` is ever in a
-    /// reply, an error, a log or the history, and this module's copies are overwritten after use.
+    /// reply, an error, a log or the history. Overwritten after use, best effort: the pasted text, a
+    /// file's text, the key taken out, the request line and the tool's stdin copy; NOT the JSON
+    /// parser's temporaries or the host's and the app's own copies (account_import.rs).
     /// `{account, imported: true, notice, label}`. The recovery phrase does not cover the account.
     /// A private account's key chain is refused. Names app only. get_config `features` lists
     /// `account_import` (`account_import.rs`).
@@ -3362,7 +3364,25 @@ impl Names {
     /// its hourly secret calls). The tool's words never reach the sheet.
     fn burn_opening_of(&mut self, app: &str, account: &str, opening: Option<&Value>, asked: &Value) -> Result<Value, String> {
         let message = asked["message"].as_str().and_then(|m| registry::unhex(m.trim().trim_start_matches("0x")).ok()).unwrap_or_default();
-        let memo = bridge_net::decode_burn(&message).map(|b| b.memo).map_err(|_| "the burn's message can't be read, so the wallet doesn't sign it".to_owned())?;
+        let burn = bridge_net::decode_burn(&message).map_err(|_| "the burn's message can't be read, so the wallet doesn't sign it".to_owned())?;
+        let memo = burn.memo;
+        // What was burned, by the target bridge's own token list: the opening must name it.
+        let burned = Self::burn_target(asked).and_then(|target| {
+            #[cfg(test)]
+            let said = tests::BURN_CONFIGS.with(|c| c.borrow().get(&registry::account_text(&target)).cloned());
+            #[cfg(not(test))]
+            let said: Option<Result<Option<bridge_net::BridgeConfig>, String>> = None;
+            let config = match said {
+                Some(said) => said.ok().flatten(),
+                None => match bridge_net::config_within(&self.bridge_url(), &target, bridge_net::BURN_SIGN_FRESH, std::time::Duration::from_secs(4)) {
+                    bridge_net::ConfigNow::Read(Some(bytes)) => bridge_net::decode_bridge_config(&bytes).ok(),
+                    _ => None,
+                },
+            }?;
+            let token = config.tokens.iter().find(|t| t.definition == burn.definition)?;
+            let eth = registry::unhex(token.eth_token.trim_start_matches("0x")).ok().and_then(|b| <[u8; 20]>::try_from(b).ok())?;
+            Some(burn_opening::Burned { eth_token: eth, amount: burn.amount, decimals: token.decimals, symbol: token.symbol() })
+        });
         // The burn's own bridge, as its Config says (read within the burn's signing freshness, kept):
         // the opening must name its cfgId, vault and chain.
         let bridge = Self::burn_target(asked).and_then(|target| {
@@ -3379,7 +3399,7 @@ impl Names {
         let setup = self.cli_setup();
         let now = provider::now_ms();
         let calls = self.secret_calls.entry(app.to_owned()).or_default();
-        burn_opening::for_burn(opening, &memo, bridge, |o| {
+        burn_opening::for_burn(opening, &memo, bridge, burned.as_ref(), |o| {
             if !granted {
                 return Ok(None);
             }
@@ -3390,8 +3410,16 @@ impl Names {
             calls.push(now);
             let setup = setup?;
             setup.wallet_ready()?;
-            let input = json!({ "app": app, "account": account, "scope": burn_opening::SCOPE, "context": registry::hex(&burn_opening::context(o)),
+            // The scheme pinned for this account, as for every value given out (an `unknown` pin: unchecked).
+            let pinned = provider_private::read_pin(&setup.wallet, account);
+            if pinned.as_deref() == Some(provider_private::SCHEME_UNKNOWN) {
+                return Ok(None);
+            }
+            let mut input = json!({ "app": app, "account": account, "scope": burn_opening::SCOPE, "context": registry::hex(&burn_opening::context(o)),
                                 "tag": burn_opening::TAG, "first": o.index, "count": 1 });
+            if let Some(scheme) = pinned {
+                input["scheme"] = json!(scheme);
+            }
             let unreadable = || "the wallet couldn't make the values to check the burn's address with; nothing was shown to approve".to_owned();
             let output = cli::run_with_input(&setup, vec!["module".into(), "app-secret".into()], &input.to_string(), SECRET_PATIENCE).map_err(|_| unreadable())?;
             let answer: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| unreadable())?;
@@ -3407,12 +3435,22 @@ impl Names {
         setup.wallet_ready()?;
         self.no_job_running()?;
         let mut input = account_import::request(key, account, label);
-        let ran = cli::run_with_input(&setup, vec!["module".into(), "account-import".into()], &input, SECRET_PATIENCE);
+        // In the CLI lane: no other names run this module started (a balance read syncs and writes the
+        // wallet file) overlaps the import. The names tool also locks the file for the write.
+        let ran = served::in_lane(&served::Lane::Cli, || cli::run_with_input(&setup, vec!["module".into(), "account-import".into()], &input, SECRET_PATIENCE));
         account_import::wipe(&mut input);
         let output = ran.map_err(|why| account_import::refusal(&why).to_owned())?;
         let entry: Value = serde_json::from_str(cli::last_line(&output)).map_err(|_| "The import didn't go through. Nothing was imported.".to_owned())?;
         let imported = entry["account"].as_str().filter(|a| a.starts_with("Public/") && registry::parse_account(&a["Public/".len()..]).is_ok()).map(str::to_owned);
         let imported = imported.ok_or_else(|| "The import didn't go through. Nothing was imported.".to_owned())?;
+        // Said imported only once the wallet file holds it as an imported account (its key is in no tree).
+        let stored = std::fs::read(setup.wallet.join(cli::STORAGE_FILE)).ok().map(|bytes| backup::accounts_of(&bytes)).unwrap_or_default();
+        if !stored.iter().any(|a| a["account"] == imported.as_str() && a["imported"] == true) {
+            return Err("The names tool answered, but the account isn't in the wallet file. Nothing is imported: import it again.".to_owned());
+        }
+        // Its bridge values follow the imported scheme for good, whatever the key trees make later.
+        provider_private::write_pin(&setup.wallet, &imported, app_secret::SCHEME_IMPORTED)
+            .map_err(|_| "The account is imported, but its scheme couldn't be kept beside the wallet. Try the import again before using it with the bridge.".to_owned())?;
         // The accounts the app reads next include it.
         self.forget_balances();
         Ok(json!({ "account": imported, "imported": true, "notice": account_import::IMPORTED_NOTICE, "label": entry["label"] }))
@@ -3444,6 +3482,13 @@ impl Names {
         let setup = self.cli_setup()?;
         setup.wallet_ready()?;
         self.no_background_job()?;
+        // One send per check: a second send of the same move (a late answer pressed again) needs a new review.
+        let key = bridge_send::move_key(&it);
+        if send {
+            bridge_send::may_send(&key, std::time::Instant::now())?;
+        } else {
+            bridge_send::checked_now(&key, std::time::Instant::now());
+        }
         chain_answers(&setup, None, &readable_account(&setup, self.program.as_ref()), &mut Start::new(&self.sequencer))?;
         let jobs = self.jobs()?;
         let id = jobs.prepare(cli::WALLET_JOB)?;
@@ -13228,7 +13273,7 @@ mod tests {
             let history = config_dir().map(|d| std::fs::read_to_string(d.join("activity.json")).unwrap_or_default()).unwrap_or_default();
             assert!(!history.contains(marker), "the history holds the key");
         };
-        let ok_tail = format!("printf '%s\\n' \"$*\" > \"$(dirname \"$0\")/argv.txt\"\ncase \"$*\" in\n *account-import*) cat > \"$(dirname \"$0\")/stdin.txt\"; echo '{{\"account\":\"Public/{OTHER}\",\"label\":\"Shop\"}}' ;;\n esac");
+        let ok_tail = format!("printf '%s\\n' \"$*\" > \"$(dirname \"$0\")/argv.txt\"\ncase \"$*\" in\n *account-import*) cat > \"$(dirname \"$0\")/stdin.txt\"; printf '%s' '{{\"key_chain\":{{\"accounts\":[{{\"ImportedPublic\":{{\"account_id\":\"{OTHER}\"}}}}]}}}}' > \"$LEE_WALLET_HOME_DIR/storage.json\"; echo '{{\"account\":\"Public/{OTHER}\",\"label\":\"Shop\"}}' ;;\n *lost*) echo '{{\"account\":\"Public/{OTHER}\"}}' ;;\n esac");
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let (mut names, dir) = with_wallet("import-ok", &ok_tail);
         let json_entry = json!({ "ImportedPublic": { "account_id": OTHER, "pub_sign_key": marker } }).to_string();
@@ -13238,6 +13283,9 @@ mod tests {
         assert!(v["value"]["notice"].as_str().unwrap().contains("recovery phrase does not bring this account back"));
         let stdin = std::fs::read_to_string(dir.join("stdin.txt")).unwrap();
         assert!(stdin.contains(marker), "the key reached the tool, on standard input");
+        // The scheme is pinned beside the wallet: imported, for good.
+        let wallet_dir = std::path::PathBuf::from(names.cli_wallet.clone().unwrap());
+        assert_eq!(provider_private::read_pin(&wallet_dir, &format!("Public/{OTHER}")).as_deref(), Some("imported"));
         assert!(!std::fs::read_to_string(dir.join("argv.txt")).unwrap().contains(marker), "never on the command line");
         let _ = std::fs::remove_file(dir.join("stdin.txt"));
         scan(&dir, &said);
@@ -13251,6 +13299,13 @@ mod tests {
         let said = names.cli_account_import(format!("0x{marker}"), String::new());
         assert_eq!(parsed(&said)["error"], "The import didn't go through. Nothing was imported.");
         scan(&dir2, &said);
+        // The tool says imported but the wallet file doesn't hold it (another process wrote an older
+        // copy back): not said imported.
+        let (mut lost, dir3) = with_wallet("import-lost", "case \"$*\" in\n *account-import*) cat > /dev/null; echo '{\"account\":\"Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR\"}' ;;\n esac");
+        let said = lost.cli_account_import(marker.into(), String::new());
+        assert!(parsed(&said)["error"].as_str().unwrap().contains("isn't in the wallet file"), "{said}");
+        scan(&dir3, &said);
+        let _ = std::fs::remove_dir_all(dir3);
         // Not a key, a private key chain, another app: refused before anything runs, in fixed words.
         for (text, words) in [("hello", "isn't a signing key"), ("{\"Private\":{}}", "private account")] {
             let said = names.cli_account_import(text.into(), String::new());
@@ -13285,6 +13340,9 @@ mod tests {
         });
         let asked = json!({ "message": registry::hex(&message) });
         BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, o.vault, o.chain_id)));
+        // The v5 Config's token list: the burned definition is its wETH (the opening's token, ETH = 0x0).
+        let weth = bridge_net::Token { eth_token: "0x0000000000000000000000000000000000000000".into(), definition: [5; 32], decimals: 18, denoms: vec![10_000_000_000_000_000], registered: true, burn_frozen: false };
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().insert(bridge_net::BRIDGE_V5_PROGRAM.to_owned(), Ok(Some(bridge_net::BridgeConfig { token_program: [9; 32], burn_frozen: false, tokens: vec![weth] }))));
         // No grant: unchecked, and the tool isn't asked.
         let shown = names.burn_opening_of("lez_bridge", &account, Some(&c["opening"]), &asked).unwrap();
         assert_eq!(shown["checked"], false, "{shown}");
@@ -13301,11 +13359,16 @@ mod tests {
         // The burn's E isn't the opening's: refused.
         BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, o.vault, o.chain_id)));
         let mut other = c["opening"].clone();
-        other["max_relay_fee"] = json!("1");
+        other["recipient"] = json!("0x1111111111111111111111111111111111111111");
         assert!(names.burn_opening_of("lez_bridge", &account, Some(&other), &asked).unwrap_err().contains("doesn't match"));
         // No opening at all (an older LEZ Bridge): sealed, as before.
         assert_eq!(names.burn_opening_of("lez_bridge", &account, None, &asked).unwrap()["checked"], false);
+        // An opening naming another amount than the one burned (E made to match): refused.
+        let mut more = c["opening"].clone();
+        more["denom"] = json!("100000000000000000");
+        assert!(names.burn_opening_of("lez_bridge", &account, Some(&more), &asked).unwrap_err().contains("another amount"));
         BURN_IDENTITY.with(|i| *i.borrow_mut() = None);
+        BURN_CONFIGS.with(|configs| configs.borrow_mut().clear());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -14102,6 +14165,14 @@ mod tests {
         assert_eq!(sent["value"]["kind"], bridge_send::SEND_KIND, "{sent}");
         let ended = job_end(&mut names, sent["value"]["id"].as_str().unwrap());
         assert_eq!((ended["state"].as_str(), ended["tx"].as_str(), ended["block"].as_u64()), (Some("done"), Some("ab12"), Some(7)), "{ended}");
+        // Pressed again (a late answer looked failed): refused until the move is reviewed again.
+        let again = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), true));
+        assert!(again["error"].as_str().unwrap().contains("sent already"), "{again}");
+        let rechecked = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), false));
+        job_end(&mut names, rechecked["value"]["id"].as_str().unwrap());
+        let resent = parsed(&names.bridge_token_send(v5.into(), demo.clone(), "1.2".into(), from.clone(), to.clone(), true));
+        assert_eq!(resent["value"]["kind"], bridge_send::SEND_KIND, "{resent}");
+        job_end(&mut names, resent["value"]["id"].as_str().unwrap());
         let _ = std::fs::remove_dir_all(dir);
 
         // A tool without the bridge codec, and an account short of the fee: plain words.

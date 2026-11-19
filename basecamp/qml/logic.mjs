@@ -3306,15 +3306,59 @@ export function moveFeeLine(plan, check, native) {
     return "About " + about + " test LEZ" + (most !== "" && most !== about ? ", at most " + most : "") + ", paid by " + payer + held + ". The bridge's relay pays only for claims and burns."
 }
 
-/// The line after the move ended: done with its block, or why not.
+/// Who the move pays, in words: an LNS name with the account the check resolved (and its forward),
+/// or the account. Before the check has resolved a name: the name and "checking".
+export function moveToLine(plan, check) {
+    if (!plan)
+        return ""
+    var paid = check && check.to_account ? String(check.to_account) : (plan.paid ? String(plan.paid) : "")
+    var fwd = check && check.forwarded_to ? clean(check.forwarded_to) : (plan.forwarded_to ? clean(plan.forwarded_to) : "")
+    if (!plan.to_name)
+        return idShort(paid !== "" ? paid : plan.to)
+    var name = clean(plan.to_name)
+    if (paid === "")
+        return name + "'s public account (checking which…)"
+    return name + "'s public account " + idShort(paid) + (fwd !== "" ? ": " + name + " forwards to " + fwd + ", so this pays " + fwd : "")
+}
+
+/// The arguments the send goes with: the check's own, but to the account the check resolved (a
+/// name is never looked at again); null when the check gave no account for a name.
+export function moveSendArgs(check) {
+    if (!check || !Array.isArray(check.args) || check.args.length !== 5)
+        return null
+    var args = check.args.slice()
+    if (check.to_account)
+        args[4] = String(check.to_account)
+    else if (check.plan && check.plan.to_name)
+        return null
+    return args
+}
+
+/// How a send's start failed: "busy" (not taken: press again), "unclear" (no answer in time: it may
+/// have been taken) or "refused".
+export function moveStartFailure(message, busyText, noAnswerText) {
+    var m = String(message || "")
+    if (m === busyText || /^The wallet is busy/.test(m))
+        return "busy"
+    if (m === noAnswerText || /^No answer from the wallet yet/.test(m))
+        return "unclear"
+    return "refused"
+}
+
+/// What to do when a move's outcome isn't known.
+export const MOVE_UNCLEAR = "No answer in time: the move may have gone through. Check the balance on the card before moving again; a new move needs a new Review."
+
+/// The line after the move ended: done with its block, sent but not confirmed, or why not.
 export function moveResultLine(plan, ended) {
     if (!ended)
         return { kind: "", text: "" }
     if (ended.state === "done" && !ended.problem) {
         var what = plan ? plan.amount_shown + " " + plan.symbol + (plan.bridge_label ? " (" + plan.bridge_label + ")" : "") : "The tokens"
-        var to = plan ? (plan.to_name ? plan.to_name : idShort(plan.to)) : ""
+        var to = plan ? moveToLine(plan, null) : ""
         return { kind: "done", text: "Moved " + what + " to " + to + (ended.block !== null && ended.block !== undefined ? ", in block " + ended.block : "") + "." }
     }
+    if (ended.state === "unclear")
+        return { kind: "waiting", text: String(ended.problem || MOVE_UNCLEAR) + (ended.tx ? " Its transaction: " + clean(ended.tx) + "." : "") }
     return { kind: "problem", text: String(ended.problem || "The move didn't go through.") }
 }
 
@@ -3362,8 +3406,10 @@ export function burnAddressLine(request) {
     if (!o)
         return ""
     if (o.checked === true)
-        return "Ethereum address: " + clean(o.recipient) + ", checked by this wallet against the burn's exit commitment. Its four words: "
+        return "Ethereum address: " + clean(o.recipient) + ", checked by this wallet against the burn's exit commitment, with the token and amount burned. Its four words: "
             + clean(o.words_text) + ". Compare them on the bridge page with that Ethereum wallet connected."
+            + (o.max_relay_fee_text ? (o.max_relay_fee === "0" ? " No relay fee: the address gets the whole " + clean(o.at_least_text) + " (less the vault's own fee)."
+                : " A relay may keep up to " + clean(o.max_relay_fee_text) + "; the address gets at least " + clean(o.at_least_text) + " (less the vault's own fee).") : "")
     return "Ethereum address: sealed in the burn's exit commitment; the wallet can't check it here. " + clean(o.why || "")
 }
 

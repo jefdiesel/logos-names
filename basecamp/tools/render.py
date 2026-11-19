@@ -1291,6 +1291,11 @@ MOVE = [
     ("move-old-tool", mv_sheet("failed", 'root.moveCheck = Object.assign({}, root.moveCheck, { problem: "This wallet\'s LEZ 0.4 names tool can\'t move wrapped tokens yet: it needs a newer tool. Nothing was sent." })')),
     ("move-sending", mv_sheet("ready", 'root.moveSent = { id: "", plan: %s, state: "sending", block: null, tx: null, problem: "" }' % json.dumps(_MV_PLAN))),
     ("move-done", mv('root.moveTo = "%s"; root.moveSent = { id: "", plan: %s, state: "done", block: 28512, tx: "ab12", problem: "" }' % (_MV_TO, json.dumps(_MV_PLAN)))),
+    # Review 2026-11-19: a name's account pinned at the check (and its forward); a send with no answer in time.
+    ("move-sheet-name", mv('moveToField.text = "alice"; moveAmountField.text = "0.05"; root.againAfter(30, function() { root.moveCheck = %s })'
+        % json.dumps({"id": "", "plan": dict(_MV_PLAN, to="alice", to_name="alice"), "args": ["b", "d", "0.05", OWNER, "alice"], "state": "ready", "fee": {"about": "2140", "at_most": "3000"}, "problem": "",
+                      "to_account": _MV_TO, "forwarded_to": "bob"}))),
+    ("move-unclear", mv('root.moveTo = "%s"; root.moveSent = { id: "", plan: %s, state: "unclear", block: null, tx: null, problem: Logic.MOVE_UNCLEAR }' % (_MV_TO, json.dumps(_MV_PLAN)))),
     # To an imported account: said before the review.
     ("move-to-imported", mv('moveToField.text = "%s"; moveAmountField.text = "0.05"' % OWNER).replace('root.openMove("%s"' % OWNER, 'root.openMove("%s"' % _MV_TO)),
 ]

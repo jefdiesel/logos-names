@@ -230,8 +230,19 @@ fn error_line(log: &str) -> Option<&str> {
 }
 
 /// Why a check or a move didn't go through, in the wallet's words, from what the CLI printed.
-/// The CLI's own text is shown only when none of the known cases fits.
+/// The CLI's own text is shown only when none of the known cases fits. A move that was SENT (its
+/// log has `submitted <hash>`) but not seen applied is never said as "didn't go through": it was
+/// refused on chain with its fee paid, or it may still land.
 pub fn problem(log: &str) -> String {
+    let sent = log.lines().any(|l| l.trim().starts_with("submitted "));
+    let applied = log.lines().any(|l| l.trim().starts_with("applied in block "));
+    if sent && !applied {
+        return if log.contains("but reverted") {
+            "The network refused the move: nothing moved, but its fee was paid from the account it left.".to_owned()
+        } else {
+            "The move was sent but isn't confirmed yet. It may still go through: check the balance on the card before moving again.".to_owned()
+        };
+    }
     let error = error_line(log).unwrap_or_default();
     let says = |mark: &str| log.contains(mark);
     if says("no token codec called bridge") {
@@ -281,9 +292,77 @@ pub fn check_outcome(log: &str, running: bool) -> Value {
         return json!({});
     }
     if log.contains(DRY_RUN_MARK) {
-        json!({ "state": "done", "ready": true, "problem": Value::Null })
+        // The account the move pays, as the check resolved it (an LNS name: its public account, after
+        // its forward if it has one), so the send can go to exactly that account.
+        json!({ "state": "done", "ready": true, "problem": Value::Null, "to_account": paid_account(log), "forwarded_to": forwarded_to(log) })
     } else {
         json!({ "state": "failed", "ready": false, "problem": problem(log) })
+    }
+}
+
+/// The account a token send's log says it pays: the `sending … to <who>` line's `Public/<id>`
+/// (`<name> (Public/<id>)` for a name, `Public/<id>` for an account), or None.
+pub fn paid_account(log: &str) -> Option<String> {
+    let line = log.lines().map(str::trim).find(|l| l.starts_with("sending ") && l.contains(" to "))?;
+    let to = line.rsplit_once(" to ")?.1.trim();
+    let id = to.rsplit_once("(Public/").map(|(_, rest)| rest.trim_end_matches(')')).or_else(|| to.strip_prefix("Public/"))?;
+    registry::bare_account(id).ok().map(|account| format!("Public/{}", registry::account_text(&account)))
+}
+
+/// The name an LNS name forwards to, from the CLI's `<name> → <target> (it forwards there)` line.
+pub fn forwarded_to(log: &str) -> Option<String> {
+    log.lines().map(str::trim).find_map(|l| l.strip_suffix(" (it forwards there)")?.split_once(" → ").map(|(_, target)| crate::text::clean_text(target, 64)))
+}
+
+// ── One send per check (review 2026-11-19: a send whose answer came late was approved again) ──
+//
+// The module keeps, per move (bridge, token, amount, from), when it was last checked and when it
+// was last sent. A send needs a check newer than the last send of the same move, and at most
+// `CHECK_FRESH` old: the same move is never sent twice from one review, whatever the app does. The
+// recipient is not in the key: a check of a name is sent to the account it resolved to.
+
+/// How long a check stays good for its send.
+pub const CHECK_FRESH: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+fn ledger() -> std::sync::MutexGuard<'static, Vec<(String, Option<std::time::Instant>, Option<std::time::Instant>)>> {
+    static LEDGER: std::sync::Mutex<Vec<(String, Option<std::time::Instant>, Option<std::time::Instant>)>> = std::sync::Mutex::new(Vec::new());
+    LEDGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The move's key in the ledger.
+pub fn move_key(it: &Move) -> String {
+    format!("{}|{}|{}|{}", registry::account_text(&it.bridge), registry::account_text(&it.definition), it.amount, registry::account_text(&it.from))
+}
+
+/// A check of the move started now.
+pub fn checked_now(key: &str, now: std::time::Instant) {
+    let mut l = ledger();
+    match l.iter_mut().find(|(k, _, _)| k == key) {
+        Some(entry) => entry.1 = Some(now),
+        None => {
+            if l.len() >= 64 {
+                l.remove(0);
+            }
+            l.push((key.to_owned(), Some(now), None));
+        }
+    }
+}
+
+/// Whether the move may be sent now, and if so records the send: only after a check of it within
+/// `CHECK_FRESH`, newer than its last send.
+pub fn may_send(key: &str, now: std::time::Instant) -> Result<(), String> {
+    let mut l = ledger();
+    let entry = l.iter_mut().find(|(k, _, _)| k == key);
+    let Some(entry) = entry else {
+        return Err("Review the move first: the wallet sends only a move it has just checked. Nothing was sent.".to_owned());
+    };
+    match (entry.1, entry.2) {
+        (Some(checked), sent) if sent.is_none_or(|sent| checked > sent) && now.duration_since(checked) <= CHECK_FRESH => {
+            entry.2 = Some(now);
+            Ok(())
+        }
+        (_, Some(_)) => Err("This move was sent already from this review. Check the balance on the card, then review it again to send another. Nothing was sent.".to_owned()),
+        _ => Err("This review is too old. Review the move again. Nothing was sent.".to_owned()),
     }
 }
 
@@ -418,9 +497,58 @@ mod tests {
     #[test]
     fn a_check_that_stopped_before_sending_is_ready() {
         let log = "fee: about 2140, at most 3000 (gas: 100 cycles, limit 200)\nfee reserve: 3000 from Public/A, plus 0 the call moves\nError: LOGOS_NAMES_DRY_RUN is set, so nothing was sent\n";
-        assert_eq!(check_outcome(log, false), json!({ "state": "done", "ready": true, "problem": null }));
+        assert_eq!(check_outcome(log, false), json!({ "state": "done", "ready": true, "problem": null, "to_account": null, "forwarded_to": null }));
         assert_eq!(crate::cli::parse_fee(log)["about"], "2140");
         assert_eq!(check_outcome(log, true), json!({}));
+    }
+
+    #[test]
+    fn a_sent_move_is_never_said_as_failed_plainly() {
+        let reverted = "sending 5 wETH from Public/A to Public/B\nsubmitted ab12\nError: the transaction was not applied\n\nCaused by:\n    ab12 was included in block 9 but reverted: its fee was charged and nothing else applied\n";
+        assert!(problem(reverted).starts_with("The network refused the move: nothing moved, but its fee was paid"));
+        for later in [
+            "submitted ab12\nError: the transaction was not applied\n\nCaused by:\n    ab12 was not applied: it was not in a block after 120 s; a slow chain may still apply it\n",
+            "submitted ab12\nError: the transaction was not applied\n\nCaused by:\n    0: couldn't poll\n    1: Connection refused (os error 61)\n",
+            "submitted ab12\nError: the transaction was not applied\n\nCaused by:\n    block 5 is missing\n",
+        ] {
+            let said = problem(later);
+            assert!(said.starts_with("The move was sent but isn't confirmed yet"), "{said}");
+            assert!(!said.contains("didn't go through") && !said.contains("try again"), "{said}");
+        }
+        let out = send_outcome(reverted, false, false);
+        assert_eq!(out["tx"], "ab12", "the hash stays with the outcome");
+        // Not sent at all: the plain cases still apply.
+        assert!(problem("Error: Public/A would be sending to itself").contains("leave from"));
+    }
+
+    #[test]
+    fn the_check_says_which_account_a_name_pays_and_its_forward() {
+        let other = registry::account_text(&id(2));
+        let named = format!("fee: about 2140, at most 3000 (gas)\nalice → bob (it forwards there)\nsending 500 Wrapped Sepolia ETH (v5) from Public/A to alice (Public/{other})\nError: LOGOS_NAMES_DRY_RUN is set, so nothing was sent\n");
+        let c = check_outcome(&named, false);
+        assert_eq!((c["to_account"].as_str(), c["forwarded_to"].as_str()), (Some(format!("Public/{other}").as_str()), Some("bob")));
+        let plain = format!("sending 500 wETH from Public/A to Public/{other}\nError: LOGOS_NAMES_DRY_RUN is set, so nothing was sent\n");
+        assert_eq!(check_outcome(&plain, false)["to_account"], format!("Public/{other}"));
+        assert!(check_outcome(&plain, false)["forwarded_to"].is_null());
+        assert!(check_outcome("Error: LOGOS_NAMES_DRY_RUN is set, so nothing was sent", false)["to_account"].is_null());
+        assert_eq!(paid_account("sending 5 x from Public/A to alice (Public/nope)"), None);
+    }
+
+    #[test]
+    fn one_send_per_check() {
+        let t0 = std::time::Instant::now();
+        let key = "test-move|one-send-per-check";
+        assert!(may_send(key, t0).unwrap_err().contains("Review the move first"));
+        checked_now(key, t0);
+        assert_eq!(may_send(key, t0 + std::time::Duration::from_secs(5)), Ok(()));
+        // Pressed again (a late answer, a second press): refused until a new review.
+        assert!(may_send(key, t0 + std::time::Duration::from_secs(40)).unwrap_err().contains("sent already"));
+        checked_now(key, t0 + std::time::Duration::from_secs(60));
+        assert_eq!(may_send(key, t0 + std::time::Duration::from_secs(61)), Ok(()));
+        // A review older than CHECK_FRESH doesn't send.
+        let other = "test-move|old-review";
+        checked_now(other, t0);
+        assert!(may_send(other, t0 + CHECK_FRESH + std::time::Duration::from_secs(1)).unwrap_err().contains("too old"));
     }
 
     #[test]

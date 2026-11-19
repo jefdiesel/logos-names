@@ -2376,9 +2376,12 @@ fn feed(mut process: Command, program: &Path, input: &str, patience: Duration, s
     };
     // Written from a thread: a large page can fill the pipe before the CLI reads it.
     if let Some(mut stdin) = child.stdin.take() {
-        let input = input.to_owned();
+        let mut input = input.to_owned();
         std::thread::spawn(move || {
             let _ = std::io::Write::write_all(&mut stdin, input.as_bytes());
+            // The copy is overwritten once written (an import's request holds a signing key).
+            // SAFETY: zero bytes are valid UTF-8, and the string is dropped right after.
+            unsafe { input.as_bytes_mut() }.fill(0);
         });
     }
     let drain = |stream: Option<Box<dyn Read + Send>>| {
