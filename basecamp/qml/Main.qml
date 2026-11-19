@@ -17,6 +17,7 @@ import QtQuick
 import QtQuick.Layouts
 import Logos.Theme
 import "logic.mjs" as Logic
+import "claimdelay.mjs" as ClaimDelay
 
 Item {
     id: root
@@ -3100,6 +3101,7 @@ Item {
         pcDetails = false
         pcExtras = []
         pcCheckFailed = false
+        pcDelayLoad(id)
         pcJob = privateClaimJobs[id] || null
         pcLooking = pcJob === null
         bridgeCall(Logic.PRIVATE_BRIDGE.jobs, [], function(value) {
@@ -3256,12 +3258,13 @@ Item {
     /// The private wait on screen (a claim or a send-back's burn being approved, proved or sent):
     /// read every 30 s only while its screen is open and in front; a clock moves its elapsed time.
     readonly property bool privateWaitOnView: section === "wallet" && receiveFrontmost
-        && ((walletView === "pclaim" && (pcNeeds !== null || (pcJobNow !== null && pcJobNow.running)))
+        && ((walletView === "pclaim" && (pcNeeds !== null || (pcJobNow !== null && pcJobNow.running) || pcDelayWatchNow))
             || (walletView === "sendback" && sbJobView !== null && sbJobView.running))
     function privatePoll() {
-        if (walletView === "pclaim")
+        if (walletView === "pclaim") {
+            pcDelayTick()
             pcPoll()
-        else if (walletView === "sendback")
+        } else if (walletView === "sendback")
             sbJobPoll()
     }
     Timer {
@@ -3276,6 +3279,67 @@ Item {
         running: root.privateWaitOnView
         onTriggered: root.privateNow = Date.now()
     }
+    // ── The claim delay (claimdelay.mjs; the LEZ Bridge's receive_claim_plan): a private receive's
+    //    claim time, drawn once by the bridge and read back here, never drawn here. When it has come
+    //    while this page is open and in front, the claim starts as pressing Claim does (the person
+    //    still approves it); checked at most every 30 s, nothing in the background. ──
+    property var pcDelay: null              // receive_claim_plan's answer for pcDeposit; {failed: true} if it failed
+    property bool pcDelayAsking: false      // "Claim now instead" on its way
+    property string pcDelayError: ""
+    property bool pcDelayStarted: false     // the planned claim started by itself once on this opening
+    property double pcDelayCheckedAt: 0
+    property double pcDelayClock: Date.now()
+    readonly property var pcDelayView: ClaimDelay.claimDelayState({ features: bridgeFeatures, row: pcRow, plan: pcDelay, nowMs: pcDelayClock })
+    function pcDelayLoad(id) {
+        pcDelay = null
+        pcDelayAsking = false
+        pcDelayError = ""
+        pcDelayStarted = false
+        pcDelayCheckedAt = 0
+        pcDelayClock = Date.now()
+        if (!ClaimDelay.claimDelayCan(bridgeFeatures))
+            return
+        bridgeCall(ClaimDelay.CLAIM_DELAY_CALL, [id, "{}"], function(value) {
+            if (pcDeposit !== id) return
+            pcDelay = value || { failed: true }
+            pcDelayTick()   // already due with the page open and in front: starts now, not 30 s later
+        }, function(message, kind) {
+            if (pcDeposit === id) pcDelay = { failed: true }
+            console.log("names_ui: claim delay:", kind, message)
+        }, 30000)
+    }
+    /// "Claim now instead": recorded with the bridge first, then the claim as Claim starts it.
+    function pcDelayClaimNow() {
+        if (pcDelayAsking || pcDeposit === "")
+            return
+        pcDelayAsking = true
+        pcDelayError = ""
+        var id = pcDeposit
+        bridgeCall(ClaimDelay.CLAIM_DELAY_CALL, [id, JSON.stringify({ now: true })], function(value) {
+            pcDelayAsking = false
+            if (pcDeposit !== id) return
+            pcDelay = value || { failed: true }
+            pcStart()
+        }, function(message, kind) {
+            pcDelayAsking = false
+            pcDelayError = sentence(kind === "busy" ? "The LEZ Bridge is still answering an earlier call. Nothing was sent; try again." : message)
+            console.log("names_ui: claim delay: now:", kind, message)
+        }, 30000)
+    }
+    function pcDelayTick() {
+        var now = Date.now()
+        pcDelayClock = now
+        var s = { on: pcDelayView.on, due: pcDelayView.due, open: walletView === "pclaim" && section === "wallet", front: receiveFrontmost, stage: pcStageNow,
+                  started: pcDelayStarted, able: privateClaimAble, error: pcError, lastAt: pcDelayCheckedAt, nowMs: now }
+        if (ClaimDelay.claimDelayAutoStart(s)) {
+            pcDelayStarted = true
+            root.pcStart()
+        }
+        pcDelayCheckedAt = now
+    }
+    /// The private wait's 30 s timer below also runs while the claim time is watched (no timer of its own).
+    readonly property bool pcDelayWatchNow: ClaimDelay.claimDelayWatching({ on: pcDelayView.on, open: walletView === "pclaim" && section === "wallet", front: receiveFrontmost, stage: pcStageNow, started: pcDelayStarted })
+
     /// The wait's clock starts when it was approved here, else when it was proposed.
     function privateSince(job) {
         if (!job || !job.id)
@@ -11145,6 +11209,7 @@ Item {
                     // again" wait shows under it, it is the one button (no second primary).
                     Action { visible: root.claimStageNow === "ready"; label: root.claimAsking ? "Asking the wallet…" : "Continue"; strong: true; enabledNow: !root.claimAsking; onPressed: root.startClaim(false) }
                     Hint { visible: root.claimStageNow === "ready" && !(root.claimCheck !== null && !!root.claimCheck.privacy); font.pixelSize: root.px(15); text: "The bridge pays the fee." }
+                    Hint { visible: root.claimStageNow === "ready" && root.claimSource.indexOf("deposit:") === 0 && ClaimDelay.claimDelayCan(root.bridgeFeatures); font.pixelSize: root.px(15); text: ClaimDelay.CLAIM_DELAY_PUBLIC_LINE }
 
                     // The wallet's questions for this claim, answered here as the step itself.
                     Hint {
@@ -11281,8 +11346,21 @@ Item {
                     // Step: claim it (the bridge's checks, then the proposal; the sheet comes next).
                     Hint { visible: pclaimScreen.before; color: root.ink; text: Logic.PRIVATE_CLAIM_NOTE }
                     Hint { visible: pclaimScreen.before && root.proofWarning !== ""; font.pixelSize: root.px(15); text: root.proofWarning }
+                    // The claim delay (claimdelay.mjs): the planned time, "Claim now instead" with its cost, and
+                    // that the claim starts only with this page open. Off: the page as before.
+                    StatusLine {
+                        visible: pclaimScreen.stage === "start" && root.pcDelayView.line !== "" && !(root.pcDelayView.due && root.pcDelayStarted)
+                        kind: root.pcDelayView.why === "reading" ? "working" : "waiting"
+                        text: root.pcDelayView.line
+                        actionLabel: root.pcDelayView.on && root.pcDelayView.hold ? (root.pcDelayAsking ? ClaimDelay.CLAIM_DELAY_NOW_BUSY : ClaimDelay.CLAIM_DELAY_NOW_LABEL) : ""
+                        actionEnabled: !root.pcDelayAsking
+                        onAct: root.pcDelayClaimNow()
+                    }
+                    Hint { visible: pclaimScreen.stage === "start" && root.pcDelayView.on && root.pcDelayView.hold; font.pixelSize: root.px(15); text: ClaimDelay.CLAIM_DELAY_NOW_COST }
+                    Hint { visible: pclaimScreen.stage === "start" && root.pcDelayView.on && root.pcDelayView.hold; font.pixelSize: root.px(15); text: ClaimDelay.CLAIM_DELAY_PAGE_NOTE }
+                    StatusLine { visible: root.pcDelayError !== ""; kind: Logic.noticeKind(root.pcDelayError, true); text: root.pcDelayError; actionLabel: root.pcDelayAsking ? "" : "Try again"; onAct: root.pcDelayClaimNow() }
                     Action {
-                        visible: pclaimScreen.stage === "start" || pclaimScreen.stage === "checking" || pclaimScreen.stage === "asking"
+                        visible: (pclaimScreen.stage === "start" || pclaimScreen.stage === "checking" || pclaimScreen.stage === "asking") && !(pclaimScreen.stage === "start" && root.pcDelayView.hold)
                         label: pclaimScreen.stage === "checking" ? "Checking…" : pclaimScreen.stage === "asking" ? "Asking your wallet…" : "Claim privately"
                         strong: true
                         enabledNow: pclaimScreen.stage === "start" && root.privateClaimAble && root.pcError === ""
@@ -11346,6 +11424,7 @@ Item {
                         spacing: 10
                         Hint { font.pixelSize: root.px(15); text: "LEZ 0.4 · bridge test network. The LEZ Bridge builds the claim and asks your wallet; your wallet simulates it, shows you what it does, then proves it on this computer and sends it. The bridge never sees your keys and never proves." }
                         Fact { visible: pclaimScreen.row !== null; label: "Into"; code: true; value: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : ""; full: pclaimScreen.row !== null ? Logic.receiveAccountShown(pclaimScreen.row) : "" }
+                        Hint { visible: root.pcDelayView.detail !== ""; font.pixelSize: root.px(15); text: root.pcDelayView.detail }
                         Fact { visible: root.pcPlan !== null && root.pcPlan.sponsored !== undefined && root.pcPlan.sponsored !== null; label: "Fee"; value: root.pcPlan !== null && root.pcPlan.sponsored === true ? "Sponsored by the bridge, paid inside the proof" : "Paid inside the proof from the account" }
                         Hint { visible: root.pcPlan !== null && !!root.pcPlan.privacy && !!root.pcPlan.privacy.headline; font.pixelSize: root.px(15); text: root.pcPlan !== null && root.pcPlan.privacy ? String(root.pcPlan.privacy.headline || "") : "" }
                         Repeater {
