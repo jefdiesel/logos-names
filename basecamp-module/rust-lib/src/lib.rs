@@ -1207,15 +1207,15 @@ pub trait NamesModule: Send + 'static {
     fn nft_holdings(&mut self) -> String;
     /// A collection's fields: `{definition, name, printable_supply, standard, uri, creators}`.
     fn nft_collection(&mut self, program_id: String, definition: String) -> String;
-    /// The sheet for an action (`{action: init|send|print|burn, from, to, definition, new,
-    /// their_keys}`): what it does, what becomes public, the fee and private payers, any
-    /// refusal, the program's registry label, and the `digest` an action must name.
+    /// The sheet for an action (`{action: init|send|print|burn|receive, from, to, definition,
+    /// new, their_keys}`): what it does, what becomes public, the fee and the accounts that can
+    /// pay it (private ones for a proven action), any refusal, the program's registry label, and
+    /// the `digest` an action must name.
     fn nft_sheet(&mut self, program_id: String, action_json: String) -> String;
-    /// Starts the action of a sheet (`digest`) as a wallet job; `fee_payer` is the private
-    /// account that pays a proven one (empty for a public one). `{id, kind, state}`.
+    /// Starts the action of a sheet (`digest`) as a wallet job; `fee_payer` is one of the sheet's
+    /// payers (required for a proven action; empty for a public one lets its signer pay). Its
+    /// ended `job` state has `tx`, `block`, `refusal` and, for an init, `account`.
     fn nft_start(&mut self, program_id: String, action_json: String, digest: String, fee_payer: String) -> String;
-    /// Takes the NFT credits waiting for this wallet's private accounts, as a wallet job.
-    fn nft_receive(&mut self, program_id: String, fee_payer: String) -> String;
     /// Allows (or stops) loading a collection's image. `{allowed}`.
     fn nft_media(&mut self, program_id: String, definition: String, allow: bool) -> String;
     /// A collection's image as pixels, once allowed: `{allowed: false}` or `{width, height, pixels}`.
@@ -7545,13 +7545,6 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         reply(self.nft_start_now(&program_id, &action_json, &digest, &fee_payer))
-    }
-
-    fn nft_receive(&mut self, program_id: String, fee_payer: String) -> String {
-        if let Err(refused) = only_the_names_app() {
-            return reply(Err(refused));
-        }
-        reply(self.nft_receive_now(&program_id, &fee_payer))
     }
 
     fn nft_media(&mut self, program_id: String, definition: String, allow: bool) -> String {
@@ -15774,9 +15767,6 @@ mod tests {
         let program = &read["value"]["programs"][0];
         assert_eq!(program["holdings"][0]["collection"]["name"], "Art", "{read}");
         assert_eq!(program["collections"][0]["count"], 1);
-        let argv = std::fs::read_to_string(dir.join("argv")).unwrap_or_default();
-        let log = std::fs::read_dir(dir.join("jobs")).map(|_| String::new()).unwrap_or_default();
-        let _ = (argv, log);
         assert!(parsed(&names.nft_program_remove(NFT_PROGRAM.into()))["value"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }

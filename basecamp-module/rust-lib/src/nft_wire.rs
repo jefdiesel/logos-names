@@ -511,16 +511,20 @@ pub fn reveals(from_private: bool, to: To) -> (Vec<&'static str>, Vec<&'static s
             vec!["What else the private account holds stays private."],
         ),
         (false, To::TheirPrivate) => (
-            vec!["Your public account and the collection are public."],
-            vec!["Who receives it is not named; the NFT waits for their wallet to take it."],
+            vec!["Expected (not yet observed): your public account and the collection are public."],
+            vec!["Expected: who receives it is not named; the NFT waits for their wallet to take it."],
         ),
         (true, To::Public) => (
             vec!["The receiving account and the collection are public."],
             vec!["Your private account is not named."],
         ),
-        (true, To::OwnPrivate | To::TheirPrivate) => (
+        (true, To::OwnPrivate) => (
             vec!["Only that the NFT program ran is public."],
             vec!["Neither account and not the collection are named: no link between sender and recipient."],
+        ),
+        (true, To::TheirPrivate) => (
+            vec!["Expected (observed only between two accounts of one wallet): only that the NFT program ran is public."],
+            vec!["Expected: neither account and not the collection are named."],
         ),
     }
 }
@@ -727,9 +731,12 @@ mod tests {
 
     #[test]
     fn only_a_private_to_private_send_hides_both_sides() {
-        let (named, hidden) = reveals(true, To::TheirPrivate);
+        let (named, hidden) = reveals(true, To::OwnPrivate);
         assert_eq!(named, vec!["Only that the NFT program ran is public."]);
         assert!(hidden[0].contains("no link"));
+        // Someone else's private account was never observed: said as expected, not as fact.
+        assert!(reveals(true, To::TheirPrivate).0[0].starts_with("Expected"));
+        assert!(reveals(false, To::TheirPrivate).0[0].starts_with("Expected"));
         assert!(reveals(false, To::OwnPrivate).0[0].contains("receiving private account's ID"));
         assert!(reveals(true, To::Public).1[0].contains("not named"));
         assert!(reveals(false, To::Public).1.is_empty());

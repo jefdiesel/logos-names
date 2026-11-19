@@ -126,7 +126,7 @@ pub fn set_media(path: &Path, program: &str, definition: &str, allow: bool) -> R
 /// What a sheet and a job act on; checked here, written back canonically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
-    /// `init`, `send`, `print` or `burn`.
+    /// `init`, `send`, `print`, `burn`, or `receive` (the credits waiting for private accounts).
     pub action: String,
     pub from: Option<String>,
     pub to: Option<String>,
@@ -191,7 +191,8 @@ impl Action {
                 }
             }
             "burn" => out.from = Some(account(field("from").ok_or("say which account burns")?)?),
-            _ => return Err("an NFT action is init, send, print or burn".to_owned()),
+            "receive" => {}
+            _ => return Err("an NFT action is init, send, print, burn or receive".to_owned()),
         }
         if out.their_keys && !out.to.as_deref().is_some_and(|to| to.contains(':')) {
             out.their_keys = false;
@@ -233,13 +234,13 @@ impl Action {
                 }
             }
             "burn" => args.push(format!("--from={}", bare(self.from.as_deref().unwrap_or_default()))),
-            _ => return Err("an NFT action is init, send, print or burn".to_owned()),
+            "receive" if fee_payer.is_none() => return Err("receiving is a private transaction: choose the private account that pays its fee".to_owned()),
+            "receive" => {}
+            _ => return Err("an NFT action is init, send, print, burn or receive".to_owned()),
         }
+        // Which kind of account may pay is the sheet's to say (`Names::nft_start_now`).
         if let Some(payer) = fee_payer {
-            let (private, id) = provider::account_ref(payer)?;
-            if !private {
-                return Err("a private transaction's fee is paid by a private account".to_owned());
-            }
+            let (_, id) = provider::account_ref(payer)?;
             args.push(format!("--fee-payer={}", registry::account_text(&id)));
         }
         Ok(args)
@@ -380,7 +381,13 @@ pub fn outcome(log: &str) -> Value {
     let tx = log.lines().rev().find_map(|line| line.trim().strip_prefix("submitted ")).map(str::trim).map(str::to_owned);
     let blocks: Vec<u64> = log.lines().filter_map(|line| line.trim().strip_prefix("applied in block ")?.trim().parse().ok()).collect();
     let refusal = log.lines().rev().find_map(|line| line.trim().strip_prefix("Error: ")).map(|error| nft_wire::refusal(error).unwrap_or(error)).map(|why| provider::clean_text(why, 240));
-    json!({ "tx": tx, "block": blocks.last(), "received": blocks.len(), "nothing": log.contains("nothing to receive"), "refusal": refusal })
+    // The account an `init` made ready (`new account …` or `making … ready`): what the sender needs.
+    let ready = log.lines().rev().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("new account ").or_else(|| line.strip_prefix("making ").and_then(|rest| rest.split(" ready for ").next()))
+    });
+    let account = ready.and_then(|text| account(text.split_whitespace().next().unwrap_or_default()).ok());
+    json!({ "tx": tx, "block": blocks.last(), "received": blocks.len(), "nothing": log.contains("nothing to receive"), "refusal": refusal, "account": account })
 }
 
 // ── Media: a collection's image, only when allowed ──────────────────────
@@ -611,14 +618,19 @@ impl Names {
         if let Some(why) = plan["refusal"].as_str() {
             return Err(why.to_owned());
         }
-        let payer = if plan["proven"] == true {
-            let payer = account(fee_payer).map_err(|_| "choose the private account that pays the fee".to_owned())?;
-            if !plan["payers"].as_array().is_some_and(|payers| payers.iter().any(|row| row["account"] == payer.as_str() && row["enough"] == true)) {
-                return Err("that account can't pay this fee: choose a private account the sheet lists as able to".to_owned());
+        // The payer: one the sheet listed as able to pay. A proven action needs one (a private
+        // account, never the wallet's own pick); a public one without one is paid by its signer.
+        let proven = plan["proven"] == true;
+        let payer = match (fee_payer.trim(), proven) {
+            ("", true) => return Err("choose the private account that pays the fee".to_owned()),
+            ("", false) => None,
+            (given, _) => {
+                let payer = account(given).map_err(|_| "choose an account the sheet lists to pay the fee".to_owned())?;
+                if payer.starts_with("Private/") != proven || !plan["payers"].as_array().is_some_and(|payers| payers.iter().any(|row| row["account"] == payer.as_str() && row["enough"] == true)) {
+                    return Err("that account can't pay this fee: choose one the sheet lists as able to".to_owned());
+                }
+                Some(payer)
             }
-            Some(payer)
-        } else {
-            None
         };
         let args = action.args(&program, payer.as_deref())?;
         let kind = format!("nft_{}", action.action);
@@ -627,17 +639,6 @@ impl Names {
         forget_sheet(&wallet_key, &digest);
         self.served.forget(&self.served_key(KEY, &format!("plan|{digest}")));
         Ok(started)
-    }
-
-    /// Takes the NFT credits waiting for this wallet's private accounts, paid by `fee_payer`.
-    pub(crate) fn nft_receive_now(&mut self, program: &str, fee_payer: &str) -> Result<Value, String> {
-        let program = self.nft_listed(program)?;
-        let (private, payer) = provider::account_ref(fee_payer)?;
-        if !private {
-            return Err("receiving is a private transaction: a private account pays its fee".to_owned());
-        }
-        let args = vec![program_arg(&program), "nft".to_owned(), "receive".to_owned(), format!("--fee-payer={}", registry::account_text(&payer))];
-        self.wallet_job("nft_receive", |_| Ok(args))
     }
 
     /// The person's choice to load a collection's image, kept across restarts.
@@ -739,8 +740,11 @@ mod tests {
         let send = Action::parse(&format!(r#"{{"action":"send","from":"Public/{BOB}","to":"Alice"}}"#)).unwrap();
         assert_eq!(send.to.as_deref(), Some("alice"));
         assert_eq!(send.args(&[7; 32], None).unwrap()[3..], [format!("--from={BOB}"), "--to=alice".to_owned()]);
-        // A public payer for a proven one is refused.
-        assert!(send.args(&[7; 32], Some(&format!("Public/{BOB}"))).is_err());
+        // Receive needs a payer; any action takes one (its kind is the sheet's to check).
+        let receive = Action::parse(r#"{"action":"receive"}"#).unwrap();
+        assert!(receive.args(&[7; 32], None).is_err());
+        assert_eq!(receive.args(&[7; 32], Some(&format!("Private/{BOB}"))).unwrap()[2..], ["receive".to_owned(), format!("--fee-payer={BOB}")]);
+        assert!(send.args(&[7; 32], Some(&format!("Public/{BOB}"))).unwrap().contains(&format!("--fee-payer={BOB}")));
         // Someone's keys need the tick.
         let keys = format!("{}:{}", "ab".repeat(32), "cd".repeat(40));
         let unticked = Action::parse(&format!(r#"{{"action":"send","from":"Private/{BOB}","to":"{keys}"}}"#)).unwrap();
@@ -807,6 +811,9 @@ mod tests {
         let refused = outcome("Error: Program violated execution rules: A delivery named Actor { … }, which is neither a declared public actor nor private");
         assert_eq!(refused["refusal"], nft_wire::NOT_READY);
         assert_eq!(outcome("nothing to receive")["nothing"], true);
+        // The account an init made ready, for the sender.
+        assert_eq!(outcome(&format!("new account Private/{BOB}\nmaking Private/{BOB} ready for Art ({ART})\nsubmitted ab\napplied in block 3"))["account"], format!("Private/{BOB}"));
+        assert_eq!(outcome(&format!("making Public/{BOB} ready for Art ({ART})\nsubmitted ab"))["account"], format!("Public/{BOB}"));
     }
 
     #[test]
