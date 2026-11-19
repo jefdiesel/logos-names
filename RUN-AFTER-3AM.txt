@@ -12,3 +12,7 @@ Names-only steps, on the build host (ssh minim4), through the shared build lock:
 
 Already run on the MacBook (2026-11-18): node basecamp/logic.test.mjs (ALL PASS), node basecamp/claimdelay.test.mjs
 (ALL PASS, 38 checks), node basecamp/relayline.test.mjs (7 passed).
+
+Review 4 (2026-11-19): step 1 also runs private_call::tests::the_approved_at_most_is_a_ceiling_above_the_head_fee_and_the_send_holds_to_it;
+and the Basecamp module's provider tests (provider_private::, the approved "at most" passed back on send): see the bridge
+repository's RUN-AFTER-3AM.txt part F for the command. Node, already run: claimdelay.test.mjs ALL PASS (findings 2-4).
