@@ -1789,12 +1789,16 @@ pub fn job_problem(kind: &str, log: &str) -> String {
     format!("{what}: {}", failure_cause(log))
 }
 
-/// Whether the wallet file in `wallet` changed (its modification time or length) since this asked
-/// last for that folder; true the first time. An account the names tool imported into the wallet
-/// shows on the next read of the accounts, with no Refresh and no polling (test of 2026-11-18).
+/// Whether the accounts in the wallet file in `wallet` changed since this asked last for that
+/// folder; true the first time. Only the list of accounts counts (`backup::accounts_of`, which reads
+/// no key): a read that catches the wallet up rewrites the file without changing it, and must not
+/// count. An account the names tool imported shows on the next read, with no Refresh and no polling
+/// (test of 2026-11-18).
 pub fn wallet_changed(wallet: &Path) -> bool {
-    static SEEN: std::sync::Mutex<Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>> = std::sync::Mutex::new(Vec::new());
-    let now = std::fs::metadata(wallet.join(STORAGE_FILE)).ok().and_then(|meta| meta.modified().ok().map(|at| (at, meta.len())));
+    static SEEN: std::sync::Mutex<Vec<(PathBuf, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+    let now: Vec<String> = std::fs::read(wallet.join(STORAGE_FILE))
+        .map(|bytes| crate::backup::accounts_of(&bytes).iter().map(|a| a.to_string()).collect())
+        .unwrap_or_default();
     let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     match seen.iter_mut().find(|(dir, _)| dir == wallet) {
         Some((_, last)) if *last == now => false,
@@ -2962,8 +2966,11 @@ mod tests {
         std::fs::write(dir.join(STORAGE_FILE), "{}").unwrap();
         assert!(wallet_changed(&dir), "the first look");
         assert!(!wallet_changed(&dir), "nothing changed");
-        // An import rewrites the file (another length here; a new time too on a real one).
-        std::fs::write(dir.join(STORAGE_FILE), "{\"key_chain\":{}}").unwrap();
+        // A catch-up rewrites the file with the same accounts: no change.
+        std::fs::write(dir.join(STORAGE_FILE), "{\"key_chain\":{\"accounts\":[]},\"last_synced\":7}").unwrap();
+        assert!(!wallet_changed(&dir), "the same (no) accounts");
+        // An import adds one.
+        std::fs::write(dir.join(STORAGE_FILE), "{\"key_chain\":{\"accounts\":[{\"ImportedPublic\":{\"account_id\":\"7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR\",\"pub_sign_key\":\"MARKER\"}}]}}").unwrap();
         assert!(wallet_changed(&dir), "the import is noticed");
         assert!(!wallet_changed(&dir), "once");
         std::fs::remove_file(dir.join(STORAGE_FILE)).unwrap();

@@ -3363,11 +3363,23 @@ impl Names {
     fn burn_opening_of(&mut self, app: &str, account: &str, opening: Option<&Value>, asked: &Value) -> Result<Value, String> {
         let message = asked["message"].as_str().and_then(|m| registry::unhex(m.trim().trim_start_matches("0x")).ok()).unwrap_or_default();
         let memo = bridge_net::decode_burn(&message).map(|b| b.memo).map_err(|_| "the burn's message can't be read, so the wallet doesn't sign it".to_owned())?;
+        // The burn's own bridge, as its Config says (read within the burn's signing freshness, kept):
+        // the opening must name its cfgId, vault and chain.
+        let bridge = Self::burn_target(asked).and_then(|target| {
+            #[cfg(test)]
+            if let Some(identity) = tests::BURN_IDENTITY.with(|i| *i.borrow()) {
+                return Some(identity);
+            }
+            match bridge_net::config_within(&self.bridge_url(), &target, bridge_net::BURN_SIGN_FRESH, std::time::Duration::from_secs(4)) {
+                bridge_net::ConfigNow::Read(Some(bytes)) => bridge_net::decode_config_identity(&bytes).ok(),
+                _ => None,
+            }
+        });
         let granted = self.store().private.has_secret(app, account, burn_opening::SCOPE);
         let setup = self.cli_setup();
         let now = provider::now_ms();
         let calls = self.secret_calls.entry(app.to_owned()).or_default();
-        burn_opening::for_burn(opening, &memo, |o| {
+        burn_opening::for_burn(opening, &memo, bridge, |o| {
             if !granted {
                 return Ok(None);
             }
@@ -9796,6 +9808,8 @@ mod tests {
         pub(super) static BRIDGE_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<String>, String>>> = std::cell::RefCell::new(HashMap::new());
         /// The Config bytes the chain gives for each bridge a burn may go to (`burn_configs`), by
         /// bridge program: a bridge not listed has no Config there.
+        /// The burn target's Config identity (cfgId, vault, chain) a test says the chain gives.
+        pub(super) static BURN_IDENTITY: std::cell::RefCell<Option<([u8; 32], [u8; 20], u64)>> = const { std::cell::RefCell::new(None) };
         pub(super) static BURN_CONFIGS: std::cell::RefCell<HashMap<String, Result<Option<bridge_net::BridgeConfig>, String>>> = std::cell::RefCell::new(HashMap::new());
         /// Whether a bridge neither map names is read over HTTP from the test's endpoint (the
         /// stall tests), not taken as having no Config.
@@ -13075,6 +13089,49 @@ mod tests {
         assert!(parsed(&names.get_config())["features"].as_array().unwrap().contains(&json!("account_import")));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    /// F: a burn's opening, from the asking app's grant through the names CLI's k' to the sheet's
+    /// value; another bridge named, a wrong k' or no grant are each said or refused.
+    #[test]
+    fn a_burn_s_opening_is_checked_with_the_wallet_s_own_key() {
+        let v: Value = serde_json::from_str(include_str!("../testdata/burn-opening-v1.json")).unwrap();
+        let c = &v["cases"][0];
+        let o = burn_opening::parse(&c["opening"]).unwrap();
+        let k = c["k"].as_str().unwrap();
+        let tail = format!("case \"$*\" in\n *--version*) echo 'names 0.17.0 (LEZ v0.4.0-rc3)' ;;\n *app-secret*) cat > \"$(dirname \"$0\")/asked.json\"; echo '{{\"account\":\"Public/{PUBLIC}\",\"values\":[\"{k}\"],\"scheme\":\"phrase\"}}' ;;\n esac");
+        let (mut names, dir) = with_wallet("burn-opening", &tail);
+        names.net = Net::Lez04;
+        let account = format!("Public/{PUBLIC}");
+        let memo = registry::unhex(c["exit"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+        let message = bridge_net::encode_burn(&bridge_net::BurnMessage {
+            definition: [5; 32], amount: 10_000_000_000_000_000, notify_account: bridge_net::config_address(&registry::parse_account(bridge_net::BRIDGE_V5_PROGRAM).unwrap()),
+            notify_program: registry::parse_account(bridge_net::BRIDGE_V5_PROGRAM).unwrap(), memo: memo.clone().try_into().unwrap(),
+        });
+        let asked = json!({ "message": registry::hex(&message) });
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, o.vault, o.chain_id)));
+        // No grant: unchecked, and the tool isn't asked.
+        let shown = names.burn_opening_of("lez_bridge", &account, Some(&c["opening"]), &asked).unwrap();
+        assert_eq!(shown["checked"], false, "{shown}");
+        assert!(!dir.join("asked.json").exists());
+        names.store().private.grant_secret("lez_bridge", &account, burn_opening::SCOPE, 1).unwrap();
+        let shown = names.burn_opening_of("lez_bridge", &account, Some(&c["opening"]), &asked).unwrap();
+        assert_eq!((shown["checked"].as_bool(), shown["words_text"].as_str()), (Some(true), c["words_text"].as_str()), "{shown}");
+        // The tool was asked for exactly that value: the app, the account, the scope, the context, the tag, the index.
+        let asked_tool: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("asked.json")).unwrap()).unwrap();
+        assert_eq!(asked_tool, json!({ "app": "lez_bridge", "account": account, "scope": "RFP022/exit", "context": c["context"], "tag": "RFP022/ek", "first": 0, "count": 1 }));
+        // Another bridge's vault in the opening: refused before the tool is asked.
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, [0x26; 20], o.chain_id)));
+        assert!(names.burn_opening_of("lez_bridge", &account, Some(&c["opening"]), &asked).unwrap_err().contains("another bridge"));
+        // The burn's E isn't the opening's: refused.
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = Some((o.cfg_id, o.vault, o.chain_id)));
+        let mut other = c["opening"].clone();
+        other["max_relay_fee"] = json!("1");
+        assert!(names.burn_opening_of("lez_bridge", &account, Some(&other), &asked).unwrap_err().contains("doesn't match"));
+        // No opening at all (an older LEZ Bridge): sealed, as before.
+        assert_eq!(names.burn_opening_of("lez_bridge", &account, None, &asked).unwrap()["checked"], false);
+        BURN_IDENTITY.with(|i| *i.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Every file under `dir`.

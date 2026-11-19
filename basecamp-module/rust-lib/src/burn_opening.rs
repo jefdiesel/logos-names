@@ -168,11 +168,22 @@ pub fn unchecked(why: &str) -> Value {
 /// The sheet's `burn_opening` for a burn whose message holds `memo`: unchecked without an opening;
 /// refused when the opening is malformed or doesn't give `memo`; checked when it does. `key` makes k'
 /// for the opening (the CLI's app secret), or None when the wallet may not (no grant for that app).
-pub fn for_burn(opening: Option<&Value>, memo: &[u8; 32], key: impl FnOnce(&Opening) -> Result<Option<[u8; 32]>, String>) -> Result<Value, String> {
+///
+/// `bridge`: the burn's own bridge as its Config says (`bridge_net::decode_config_identity`: cfgId,
+/// vault, chain id), or None when it can't be read now. E binds the cfgId but not the vault or the
+/// chain the four words are made of, so all three must be the bridge's own, or an app could pick a
+/// vault that gives another address someone's familiar words.
+pub fn for_burn(opening: Option<&Value>, memo: &[u8; 32], bridge: Option<([u8; 32], [u8; 20], u64)>, key: impl FnOnce(&Opening) -> Result<Option<[u8; 32]>, String>) -> Result<Value, String> {
     let Some(opening) = opening else {
         return Ok(unchecked("This LEZ Bridge sends no opening: the address is sealed in the burn and can't be checked here."));
     };
     let o = parse(opening).map_err(|why| format!("{why}; the wallet doesn't sign the burn"))?;
+    let Some((cfg, vault, chain)) = bridge else {
+        return Ok(unchecked("The address can't be checked now: the bridge's Config couldn't be read."));
+    };
+    if (o.cfg_id, o.vault, o.chain_id) != (cfg, vault, chain) {
+        return Err("the burn's opening names another bridge than the one the burn goes to, so the wallet doesn't sign it".to_owned());
+    }
     match key(&o)? {
         Some(k) => checked(&o, &k, memo),
         None => Ok(unchecked("The address can't be checked: this app has no exit values of this account to make it with.")),
@@ -248,19 +259,27 @@ mod tests {
         let memo = hex_bytes::<32>(&c["exit"], "exit").unwrap();
         let k = key(c["k"].as_str().unwrap());
         // Checked: k' asked with the opening's index and context.
-        let shown = for_burn(Some(&c["opening"]), &memo, |o| {
+        let o = parse(&c["opening"]).unwrap();
+        let bridge = Some((o.cfg_id, o.vault, o.chain_id));
+        let shown = for_burn(Some(&c["opening"]), &memo, bridge, |o| {
             assert_eq!((o.index, hex(&context(o))), (7, c["context"].as_str().unwrap().to_owned()));
             Ok(Some(k))
         })
         .unwrap();
         assert_eq!((shown["checked"].as_bool(), shown["words_text"].as_str()), (Some(true), c["words_text"].as_str()));
         // No opening (an older LEZ Bridge), or no grant: sealed, said so.
-        assert_eq!(for_burn(None, &memo, |_| panic!("no key is made without an opening")).unwrap()["checked"], false);
-        assert_eq!(for_burn(Some(&c["opening"]), &memo, |_| Ok(None)).unwrap()["checked"], false);
+        assert_eq!(for_burn(None, &memo, bridge, |_| panic!("no key is made without an opening")).unwrap()["checked"], false);
+        assert_eq!(for_burn(Some(&c["opening"]), &memo, bridge, |_| Ok(None)).unwrap()["checked"], false);
+        // The bridge's Config unread: unchecked; another vault, chain or cfgId than the burn's own: refused
+        // (the words would be another vault's: an app could grind them to look familiar).
+        assert_eq!(for_burn(Some(&c["opening"]), &memo, None, |_| panic!("not asked")).unwrap()["checked"], false);
+        for other in [Some((o.cfg_id, [0x26; 20], o.chain_id)), Some((o.cfg_id, o.vault, 1)), Some(([1; 32], o.vault, o.chain_id))] {
+            assert!(for_burn(Some(&c["opening"]), &memo, other, |_| panic!("not asked")).unwrap_err().contains("another bridge"));
+        }
         // Another wallet's k', or a malformed opening: refused.
-        assert!(for_burn(Some(&c["opening"]), &memo, |_| Ok(Some([9; 32]))).unwrap_err().contains("doesn't match"));
-        assert!(for_burn(Some(&json!({ "v": 1 })), &memo, |_| Ok(Some(k))).unwrap_err().contains("doesn't sign the burn"));
+        assert!(for_burn(Some(&c["opening"]), &memo, bridge, |_| Ok(Some([9; 32]))).unwrap_err().contains("doesn't match"));
+        assert!(for_burn(Some(&json!({ "v": 1 })), &memo, bridge, |_| Ok(Some(k))).unwrap_err().contains("doesn't sign the burn"));
         // A wallet that can't make k' now (the tool failed): the call isn't shown.
-        assert_eq!(for_burn(Some(&c["opening"]), &memo, |_| Err("busy".to_owned())), Err("busy".to_owned()));
+        assert_eq!(for_burn(Some(&c["opening"]), &memo, bridge, |_| Err("busy".to_owned())), Err("busy".to_owned()));
     }
 }

@@ -45,7 +45,12 @@ pub fn key_of(text: &str) -> Result<(String, Option<String>), &'static str> {
 /// fixed refusal (its path is the person's own, but its content never shows).
 pub fn content(text: &str) -> Result<Option<String>, &'static str> {
     let t = text.trim();
-    let path = t.strip_prefix("file://").unwrap_or(t);
+    // A file picker's URL is percent-encoded ("My%20Keys"): decoded; a bare path is taken as it is.
+    let path = match t.strip_prefix("file://") {
+        Some(url) => percent_decoded(url).ok_or("That file can't be read.")?,
+        None => t.to_owned(),
+    };
+    let path = path.as_str();
     if !path.starts_with('/') || path.contains('\n') {
         return Ok(None);
     }
@@ -54,6 +59,24 @@ pub fn content(text: &str) -> Result<Option<String>, &'static str> {
         return Err("That isn't a key file: pick the account's key or key-chain JSON (at most 64 KB).");
     }
     std::fs::read_to_string(path).map(Some).map_err(|_| "That file can't be read as text.")
+}
+
+/// `%XX` escapes decoded (a file URL's path), or None for a bad escape or text that isn't UTF-8.
+fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The tool's refusal, in fixed words: matched on its text, never showing it.
@@ -123,9 +146,10 @@ mod tests {
     fn a_picked_file_is_read_and_nothing_else_is_a_path() {
         let dir = std::env::temp_dir().join(format!("names-import-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("key.json");
+        let file = dir.join("my key.json");
         std::fs::write(&file, json!({ "ImportedPublic": { "account_id": "AbC", "pub_sign_key": KEY } }).to_string()).unwrap();
-        let read = content(&format!("file://{}", file.display())).unwrap().unwrap();
+        let read = content(&format!("file://{}", file.display().to_string().replace(' ', "%20"))).unwrap().unwrap();
+        assert_eq!(percent_decoded("a%2Fb%zz"), None);
         assert_eq!(key_of(&read), Ok((KEY.to_owned(), Some("AbC".to_owned()))));
         assert_eq!(content(&file.display().to_string()).unwrap().as_deref(), Some(read.as_str()));
         assert_eq!(content(KEY), Ok(None));

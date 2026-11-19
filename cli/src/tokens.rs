@@ -313,6 +313,12 @@ impl TokenCodec for BridgeCodec {
     }
 }
 
+/// The cycles a public token transfer is sent with when it can't be tried here first (a bare
+/// build). NOT MEASURED for the bridge's token program: a generous guess (registry calls measure
+/// 20k-180k); `unchecked_limit` triples it. Measure with a dry run of a tool that can run programs
+/// (`fee: … (gas: N cycles …)`) and set it to about that.
+pub const UNCHECKED_TOKEN_CYCLES: u64 = 200_000;
+
 /// The codecs `--token-codec` may name.
 pub const CODECS: [&str; 2] = ["prototype", "bridge"];
 
@@ -1279,18 +1285,26 @@ impl Client {
             println!("proved in {}s", started.elapsed().as_secs());
             hash
         } else {
-            let program = self
-                .program_at(
-                    tokens.program,
-                    "NAMES_TOKEN_PROGRAM_ELF",
-                    "names-token",
-                    "the token program",
-                )
-                .await?;
-            let cycles = self
-                .simulate(&mentions, &call.message, vec![(tokens.program, program)])
-                .await?;
-            let limit = gas_limit_for(cycles);
+            // A build that can't run programs here (the bundled LEZ 0.4 tool, no r0vm) sends a
+            // public token call unchecked with a fixed cap, as it does a registry call
+            // (`unchecked_limit`); one that can tries it first and sizes the limit from that run.
+            let (cycles, limit) = if crate::prover::can_run() {
+                let program = self
+                    .program_at(
+                        tokens.program,
+                        "NAMES_TOKEN_PROGRAM_ELF",
+                        "names-token",
+                        "the token program",
+                    )
+                    .await?;
+                let cycles = self
+                    .simulate(&mentions, &call.message, vec![(tokens.program, program)])
+                    .await?;
+                (cycles, gas_limit_for(cycles))
+            } else {
+                println!("This computer can't check the token call first. If the network refuses it, its whole fee reserve is still paid.");
+                (UNCHECKED_TOKEN_CYCLES, crate::unchecked_limit(UNCHECKED_TOKEN_CYCLES))
+            };
             self.check_payer(&paying, call.message.len(), 0, limit, cycles)
                 .await?;
             if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
@@ -1300,11 +1314,16 @@ impl Client {
             let mut config = saved.clone();
             config.gas_limit = limit;
             self.wallet.set_config(config);
+            // Unchecked, the wallet's own run before sending is skipped too: both are pinned.
+            if !crate::prover::can_run() {
+                self.wallet.set_fee_params(wallet::FeeParams { gas_limit: Some(limit), max_fee: Some(wallet::max_fee_for(limit)), ..wallet::FeeParams::default() });
+            }
             let sent = self
                 .wallet
                 .send_pub_tx_paid_by(mentions, 0, call.message, payer)
                 .await;
             self.wallet.set_config(saved);
+            self.wallet.set_fee_params(wallet::FeeParams::default());
             sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");
