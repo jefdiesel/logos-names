@@ -1184,6 +1184,27 @@ Item {
                 console.log("names_ui: set_bridge_programs refused", JSON.stringify(value))
         }, function(message) { console.log("names_ui: set_bridge_programs:", message) }, 15000)
     }
+    // A plan or a lookup the module answered busy (it was still reading the node, a name or the
+    // CLI's version on a thread of its own: nothing was done) is asked again by itself every
+    // 1.5 s, up to 20 times, with the "working" state kept meanwhile (names-stall-3).
+    property var busyTries: ({})
+    function againWhileBusy(key, message, fn) {
+        if (message !== moduleBusy)
+            return false
+        var tries = busyTries
+        var n = tries[key] || 0
+        if (n >= 20)
+            return false
+        tries[key] = n + 1
+        busyTries = tries
+        againAfter(1500, fn)
+        return true
+    }
+    function busyDone(key) {
+        var tries = busyTries
+        delete tries[key]
+        busyTries = tries
+    }
     function againAfter(ms, fn) {
         var t = Qt.createQmlObject('import QtQuick; Timer { repeat: false }', root, "claimLater")
         t.interval = ms
@@ -3588,10 +3609,14 @@ Item {
         chainProblem = ""
         chainPlan = null
         askLater("chain_send", [asked[0], asked[1], asked[2], false], function(plan) {
+            busyDone("chainCheck")
             chainBusy = false
             chainPlan = plan
             chainPlanFor = asked.join("|")
         }, function(message) {
+            if (againWhileBusy("chainCheck", message, chainCheck))
+                return
+            busyDone("chainCheck")
             chainBusy = false
             chainProblem = sentence(message)
         }, 60000)
@@ -4232,6 +4257,7 @@ Item {
         }
         // Through Basecamp's own node, one note of exactly the amount (chain_bridge).
         askLater("chain_bridge", [asked[1], asked[3], asked[0], send], function(value) {
+            busyDone("bridgePlan")
             bridgeBusy = false
             bridgeConfirm = false
             bridgeKey = asked[1]
@@ -4252,6 +4278,9 @@ Item {
                 bridgeReview = false
             }
         }, function(message) {
+            if (!send && againWhileBusy("bridgePlan", message, function() { bridgeRun(false) }))
+                return
+            busyDone("bridgePlan")
             bridgeBusy = false
             bridgeConfirm = false
             bridgeError = sentence(message)
@@ -5080,7 +5109,14 @@ Item {
                 text = known.name
             }
             show(text)
+            busyDone("find")
         } catch (error) {
+            // The account's name is read on the module's own thread: asked again by itself.
+            if (againWhileBusy("find", error.message, function() { find(typed) })) {
+                say("Reading the account's name…", "working")
+                return
+            }
+            busyDone("find")
             sayRead(error.message)
         }
     }
@@ -6060,7 +6096,14 @@ Item {
             var recipient = ask("recipient", [bare !== "" ? bare : to])
             if (recipient && recipient.forwarded_from)
                 target = recipient.name
+            busyDone("payName")
         } catch (error) {
+            // Where the name is paid is read on the module's own thread: asked again by itself.
+            if (againWhileBusy("payName", error.message, payName)) {
+                say("Reading where " + (bare !== "" ? bare : to) + " is paid…", "working")
+                return
+            }
+            busyDone("payName")
             say(sentence(error.message), true)
             return
         }
