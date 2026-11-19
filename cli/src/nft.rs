@@ -706,6 +706,13 @@ impl Client {
                 let (recipient, shown, reach) = self.nft_recipient(&to).await?;
                 proven = from_private || reach != Reach::Public;
                 (named, hidden) = nft_wire::reveals(from_private, reach);
+                // The asset leaving, as the prize's prompts must name it: there is no serial.
+                match (action.action.as_str(), nft_wire::can_send(&state)) {
+                    ("print", _) => lines.push("A new copy, printed by this master; the master keeps the rest.".to_owned()),
+                    (_, Ok((_, nft_wire::Value::Copy))) => lines.push("Leaving: a copy of this collection.".to_owned()),
+                    (_, Ok((_, nft_wire::Value::Master(rights)))) => lines.push(format!("Leaving: the master, with all {rights} print rights.")),
+                    (_, Err(_)) => {}
+                }
                 lines.push(format!("To {shown}"));
                 match definition {
                     Err(why) => refusal = Some(why.to_owned()),
