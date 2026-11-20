@@ -179,8 +179,8 @@ export async function readDeed(rpcUrl, deed) {
     const tag = reader.u8();
     if (tag !== 1 && tag !== 2) return fallback; // 0 is a definition, not a holding
     const definition = base58Encode(reader.take(32));
-    // The NFT program writes u128 little-endian (nft_wire.rs); the reader's
-    // u128 is big-endian, so read the 16 bytes in the other direction.
+    // The NFT program writes u128 little-endian (nft_wire.rs). Only whether the
+    // balance is nonzero matters here, so any nonzero byte means print rights.
     let held;
     let kind;
     if (tag === 1) {
@@ -192,6 +192,10 @@ export async function readDeed(rpcUrl, deed) {
       kind = "copy";
     }
     if (reader.offset !== bytes.length) return fallback; // trailing bytes: not a state we know
+    if (definition !== deed.definition) {
+      // A holding of another collection, even with a balance, is not this deed.
+      return { held: false, kind: null, definition };
+    }
     return { held, kind: held ? kind : null, definition };
   } catch {
     return fallback; // a state the program would not write is never shown as held
