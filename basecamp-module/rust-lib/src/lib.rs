@@ -5727,6 +5727,8 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
+        // The tier comes from the names CLI's list of locked names, as for a registration.
+        shortlist::use_cli(self.names_setup().ok());
         reply((|| {
             let asked: Vec<String> = serde_json::from_str(&names_json).map_err(|_| "give the names as a JSON list".to_owned())?;
             let mut out = Map::new();
