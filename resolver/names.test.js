@@ -8,6 +8,8 @@ import {
   base58Decode,
   base58Encode,
   decodeNameRecord,
+  deedAccounts,
+  readDeed,
   decodePage,
   decodePageContent,
   decodePrimaryName,
@@ -212,6 +214,7 @@ test("the on-chain layouts decode, and truncated data is refused", () => {
     expires: EXPIRES,
     sealed,
     claimed: false,
+    deed: null,
   });
   assert.equal(decodeNameRecord(recordShard(OWNER_TAG, sealed, 0x0102030405)).expires, 0x0102030405);
   assert.deepEqual(decodePage(borsh(2, sealed)), { version: 2, sealed });
@@ -299,6 +302,7 @@ test("what the real engine stored reads back, in the shape the RPC serves it", a
     npk: null,
     vpk: null,
     texts: {},
+    deed: null,
   });
 
   // The selected actor has no state on an account that exists, and an account that doesn't.
@@ -348,6 +352,7 @@ const RESOLVED = {
   npk: null,
   vpk: null,
   texts: { chat: "hi" },
+  deed: null,
 };
 const NOTHING_SET = { ...RESOLVED, account: null, texts: {} };
 
@@ -524,3 +529,98 @@ test("a forward names another valid name, one hop (SPEC.md §7)", () => {
   assert.equal(forwardOf(null), null);
 });
 
+
+const DEED_RECORD_PATH = new URL(
+  "../basecamp-module/rust-lib/testdata/deed/lns-deed-check.record.hex",
+  import.meta.url,
+);
+
+test("a version 7 record's deed is where the chain put it", async () => {
+  const bytes = Uint8Array.from(Buffer.from(readFileSync(DEED_RECORD_PATH, "utf8").trim(), "hex"));
+  assert.equal(bytes[0], 7);
+  const record = decodeNameRecord(bytes);
+  assert.equal(record.deed.definition, "9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro");
+  assert.equal(record.deed.nonce, "227820f30ec501b9f7151601e763f5fe9b684ba54a45144823773c0c7c0ede75");
+  const registry = "6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA"; // the chain that produced this record
+  const { id } = await deriveName("lns-deed-check");
+  const accounts = await deedAccounts(registry, id, record.ownerTag, record.deed.nonce);
+  assert.equal(accounts.definition, record.deed.definition);
+  assert.equal(accounts.holding, "B56NfHYKptfSXimHLuVX4S6nNBfhVkWP8GWVCWAWxFCC");
+});
+
+test("a version 6 record, with or without a claim, has no deed", () => {
+  const sealed = Uint8Array.of(0xee, 0xff);
+  const raw = recordShard(OWNER_TAG, sealed);
+  raw[0] = 6;
+  const record = decodeNameRecord(Uint8Array.from([...raw, 1]));
+  assert.equal(record.claimed, true);
+  assert.equal(record.deed, null);
+  assert.equal("deed" in decodeNameRecord(recordShard(OWNER_TAG, sealed)), true);
+});
+
+test("resolving a v7 name returns its deed", async () => {
+  const nonce = "ab".repeat(32);
+  const expected = await deedAccounts(PROGRAM, jef.id, OWNER_TAG, nonce);
+  const shard = recordShard(OWNER_TAG, Buffer.from(SEALED_PROFILE, "hex"));
+  const definitionBytes = base58Decode(expected.definition);
+  const record = Uint8Array.from([
+    7,
+    ...shard.subarray(1), // version 7 keeps the shard's owner tag, expiry and sealed profile
+    1, // claimed
+    1, // deed: Some
+    ...definitionBytes,
+    ...Uint8Array.from(nonce.match(/../g).map((pair) => parseInt(pair, 16))),
+  ]);
+  stubSequencer({ [JEF_RECORD]: record });
+  const resolved = await resolveName(RPC_URL, PROGRAM, "jef");
+  assert.deepEqual(resolved.deed, expected);
+});
+
+// A real jef05 deed holding, read from https://lez.nameswallet.app/ on 2026-11-20.
+const DEED_NFT = "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G";
+const JEF05_DEED = {
+  definition: "ERdxQuTRz1roxWiWKEz9nxjJcijdfWwdsZ5wzuXjJUR9",
+  holding: "Fe2ThKkmweBtau1mJf6ZJN8Sx5tLgnJKr12eJ6ujeVdz",
+  nonce: "553886ce80c1b34caedb8c7cfc0a46ad2480c49db6c449381ca7d0df3ae46cf5",
+};
+
+function stubDeed(bytes) {
+  globalThis.fetch = async (url, { body }) => {
+    assert.equal(url, RPC_URL);
+    const { id, method, params } = JSON.parse(body);
+    assert.equal(method, "getAccountView");
+    assert.equal(params[0].program_account_id, DEED_NFT);
+    assert.equal(params[0].account_id, JEF05_DEED.holding);
+    return Response.json({ jsonrpc: "2.0", id, result: { nonce: 0, data: { actor_states: { [DEED_NFT]: [...bytes] } } } });
+  };
+}
+
+test("a real deed holding holds the master", async () => {
+  const hex = readFileSync(new URL("./fixtures/jef05-deed-holding.hex", import.meta.url), "utf8").trim();
+  const bytes = Uint8Array.from(hex.match(/../g).map((pair) => parseInt(pair, 16)));
+  assert.equal(bytes.length, 49);
+  stubDeed(bytes);
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), {
+    held: true,
+    kind: "master",
+    definition: JEF05_DEED.definition,
+  });
+});
+
+test("an empty deed account holds nothing", async () => {
+  stubDeed(new Uint8Array());
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), {
+    held: false,
+    kind: null,
+    definition: JEF05_DEED.definition,
+  });
+});
+
+test("a master with no print rights and an unowned copy do not hold", async () => {
+  const id = Uint8Array.from(Buffer.from(
+    "c777a7b0f37917d23a11b61e43f97e94d585ad3952fa5d14a7362e76ae72dbcc", "hex"));
+  stubDeed(Uint8Array.from([1, ...id, ...new Array(16).fill(0)]));
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), { held: false, kind: null, definition: JEF05_DEED.definition });
+  stubDeed(Uint8Array.from([2, ...id, 0]));
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), { held: false, kind: null, definition: JEF05_DEED.definition });
+});

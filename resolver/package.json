@@ -1,0 +1,21 @@
+{
+  "name": "@lns/resolver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Resolve LNS names over LEZ JSON-RPC, read their optional NFT (deed), and draw the holder's name card as SVG.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./names.js",
+    "./card": "./card.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

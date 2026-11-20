@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang=en>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>LNS name lookup</title>
+<!-- names.js imports argon2idAsync; pin the one version on jsdelivr, no build step. -->
+<script type="importmap">
+{ "imports": { "@noble/hashes/argon2.js": "https://cdn.jsdelivr.net/npm/@noble/hashes@2.4.0/argon2.js" } }
+</script>
+<style>
+  body { margin: 0; padding: 32px 20px; background: #0d1a17; color: #f5f5ef; font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; }
+  .note { color: #f5f5efb3; }
+  label { display: block; margin: 14px 0 6px; color: #f5f5efb3; }
+  input { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid #2c4039; border-radius: 8px; background: #152521; color: #f5f5ef; font: inherit; }
+  button { margin-top: 18px; padding: 10px 18px; border: 0; border-radius: 8px; background: #ffd328; color: #152521; font: 600 15px inherit; cursor: pointer; }
+  #status { min-height: 1.5em; margin: 20px 0 8px; }
+  #details { padding: 14px 16px; border: 1px solid #2c4039; border-radius: 12px; background: #152521; }
+  #card { margin-top: 20px; }
+  #card svg { max-width: 100%; height: auto; border-radius: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LNS name lookup</h1>
+  <p class="note">Not deployed. Reads a name from the sequencer you name, then draws its card here.</p>
+  <form id=lookup>
+    <label for=name>Name</label>
+    <input id=name name=name placeholder=jef autocomplete=off>
+    <label for=rpc>Sequencer RPC</label>
+    <input id=rpc name=rpc value="https://lez.nameswallet.app/" spellcheck=false>
+    <label for=program>Registry account</label>
+    <input id=program name=program value="6Yxj5k8AiuBSuMAYVQFGrYKjJGUSSaWWgoB9D9XXN3gA" spellcheck=false>
+    <button type=submit>Look up</button>
+  </form>
+  <p id=status role=status aria-live=polite></p>
+  <div id=details hidden></div>
+  <div id=card></div>
+</main>
+<script type=module>
+import { normalizeName, isValidName, resolveName, readDeed } from "./names.js";
+import { nameCard } from "./card.js";
+
+const $ = (id) => document.getElementById(id);
+const status = $("status");
+const details = $("details");
+const card = $("card");
+
+$("lookup").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  status.textContent = "Looking up…";
+  details.hidden = true;
+  details.textContent = "";
+  card.replaceChildren();
+  const name = normalizeName($("name").value);
+  try {
+    if (!isValidName(name)) throw new Error("That is not an LNS name.");
+    const rpc = $("rpc").value.trim();
+    const program = $("program").value.trim();
+    const record = await resolveName(rpc, program, name);
+    if (record === null) {
+      status.textContent = `${name} is not held.`;
+      return;
+    }
+    status.textContent = `${name} is held.`;
+    const expiry = record.expires === null
+      ? "This name does not expire."
+      : `Expires ${new Date(record.expires).toISOString().slice(0, 10)}` +
+        (record.lapsed ? " (grace period)." : ".");
+    let nftLine = "No NFT claimed.";
+    if (record.deed !== null) {
+      const state = await readDeed(rpc, record.deed);
+      nftLine = `NFT held by the name's holder: ${state.held ? "yes" : "no"}.`;
+      card.innerHTML = nameCard(name);
+    }
+    details.textContent = `${expiry} ${nftLine}`;
+    details.hidden = false;
+  } catch (error) {
+    status.textContent = (error && error.message) ? error.message : "Lookup failed.";
+  }
+});
+</script>
+</body>
+</html>
