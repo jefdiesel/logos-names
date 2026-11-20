@@ -20,9 +20,17 @@ Release burns the deed: the definition's printable supply goes to 0. A registrat
 or claimed-over record burns the old deed. The next holder may claim a fresh one, with a new nonce,
 a new definition and a new deed account. Used accounts are never reused.
 
-GUESS: SPEC.md §8.6 does not say that a lapse alone burns the deed. It says a *registration over* a
-lapsed or claimed-over record burns the old one. What happens in the time between is not stated
-there.
+The registry code settles what happens while a name is lapsed. The holder can still transfer it,
+and its deed goes with it: `Effect::Transfer` uses `load_owned`, which checks only that a record
+exists and that the signer owns it, with no expiry or grace check
+(`core/src/lib.rs:1391-1396`, `:1217-1221`); the deed move is sent with the transfer
+(`core/src/lib.rs:1190-1193`). Only the holder can claim a deed on such a name, because
+`Effect::ClaimDeed` uses the same `load_owned` check (`core/src/lib.rs:1103-1111`, `:1439-1445`).
+The old deed is burned when a registration overwrites the lapsed record
+(`core/src/lib.rs:400`, `:1183-1185`), when a claim overwrites a record (`:1186-1188`), and on
+release (`:1194-1196`, `:1010-1017`). The test
+`a_lapsed_names_deed_is_burned_when_it_is_registered_again` (`core/src/lib.rs:3415`) checks the
+burn on re-registration.
 
 ## Privacy
 
