@@ -314,6 +314,14 @@ impl Served {
         Self::snap(lock(&self.shared.slots).1.get(key))
     }
 
+    /// Forgets one key exactly. Unlike `forget`, this does not clear other keys that happen to
+    /// start with it (one name's key can prefix another's). The next call reads afresh, and a read
+    /// under way for this key is dropped when it ends.
+    pub fn forget_key(&self, key: &str) {
+        lock(&self.shared.slots).1.remove(key);
+        self.shared.ended.notify_all();
+    }
+
     /// Forgets every read whose key starts with `prefix` ("" for all): the next call reads afresh,
     /// and a read under way for one of them is dropped when it ends.
     pub fn forget(&self, prefix: &str) {

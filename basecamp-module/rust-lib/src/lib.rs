@@ -5298,6 +5298,16 @@ fn deed_tier_answer(snap: &served::Snap) -> Value {
     }
 }
 
+/// A failed tier read is kept by `served.read` for `every` (a day here). Clear just this key
+/// before the next read so a fresh call retries once the cause is gone. `forget` takes a prefix
+/// and one name's key can prefix another's, so this must be exact.
+fn retry_failed_tier(served: &served::Served, key: &str) {
+    let snap = served.peek(key);
+    if snap.error.is_some() && snap.value.is_none() && !snap.updating {
+        served.forget_key(key);
+    }
+}
+
 impl NamesModule for Names {
     fn recipient(&mut self, name: String) -> String {
         // The Names app (payName): read on a thread of its own, as `resolve` is.
@@ -5751,7 +5761,9 @@ impl NamesModule for Names {
                 }
                 // The tier never changes: read once a day at most, on a thread of its own.
                 let asked_name = name.clone();
-                let snap = self.served.read(&format!("deed-tier:{name}"), std::time::Duration::from_secs(24 * 3600), served::Lane::Cli, move || {
+                let key = format!("deed-tier:{name}");
+                retry_failed_tier(&self.served, &key);
+                let snap = self.served.read(&key, std::time::Duration::from_secs(24 * 3600), served::Lane::Cli, move || {
                     let id = registry::derive(&asked_name).id;
                     shortlist::length_proof(&id).map(|(_, tier)| Value::Bool(tier == shortlist::TIER_NORMAL))
                 });
@@ -16979,6 +16991,31 @@ mod tests {
         };
         assert_eq!(deed_tier_answer(&stale), Value::Bool(true));
         assert_eq!(deed_tier_answer(&served::Snap::default()), Value::Null);
+    }
+
+    /// A failed tier read is tried again on the next call, not held for the day `every` says.
+    /// The exact-key forget must leave a sibling name alone when one key prefixes another.
+    #[test]
+    fn a_failed_tier_read_is_tried_again_on_the_next_call() {
+        let mut names = fresh();
+        names.served = served::Served::threaded();
+        let key = "deed-tier:jef05";
+        let sibling = "deed-tier:jef051";
+        for k in [key, sibling] {
+            let snap = names.served.read(k, std::time::Duration::from_secs(24 * 3600), served::Lane::Cli, || Err("the names CLI isn't installed".to_owned()));
+            assert!(snap.error.is_some() && snap.value.is_none(), "{snap:?}");
+        }
+        let answer = parsed(&names.deed_tiers(json!(["jef05"]).to_string()));
+        assert_eq!(answer["success"], true, "{answer}");
+        assert!(names.served.peek(key).error.is_none(), "the failed read was forgotten and tried again: {answer}");
+        // The proof runs on a thread of its own and can outlast the first call's short wait.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while names.served.peek(key).value.is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let again = parsed(&names.deed_tiers(json!(["jef05"]).to_string()));
+        assert!(again["value"]["jef05"].is_boolean(), "the next call got the fresh tier: {again}");
+        assert!(names.served.peek(sibling).error.is_some(), "a sibling name's read was left alone");
     }
 
     /// Our own LEZ 0.4's chain id with no published file (404): the built-in ids stand. Another
