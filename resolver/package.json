@@ -16,6 +16,6 @@
     "@noble/hashes": "^2.4.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }
