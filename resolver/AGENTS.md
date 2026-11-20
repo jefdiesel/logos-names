@@ -1,8 +1,9 @@
 # Resolver notes for agents and apps
 
-An LNS name is a bare lowercase string of 5-32 letters, digits or hyphens. Call it
-an "LNS name" — never ".lez" or "Logos names". `normalizeName` turns what a person
-typed (`Jef.lez`, `@jef`, `lns:jef`) into that bare name; `isValidName` checks it.
+An LNS name is a bare lowercase string of 1-32 letters, digits or hyphens. Names of
+1-4 characters are locked: they are not registrable now. Call it an "LNS name" —
+never ".lez" or "Logos names". `normalizeName` turns what a person typed
+(`Jef.lez`, `@jef`, `lns:jef`) into that bare name; `isValidName` checks it.
 
 Latest version: https://github.com/jefdiesel/logos-names (placeholder until the repo is public).
 
@@ -23,8 +24,9 @@ a name (it never follows a forward). `resolvePage` reads a name's page,
 
 ## Read the NFT (deed)
 
-The NFT is optional: a name works fully without one. `deed` is null for records
-of version 1-6. A version 7 record carries a definition and a 32-byte nonce; the
+The NFT is optional: a name works fully without one, and only names of 5-32
+characters that are not locked or reserved can claim one. `deed` is null for
+records of version 1-6. A version 7 record carries a definition and a 32-byte nonce; the
 resolver returns `deed: { definition, holding, nonce }`, the definition PDA and the
 holder's deed account. The registry alone controls that address, so the holder
 cannot move the deed on their own — LNS stays the source of truth.
