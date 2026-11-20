@@ -50,8 +50,11 @@ static PROVER: std::sync::Mutex<Option<crate::cli::Setup>> = std::sync::Mutex::n
 
 /// Has [`length_proof`] ask the names CLI `setup` runs (or nothing, when there is none).
 pub fn use_cli(setup: Option<crate::cli::Setup>) {
+    // A setup that failed this once (None) keeps the last good one: clearing it would leave
+    // every later tier read failing with nothing shown (the Claim NFT button never appears).
+    let Some(setup) = setup else { return };
     if let Ok(mut prover) = PROVER.lock() {
-        *prover = setup;
+        *prover = Some(setup);
     }
 }
 
