@@ -8,6 +8,8 @@ the program come from that source and from the observations in
 `~/logos/LP0001-JOB-A-FINDINGS.md` ("Job A"), made on a throwaway LEZ v0.4.0-rc3 chain with
 development receipts.
 
+For a plain guide to an LNS name's optional NFT (a deed), see [DEEDS.md](DEEDS.md).
+
 ## 1. What the prize asks, and what the wallet does
 
 From [LP-0001](https://github.com/logos-co/lambda-prize/blob/master/prizes/LP-0001.md), the

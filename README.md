@@ -41,7 +41,7 @@ and choose which one pays, send and receive the native token and fungible tokens
 publicly or privately, and see each change's fee before and after it goes out. For app
 developers: [the Wallet Provider SDK](docs/wallet/PROVIDER-SDK.md), with two mini-apps
 built on it as worked examples, [a testimonial board](apps/testimonial/README.md) and
-[a faucet](apps/faucet/README.md). Tokens: [docs/wallet/TOKENS.md](docs/wallet/TOKENS.md).
+[a faucet](apps/faucet/README.md). Tokens: [docs/wallet/TOKENS.md](docs/wallet/TOKENS.md). LNS name NFTs: [docs/wallet/DEEDS.md](docs/wallet/DEEDS.md).
 Status against the prize: [docs/wallet/PLAN.md](docs/wallet/PLAN.md). It goes live with the
 public LEZ 0.4 testnet; until then it runs on local 0.4 chains, end to end in CI
 ([wallet-e2e.yml](.github/workflows/wallet-e2e.yml)).
