@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 use common::block::Block;
 use common::transaction::LeeTransaction;
 use common::{HashType, PageLimit};
@@ -79,10 +79,12 @@ pub fn is_busy(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.to_string().contains(BUSY))
 }
 
-/// What `names` ends with: just [`BUSY`] when that is why it stopped, so the wallet shows that
-/// line and not the step it was on.
+/// What `names` ends with: [`BUSY`] on top when that is why it stopped, so the wallet (which
+/// shows the first `Error:` line) says it plainly. The step it was on stays below it, under
+/// "Caused by", and an error that already says it on top (a "nothing is lost, run it again"
+/// message) is left as it is.
 pub fn plain_when_busy(error: anyhow::Error) -> anyhow::Error {
-    if is_busy(&error) { anyhow!(BUSY) } else { error }
+    if is_busy(&error) && !error.to_string().contains(BUSY) { error.context(BUSY) } else { error }
 }
 
 // ── Pacing ──
@@ -108,9 +110,15 @@ impl Pacer {
     }
 }
 
+impl Pacer {
+    fn new() -> Self {
+        Self { state: Mutex::new((PACE_BURST, Instant::now())) }
+    }
+}
+
 fn pacer() -> &'static Pacer {
     static PACER: OnceLock<Pacer> = OnceLock::new();
-    PACER.get_or_init(|| Pacer { state: Mutex::new((PACE_BURST, Instant::now())) })
+    PACER.get_or_init(Pacer::new)
 }
 
 /// Whether calls to `url` are paced: all but this computer's own sequencer.
@@ -436,6 +444,7 @@ pub fn post(url: &str, body: &serde_json::Value) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::{Read as _, Write as _};
+    use anyhow::anyhow;
     use std::sync::atomic::AtomicUsize;
 
     const QUICK: Backoff = Backoff { first: Duration::from_millis(1), cap: Duration::from_millis(5) };
@@ -509,9 +518,29 @@ mod tests {
         // The last 429's Retry-After (10) was read off the HTTP answer; the waits held it to
         // QUICK's cap, or this test would take 40 s.
         assert_eq!(rpc.retry_after.load(Ordering::Relaxed), 10 + 1);
-        // As the wallet and then `names` show it.
+        // As the wallet and then `names` show it: the plain line on top, the step below.
         let shown = plain_when_busy(anyhow::Error::from(error).context("cannot sync the private accounts"));
-        assert_eq!(format!("{shown:#}"), BUSY);
+        assert_eq!(shown.to_string(), BUSY);
+        let full = format!("{shown:?}");
+        assert!(full.starts_with(&format!("{BUSY}\n\nCaused by:")) && full.contains("cannot sync the private accounts"), "{full}");
+    }
+
+    #[test]
+    fn a_message_that_already_says_busy_is_kept() {
+        let said = format!("1 of 2 received. The claim stopped: {BUSY}. It and the rest still wait, nothing of them is lost: run `names receive` again");
+        assert_eq!(plain_when_busy(anyhow!(said.clone())).to_string(), said);
+        assert_eq!(plain_when_busy(anyhow!("cannot reach the sequencer")).to_string(), "cannot reach the sequencer");
+    }
+
+    #[test]
+    fn the_pacer_lets_a_burst_of_8_through_then_4_a_second() {
+        let pacer = Pacer::new();
+        for _ in 0..8 {
+            assert_eq!(pacer.reserve(), Duration::ZERO);
+        }
+        let (ninth, tenth) = (pacer.reserve(), pacer.reserve());
+        assert!(ninth > Duration::from_millis(240) && ninth <= Duration::from_millis(250), "{ninth:?}");
+        assert!(tenth > Duration::from_millis(490) && tenth <= Duration::from_millis(500), "{tenth:?}");
     }
 
     #[tokio::test]
