@@ -1,8 +1,9 @@
 # @lns/resolver
 
 Resolve an LNS name against a LEZ sequencer and open what it holds. Read the
-name's optional NFT (a "deed") from its record. Draw the holder's own name card
-locally as SVG; the public NFT image never shows the name.
+name's optional NFT (a "deed") from its record, and check whether the deed
+account really holds it. Draw the holder's own name card locally as SVG; the
+public NFT image never shows the name.
 
 The name is a placeholder and the package is private for now.
 
@@ -30,9 +31,10 @@ if (record) console.log(publicView(record)); // npk/vpk are not in this view
 ```
 
 ```js
-import { resolveName } from "./names.js";
+import { resolveName, readDeed } from "./names.js";
 const record = await resolveName(RPC, PROGRAM, "jef");
 console.log(record?.deed); // { definition, holding, nonce } or null
+if (record?.deed) console.log(await readDeed(RPC, record.deed)); // { held, kind, definition }
 ```
 
 To derive the accounts from raw record bytes instead, read the record address,

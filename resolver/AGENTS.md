@@ -31,7 +31,12 @@ resolver returns `deed: { definition, holding, nonce }`, the definition PDA and 
 holder's deed account. The registry alone controls that address, so the holder
 cannot move the deed on their own — LNS stays the source of truth.
 `deedAccounts(program, id, ownerTag, nonce)` derives the same pair if you already
-have the record. The public NFT image must not show the name; the wallet or an SDK
+have the record. `readDeed(rpcUrl, deed)` reads that holding account from the NFT
+program (`CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G`) and returns
+`{ held, kind, definition }`: held is whether the account really holds the master or an owned copy,
+kind is "master" or "copy" only while held (else null), and definition comes from the state, or
+from `deed.definition` when the account is empty or unreadable. An unreadable state is never shown
+as held. The public NFT image must not show the name; the wallet or an SDK
 app draws the holder's own card locally.
 
 ## Draw the card
@@ -50,9 +55,10 @@ if (record) console.log(publicView(record)); // npk/vpk are not in this view
 ```
 
 ```js
-import { resolveName } from "./names.js";
+import { resolveName, readDeed } from "./names.js";
 const record = await resolveName(RPC, PROGRAM, "jef");
 console.log(record?.deed); // { definition, holding, nonce } or null
+if (record?.deed) console.log(await readDeed(RPC, record.deed)); // { held, kind, definition }
 ```
 
 To derive the accounts from raw record bytes instead, read the record address,

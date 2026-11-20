@@ -19,6 +19,8 @@ const NAME_SEED_DOMAIN = "logos-names/v5/name/";
 const DEED_VERSION = 7;
 const DEED_DEFINITION_DOMAIN = "lns-deed/v1/definition/";
 const DEED_HOLDING_DOMAIN = "lns-deed/v1/holding/";
+// The NFT program deeds are minted on (core/src/deed.rs, registry.rs DEED_NFT_PROGRAM).
+const DEED_NFT_PROGRAM = "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G";
 const PAGE_SEED_DOMAIN = "logos-names/v5/page/";
 // Sealed data is bound to its kind, so a sealed page never opens as a record.
 const ASSOCIATED_DATA = { record: "logos-names/v5/record", page: "logos-names/v5/page" };
@@ -159,6 +161,41 @@ export async function deedAccounts(program, id, ownerTag, nonce) {
   const holdingSeed = await sha256(concat(utf8.encode(DEED_HOLDING_DOMAIN), base58Decode(definition), fromHex(ownerTag)));
   const holding = await pdaFromSeed(program, holdingSeed);
   return { definition, holding, nonce };
+}
+
+/**
+ * Whether a deed's holding account really holds the master, read from the NFT
+ * program. `deed` is the `{ definition, holding, nonce }` from `resolveName`.
+ * Returns `{ held, kind, definition }`: kind is "master" or "copy" only while
+ * held, else null. An empty or unreadable state is not treated as held; its
+ * definition falls back to the one in `deed`.
+ */
+export async function readDeed(rpcUrl, deed) {
+  const fallback = { held: false, kind: null, definition: deed.definition };
+  const bytes = await readActorState(rpcUrl, DEED_NFT_PROGRAM, deed.holding);
+  if (bytes.length === 0) return fallback;
+  try {
+    const reader = new Reader(bytes);
+    const tag = reader.u8();
+    if (tag !== 1 && tag !== 2) return fallback; // 0 is a definition, not a holding
+    const definition = base58Encode(reader.take(32));
+    // The NFT program writes u128 little-endian (nft_wire.rs); the reader's
+    // u128 is big-endian, so read the 16 bytes in the other direction.
+    let held;
+    let kind;
+    if (tag === 1) {
+      const balanceBytes = reader.take(16);
+      held = balanceBytes.some((byte) => byte !== 0);
+      kind = "master";
+    } else {
+      held = reader.bool();
+      kind = "copy";
+    }
+    if (reader.offset !== bytes.length) return fallback; // trailing bytes: not a state we know
+    return { held, kind: held ? kind : null, definition };
+  } catch {
+    return fallback; // a state the program would not write is never shown as held
+  }
 }
 
 /** Account holding the record of the name `id` under the registry `program`. */

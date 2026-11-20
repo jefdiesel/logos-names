@@ -39,7 +39,7 @@
   <div id=card></div>
 </main>
 <script type=module>
-import { normalizeName, isValidName, resolveName } from "./names.js";
+import { normalizeName, isValidName, resolveName, readDeed } from "./names.js";
 import { nameCard } from "./card.js";
 
 const $ = (id) => document.getElementById(id);
@@ -56,7 +56,9 @@ $("lookup").addEventListener("submit", async (event) => {
   const name = normalizeName($("name").value);
   try {
     if (!isValidName(name)) throw new Error("That is not an LNS name.");
-    const record = await resolveName($("rpc").value.trim(), $("program").value.trim(), name);
+    const rpc = $("rpc").value.trim();
+    const program = $("program").value.trim();
+    const record = await resolveName(rpc, program, name);
     if (record === null) {
       status.textContent = `${name} is not held.`;
       return;
@@ -66,9 +68,14 @@ $("lookup").addEventListener("submit", async (event) => {
       ? "This name does not expire."
       : `Expires ${new Date(record.expires).toISOString().slice(0, 10)}` +
         (record.lapsed ? " (grace period)." : ".");
-    details.textContent = `${expiry} ${record.deed === null ? "No NFT claimed." : "It has an NFT."}`;
+    let nftLine = "No NFT claimed.";
+    if (record.deed !== null) {
+      const state = await readDeed(rpc, record.deed);
+      nftLine = `NFT held by the name's holder: ${state.held ? "yes" : "no"}.`;
+      card.innerHTML = nameCard(name);
+    }
+    details.textContent = `${expiry} ${nftLine}`;
     details.hidden = false;
-    if (record.deed !== null) card.innerHTML = nameCard(name);
   } catch (error) {
     status.textContent = (error && error.message) ? error.message : "Lookup failed.";
   }

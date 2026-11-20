@@ -9,6 +9,7 @@ import {
   base58Encode,
   decodeNameRecord,
   deedAccounts,
+  readDeed,
   decodePage,
   decodePageContent,
   decodePrimaryName,
@@ -573,4 +574,53 @@ test("resolving a v7 name returns its deed", async () => {
   stubSequencer({ [JEF_RECORD]: record });
   const resolved = await resolveName(RPC_URL, PROGRAM, "jef");
   assert.deepEqual(resolved.deed, expected);
+});
+
+// A real jef05 deed holding, read from https://lez.nameswallet.app/ on 2026-11-20.
+const DEED_NFT = "CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G";
+const JEF05_DEED = {
+  definition: "ERdxQuTRz1roxWiWKEz9nxjJcijdfWwdsZ5wzuXjJUR9",
+  holding: "Fe2ThKkmweBtau1mJf6ZJN8Sx5tLgnJKr12eJ6ujeVdz",
+  nonce: "553886ce80c1b34caedb8c7cfc0a46ad2480c49db6c449381ca7d0df3ae46cf5",
+};
+
+function stubDeed(bytes) {
+  globalThis.fetch = async (url, { body }) => {
+    assert.equal(url, RPC_URL);
+    const { id, method, params } = JSON.parse(body);
+    assert.equal(method, "getAccountView");
+    assert.equal(params[0].program_account_id, DEED_NFT);
+    assert.equal(params[0].account_id, JEF05_DEED.holding);
+    return Response.json({ jsonrpc: "2.0", id, result: { nonce: 0, data: { actor_states: { [DEED_NFT]: [...bytes] } } } });
+  };
+}
+
+test("a real deed holding holds the master", async () => {
+  const hex = readFileSync(new URL("./fixtures/jef05-deed-holding.hex", import.meta.url), "utf8").trim();
+  const bytes = Uint8Array.from(hex.match(/../g).map((pair) => parseInt(pair, 16)));
+  assert.equal(bytes.length, 49);
+  stubDeed(bytes);
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), {
+    held: true,
+    kind: "master",
+    definition: JEF05_DEED.definition,
+  });
+});
+
+test("an empty deed account holds nothing", async () => {
+  stubDeed(new Uint8Array());
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), {
+    held: false,
+    kind: null,
+    definition: JEF05_DEED.definition,
+  });
+});
+
+test("a master with no print rights and an unowned copy do not hold", async () => {
+  const id = Uint8Array.from(Buffer.from(
+    "c777a7b0f37917d23a11b61e43f97e94d585ad3952fa5d14a7362e76ae72dbcc", "hex"));
+  stubDeed(Uint8Array.from([1, ...id, ...new Array(16).fill(0)]));
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), { held: false, kind: null, definition: JEF05_DEED.definition });
+  stubDeed(Uint8Array.from([2, ...id, 0]));
+  assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), { held: false, kind: null, definition: JEF05_DEED.definition });
 });
