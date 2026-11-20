@@ -550,7 +550,8 @@ pub async fn restore(accounts: u32, overrides: Option<WalletConfigOverrides>) ->
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
         let password = read_password(&storage_path)?;
-        if WalletCore::new_update_chain(config_path.clone(), storage_path.clone(), overrides.clone(), &password).is_ok() {
+        let rpc = crate::rpc::Rpc::for_wallet(&config_path, overrides.as_ref())?;
+        if WalletCore::new_update_chain_with_client(config_path.clone(), storage_path.clone(), overrides.clone(), &password, rpc).is_ok() {
             bail!("this wallet opens, so there is nothing to restore");
         }
     }
@@ -564,7 +565,8 @@ pub async fn restore(accounts: u32, overrides: Option<WalletConfigOverrides>) ->
             moved.push(kept.display().to_string());
         }
     }
-    let (mut wallet, _) = WalletCore::new_init_storage(config_path, storage_path, overrides, &new_wallet_password()).context(OLD_WALLET)?;
+    let rpc = crate::rpc::Rpc::for_wallet(&config_path, overrides.as_ref())?;
+    let (mut wallet, _) = WalletCore::new_init_storage_with_client(config_path, storage_path, overrides, &new_wallet_password(), rpc).context(OLD_WALLET)?;
     wallet.restore_storage(&mnemonic);
     let public: Vec<AccountId> = (0..accounts.max(1)).map(|_| wallet.create_new_account_public(None).0).collect();
     let private = wallet.create_new_account_private(None).0;

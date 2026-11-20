@@ -39,7 +39,7 @@ use names_seal::{
     Derived, PageContent, Profile, TextRecord, derive, open_page, open_profile, seal_page,
     seal_profile, validate_page, validate_profile, validate_text_key,
 };
-use sequencer_service_rpc::SequencerClient;
+use rpc::Rpc;
 use wallet::{
     AccountIdentity, AccountMention, PASSWORD_ENV_VAR, WalletCore, WalletSequencerClient as _,
     config::{SequencerConnectionData, WalletConfigOverrides},
@@ -864,6 +864,7 @@ mod module;
 mod private_call;
 mod prover;
 mod public_call;
+mod rpc;
 /// App secrets' derivation, one file shared with the Basecamp module (which checks the asks).
 #[path = "../../basecamp-module/rust-lib/src/app_secret.rs"]
 mod app_secret;
@@ -972,14 +973,7 @@ fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<(AccountId, Op
 /// metadata it decodes; refused when it can't be told.
 fn lez_version(rpc: &str) -> Result<deposit::Lez> {
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": deposit::PROBE_METHOD, "params": [deposit::PROBE_ACCOUNT] });
-    let mut response = ureq::post(rpc)
-        .config()
-        .http_status_as_error(false)
-        .build()
-        .header("Content-Type", "application/json")
-        .send(body.to_string())
-        .with_context(|| format!("cannot reach the sequencer at {rpc}"))?;
-    let reply: serde_json::Value = serde_json::from_str(&response.body_mut().read_to_string().unwrap_or_default()).unwrap_or_default();
+    let reply: serde_json::Value = serde_json::from_str(&rpc::post(rpc, &body)?).unwrap_or_default();
     deposit::lez_of(&reply).ok_or_else(|| anyhow!(deposit::UNKNOWN_LEZ))
 }
 
@@ -1148,7 +1142,7 @@ fn readable(time: u64) -> String {
 }
 
 struct Client {
-    wallet: WalletCore<SequencerClient>,
+    wallet: WalletCore<Rpc>,
     program: AccountId,
     /// How long the last private transaction took to prove and submit, in milliseconds.
     proved_ms: Option<u64>,
@@ -1208,6 +1202,8 @@ impl Client {
             Ok(view) => Ok(view.map_or_else(Vec::new, |found| found.data.actor_state(program).to_vec())),
             // A LEZ 0.3 sequencer (the public testnet until it moves to 0.4) answers the same
             // call in a form the 0.4 wallet can't read: ask again and read that form.
+            // A busy RPC is not a 0.3 one: asking again would only wait out the retries twice.
+            Err(error) if rpc::is_busy(&error) => Err(error),
             Err(error) => {
                 let rpc = self.wallet.config().sequencer.sequencer_addr.to_string();
                 let params = serde_json::json!([{ "account_id": account.to_string(), "program_account_id": program.to_string() }]);
@@ -3062,10 +3058,12 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         };
         let mut wallet = if storage_path.exists() {
             let password = wallet_password(&storage_path)?;
-            WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?
+            let rpc = Rpc::for_wallet(&config_path, overrides.as_ref())?;
+            WalletCore::new_update_chain_with_client(config_path, storage_path, overrides, &password, rpc).context(OLD_WALLET)?
         } else {
+            let rpc = Rpc::for_wallet(&config_path, overrides.as_ref())?;
             let (mut wallet, mnemonic) =
-                WalletCore::new_init_storage(config_path, storage_path, overrides, &new_wallet_password())?;
+                WalletCore::new_init_storage_with_client(config_path, storage_path, overrides, &new_wallet_password(), rpc)?;
             wallet.start_at_chain_tip().await.ok();
             println!("Created a new wallet. Write down its recovery phrase and keep it safe;");
             println!("it is the only way to get the wallet back:");
@@ -3090,7 +3088,8 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         }
     } else if continuous_run {
         let password = wallet_password(&storage_path)?;
-        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?;
+        let rpc = Rpc::for_wallet(&config_path, overrides.as_ref())?;
+        let mut wallet = WalletCore::new_update_chain_with_client(config_path, storage_path, overrides, &password, rpc).context(OLD_WALLET)?;
         execute_continuous_run(&mut wallet).await?;
     } else {
         let mut help = Args::command().name("names wallet");
@@ -3269,9 +3268,10 @@ fn tighten_wallet_files() {
 /// Opens the wallet at the wallet home. Without one, makes a new wallet and saves it,
 /// or, for a lookup (`save` false), uses an empty one that is never saved or shown,
 /// so lookups need no setup and leave nothing behind.
-async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool, create: bool) -> Result<WalletCore<SequencerClient>> {
+async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool, create: bool) -> Result<WalletCore<Rpc>> {
     write_default_wallet_files()?;
     let storage_path = fetch_persistent_storage_path()?;
+    let rpc = Rpc::for_wallet(&fetch_config_path()?, overrides.as_ref())?;
     // Only `names setup` makes a wallet: any other command that would then fail left a
     // new wallet behind and its recovery phrase in whatever logged it (SC-4).
     if save && !create && !storage_path.exists() {
@@ -3279,7 +3279,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool, creat
     }
     if storage_path.exists() {
         let password = wallet_password(&storage_path)?;
-        match WalletCore::new_update_chain(fetch_config_path()?, storage_path.clone(), overrides.clone(), &password) {
+        match WalletCore::new_update_chain_with_client(fetch_config_path()?, storage_path.clone(), overrides.clone(), &password, rpc.clone()) {
             Ok(wallet) => return Ok(wallet),
             Err(error) if save => return Err(error).context(OLD_WALLET),
             // Reading the chain signs nothing, so a wallet that won't load (one from
@@ -3288,7 +3288,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool, creat
         }
     }
     let (mut wallet, mnemonic) =
-        WalletCore::new_init_storage(fetch_config_path()?, storage_path, overrides, &new_wallet_password())?;
+        WalletCore::new_init_storage_with_client(fetch_config_path()?, storage_path, overrides, &new_wallet_password(), rpc)?;
     if !save {
         return Ok(wallet);
     }
@@ -3881,7 +3881,7 @@ fn send_fee_line(before: u128, after: Option<u128>, amount: u128, others: Option
 
 /// The sequencer's last block, or `None` when it can't be read.
 async fn last_block_at(rpc: &str) -> Option<u64> {
-    let client = sequencer_service_rpc::SequencerClientBuilder::default().build(rpc).ok()?;
+    let client = Rpc::new(rpc, None).ok()?;
     sequencer_service_rpc::RpcClient::get_last_block_id(&client).await.ok()
 }
 
@@ -3896,7 +3896,7 @@ async fn scan_blocks(rpc: &str, id: &str, sent: Option<&HashType>, after: u64, l
     if last.saturating_sub(after) > MAX_BLOCKS_SCANNED {
         return None;
     }
-    let client = sequencer_service_rpc::SequencerClientBuilder::default().build(rpc).ok()?;
+    let client = Rpc::new(rpc, None).ok()?;
     let mut count = 0;
     let mut landed = None;
     for block_id in after.saturating_add(1)..=last {
@@ -4013,7 +4013,7 @@ fn reverted_send(amount: u128, fee: Option<u128>) -> String {
 
 /// The chain's fee market, or `None` when it can't be read.
 async fn fee_quote_at(rpc: &str) -> Option<sequencer_service_rpc::FeeStateQuote> {
-    let client = sequencer_service_rpc::SequencerClientBuilder::default().build(rpc).ok()?;
+    let client = Rpc::new(rpc, None).ok()?;
     sequencer_service_rpc::RpcClient::get_fee_state(&client).await.ok()
 }
 
@@ -4049,14 +4049,8 @@ fn runs_off_home(command: &Command) -> bool {
 
 fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    let reply: serde_json::Value = serde_json::from_str(
-        &ureq::post(rpc)
-            .header("Content-Type", "application/json")
-            .send(body.to_string())
-            .with_context(|| format!("cannot reach the sequencer at {rpc}"))?
-            .body_mut()
-            .read_to_string()?,
-    )?;
+    let reply: serde_json::Value = serde_json::from_str(&rpc::post(rpc, &body)?)
+        .with_context(|| format!("the sequencer at {rpc} did not answer in JSON"))?;
     if let Some(error) = reply.get("error") {
         bail!("{method}: {error}");
     }
@@ -4065,6 +4059,11 @@ fn rpc_call(rpc: &str, method: &str, params: serde_json::Value) -> Result<serde_
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // A refusal for going too fast ends `names` with the one plain line the wallet shows.
+    run().await.map_err(rpc::plain_when_busy)
+}
+
+async fn run() -> Result<()> {
     // Where programs run and proofs are made: the r0vm the installer puts next to `names`
     // unless RISC0_SERVER_PATH names another, or in-process in a local-prove build (`prover`).
     prover::start();
