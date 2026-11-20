@@ -861,9 +861,11 @@ Item {
     property string customDone: ""
     property bool netChecking: false       // "Check the network now"
     // ── LNS name NFTs (deeds, SPEC.md §8.6): an optional free card for each name held ──
-    /// By name: `{deed}` from resolve (null: none claimed; undefined: not read yet) and `normal`
-    /// from deed_tiers (true: the normal tier, which can have one).
+    /// By name: `{deed}` from resolve (null: none claimed; undefined: not read yet), `normal`
+    /// from deed_tiers (true: the normal tier, which can have one) and `failed`, the plain reason
+    /// a tier read could not be checked (shown under the name instead of a silent blank).
     property var nameDeeds: ({})
+    property int deedTries: 0              // tier retries in this visit; capped below
     property string deedLine: ""           // the last claim's plain result
     property string deedLineName: ""
     readonly property var deededNames: allMine.filter(function(entry) { var d = nameDeeds[entry.name]; return !!(d && d.deed) })
@@ -7559,12 +7561,21 @@ Item {
 
     /// Reads, for each name held, whether it has its NFT (resolve's `deed`) and whether it can
     /// have one (deed_tiers). On LEZ 0.4 only: deeds are there.
-    function loadDeeds() {
+    function loadDeeds(fromRetry) {
         if (namesNet !== "0.4")
             return
         var names = allMine.map(function(entry) { return entry.name })
         if (names.length === 0)
             return
+        if (!fromRetry) {
+            deedTries = 0
+            var cleared = Object.assign({}, nameDeeds)
+            names.forEach(function(name) {
+                if (cleared[name])
+                    cleared[name] = Object.assign({}, cleared[name], { failed: "" })
+            })
+            nameDeeds = cleared
+        }
         names.forEach(function(name) {
             askLater("resolve", [name], onNet(function(value) {
                 var all = Object.assign({}, nameDeeds)
@@ -7578,9 +7589,18 @@ Item {
         askLater("deed_tiers", [JSON.stringify(names)], onNet(function(value) {
             var all = Object.assign({}, nameDeeds), waiting = false
             for (var name in value) {
-                all[name] = Object.assign({}, all[name] || {}, { normal: value[name] })
-                if (value[name] === null)
-                    waiting = true
+                var answer = value[name]
+                var entry = Object.assign({}, all[name] || {})
+                if (answer && typeof answer === "object" && typeof answer.error === "string") {
+                    entry.failed = answer.error
+                    delete entry.normal
+                } else {
+                    entry.normal = answer
+                    entry.failed = ""
+                    if (answer === null)
+                        waiting = true
+                }
+                all[name] = entry
             }
             nameDeeds = all
             if (waiting)
@@ -7590,7 +7610,25 @@ Item {
                 deedRetry.restart()
         })
     }
-    Timer { id: deedRetry; interval: 3000; onTriggered: root.loadDeeds() }
+    Timer {
+        id: deedRetry
+        interval: 3000
+        onTriggered: {
+            if (deedTries >= 20) {
+                // About a minute of nulls: say so under each name still unread, then stop.
+                var all = Object.assign({}, nameDeeds)
+                allMine.forEach(function(entry) {
+                    var d = all[entry.name]
+                    if (d && !d.deed && !d.failed && (d.normal === null || d.normal === undefined))
+                        all[entry.name] = Object.assign({}, d, { failed: "the check didn't finish in a minute" })
+                })
+                nameDeeds = all
+                return
+            }
+            deedTries++
+            root.loadDeeds(true)
+        }
+    }
     // Read when My names or Collectibles comes into view, and when the names held change.
     readonly property bool deedsOnView: configKnown && namesNet === "0.4" && ((section === "wallet" && walletView === "names") || section === "collectibles")
     readonly property string mineKey: allMine.map(function(entry) { return entry.name }).join(",")
@@ -12739,6 +12777,12 @@ Item {
                                         onPressed: root.claimDeed(myName.modelData.name)
                                     }
                                     Hint { visible: !parent.deedInfo.deed; Layout.fillWidth: true; font.pixelSize: root.px(14); text: root.deedClaiming(myName.modelData.name) ? "Claiming its NFT card on LEZ 0.4: about a minute. Only gas is paid." : "A card with your name on it. Free: only gas." }
+                                }
+                                // A tier read that failed or never finished: one plain line, never a blank.
+                                StatusLine {
+                                    visible: root.namesNet === "0.4" && !!((root.nameDeeds[myName.modelData.name] || {}).failed)
+                                    kind: "problem"
+                                    text: Logic.deedCheckLine(myName.modelData.name, (root.nameDeeds[myName.modelData.name] || {}).failed)
                                 }
                                 StatusLine { visible: root.deedLine !== "" && root.deedLineName === myName.modelData.name; kind: "done"; text: root.deedLine }
                                 // Publishing its account: said under its own row.

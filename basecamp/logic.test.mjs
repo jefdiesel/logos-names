@@ -1,6 +1,6 @@
 // Checks the view's own logic (qml/logic.mjs, which qml/Main.qml imports), since the QML
 // engine cannot run in CI. Run with: node basecamp/logic.test.mjs
-import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote } from "./qml/logic.mjs";
+import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote, deedCheckLine } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 import { SETTLE_CONSENT, settleNotOffered } from "./qml/logic.mjs";
 import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
@@ -2053,6 +2053,23 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
      /askLater\("network_custom", \[rpc, chain, file, false\]/.test(qml), /askLater\("network_custom", \[found\.rpc, found\.chain_id, found\.file_url, true\]/.test(qml)],
     [true, true, true, true, true]);
 }
+
+// A failed NFT-tier read says why and how to retry; null alone stays a wait.
+check("a failed deed check says why, once, and how to retry", [
+  deedCheckLine("jef", "the names CLI isn't installed; install Names first"),
+  deedCheckLine("jef", "the read didn't finish."),
+  deedCheckLine("jef", ""),
+], [
+  "Couldn't check whether jef can have an NFT: the names CLI isn't installed; install Names first. Open Names again to retry.",
+  "Couldn't check whether jef can have an NFT: the read didn't finish. Open Names again to retry.",
+  "Couldn't check whether jef can have an NFT: the check didn't finish. Open Names again to retry.",
+]);
+const deedQml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+check("the deed retry has a 20-try cap and shows the failure line", [
+  /deedTries >= 20/.test(deedQml),
+  /Logic\.deedCheckLine\(myName\.modelData\.name/.test(deedQml),
+  /\(None, Some\(why\)\) if !snap\.updating/.test(readFileSync(new URL("../basecamp-module/rust-lib/src/lib.rs", import.meta.url), "utf8")),
+], [true, true, true]);
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

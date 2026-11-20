@@ -5287,6 +5287,17 @@ fn rejected_settings(saved: &Value) -> HashMap<String, Value> {
     out
 }
 
+/// One name's tier answer: its value, a plain error sentence when the read failed, or null
+/// only while the first read is still under way. A failed read must not look like "waiting":
+/// the app retries null for ever but shows the error line instead.
+fn deed_tier_answer(snap: &served::Snap) -> Value {
+    match (&snap.value, &snap.error) {
+        (Some(value), _) => value.clone(),
+        (None, Some(why)) if !snap.updating => json!({ "error": why }),
+        _ => Value::Null,
+    }
+}
+
 impl NamesModule for Names {
     fn recipient(&mut self, name: String) -> String {
         // The Names app (payName): read on a thread of its own, as `resolve` is.
@@ -5744,7 +5755,7 @@ impl NamesModule for Names {
                     let id = registry::derive(&asked_name).id;
                     shortlist::length_proof(&id).map(|(_, tier)| Value::Bool(tier == shortlist::TIER_NORMAL))
                 });
-                out.insert(name, snap.value.unwrap_or(Value::Null));
+                out.insert(name, deed_tier_answer(&snap));
             }
             Ok(Value::Object(out))
         })())
@@ -16948,6 +16959,26 @@ mod tests {
         names.net = Net::Lez03;
         assert!(names.nft_built_in().is_empty());
         let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// A failed tier read is an error sentence, not null. Null means "still reading", which the
+    /// app retries for ever with nothing shown; a read that failed with no value must speak.
+    #[test]
+    fn a_failed_tier_read_answers_an_error_sentence_not_null() {
+        let why = "the names CLI isn't installed; install Names first";
+        let failed = served::Snap {
+            error: Some(why.to_owned()),
+            ..served::Snap::default()
+        };
+        assert_eq!(deed_tier_answer(&failed), json!({ "error": why }));
+        let waiting = served::Snap { updating: true, ..failed.clone() };
+        assert_eq!(deed_tier_answer(&waiting), Value::Null);
+        let stale = served::Snap {
+            value: Some(Value::Bool(true)),
+            ..failed
+        };
+        assert_eq!(deed_tier_answer(&stale), Value::Bool(true));
+        assert_eq!(deed_tier_answer(&served::Snap::default()), Value::Null);
     }
 
     /// Our own LEZ 0.4's chain id with no published file (404): the built-in ids stand. Another

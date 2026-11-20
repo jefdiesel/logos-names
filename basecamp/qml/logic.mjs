@@ -262,6 +262,14 @@ export function addNameNotYours(line) {
     return /doesn't hold|does not hold|is not registered|isn't registered|not registered/i.test(String(line || ""))
 }
 
+/// The one line shown under a name in My names when its NFT tier could not be
+/// checked. `reason` is the module's plain error sentence, or why the read never
+/// finished. A trailing full stop is removed so the line has just one.
+export function deedCheckLine(name, reason) {
+    var why = String(reason || "").trim().replace(/[.!?]+$/, "")
+    return "Couldn't check whether " + name + " can have an NFT: " + (why || "the check didn't finish") + ". Open Names again to retry."
+}
+
 /// The accounts a request's sheet offers. A program declaration for the claim this app's own
 /// screen is running offers only the claim's account (`hint`) when the wallet offers it: another
 /// one can't be the claim's (15 Nov, the owner picked another and the claim didn't go on).
