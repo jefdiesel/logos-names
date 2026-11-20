@@ -42,3 +42,8 @@ ${LOGO}
 <text x="440" y="436" text-anchor="end" font-family="Fira Code" font-size="14" fill="#f5f5ef" fill-opacity="0.7">nameswallet.app</text>
 </svg>`;
 }
+
+/** The same card as a `data:image/svg+xml` URL, for an `<img src>` with no file. */
+export function nameCardDataUrl(name) {
+  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(nameCard(name));
+}

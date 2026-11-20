@@ -43,7 +43,8 @@ app draws the holder's own card locally.
 
 `nameCard(name)` returns a 480x480 SVG string drawn per `design/lns-name-card`.
 Fonts are named (Gloock, Fira Code), never embedded. Write it to a `.svg` file or
-inline it; escaping of the name is done for you.
+inline it; escaping of the name is done for you. `nameCardDataUrl(name)` returns the same card as
+a `data:image/svg+xml` URL, for an `<img src>` with no file.
 
 ## Three examples
 

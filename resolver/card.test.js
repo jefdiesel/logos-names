@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { nameCard } from "./card.js";
+import { nameCard, nameCardDataUrl } from "./card.js";
 
 test("a 9-character name is drawn large on one line", () => {
   const svg = nameCard("jefdiesel");
@@ -29,4 +29,16 @@ test("a name is escaped even though the name rules forbid <&>", () => {
   const svg = nameCard("a<b&c>d");
   assert.match(svg, /a&lt;b&amp;c&gt;d/);
   assert.doesNotMatch(svg, /<b&c>/);
+});
+
+test("12 characters use the big size, 13 use the small size", () => {
+  assert.match(nameCard("a".repeat(12)), /font-size="60"/);
+  assert.match(nameCard("a".repeat(13)), /font-size="36"/);
+});
+
+test("a card data URL round-trips to the SVG", () => {
+  const prefix = "data:image/svg+xml;charset=utf-8,";
+  const url = nameCardDataUrl("jefdiesel");
+  assert.ok(url.startsWith(prefix));
+  assert.equal(decodeURIComponent(url.slice(prefix.length)), nameCard("jefdiesel"));
 });
