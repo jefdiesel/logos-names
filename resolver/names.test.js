@@ -607,6 +607,17 @@ test("a real deed holding holds the master", async () => {
   });
 });
 
+test("a holding of another definition is not this deed", async () => {
+  const hex = readFileSync(new URL("./fixtures/jef05-deed-holding.hex", import.meta.url), "utf8").trim();
+  const bytes = Uint8Array.from(hex.match(/../g).map((pair) => parseInt(pair, 16)));
+  bytes[3] ^= 0xff; // one byte of the definition, after the tag
+  stubDeed(bytes);
+  const got = await readDeed(RPC_URL, JEF05_DEED);
+  assert.equal(got.held, false);
+  assert.equal(got.kind, null);
+  assert.notEqual(got.definition, JEF05_DEED.definition);
+});
+
 test("an empty deed account holds nothing", async () => {
   stubDeed(new Uint8Array());
   assert.deepEqual(await readDeed(RPC_URL, JEF05_DEED), {

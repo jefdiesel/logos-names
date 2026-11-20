@@ -33,7 +33,8 @@ cannot move the deed on their own — LNS stays the source of truth.
 `deedAccounts(program, id, ownerTag, nonce)` derives the same pair if you already
 have the record. `readDeed(rpcUrl, deed)` reads that holding account from the NFT
 program (`CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G`) and returns
-`{ held, kind, definition }`: held is whether the account really holds the master or an owned copy,
+`{ held, kind, definition }`: held is whether the account really holds the master or an owned copy
+**of this deed's definition** — a holding of another definition is never held, even with a balance.
 kind is "master" or "copy" only while held (else null), and definition comes from the state, or
 from `deed.definition` when the account is empty or unreadable. An unreadable state is never shown
 as held. The public NFT image must not show the name; the wallet or an SDK
