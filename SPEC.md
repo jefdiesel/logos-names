@@ -308,8 +308,8 @@ bug, not a state its holder has to fix. A conforming client:
 
 - Writes, in every profile it seals for a name it holds, the holder's public
   account as `account` when a public account holds the name and `account` is
-  empty; receiving keys (`npk`, `vpk`) when it can make them and the profile has
-  none; and its chat address as the `chat` entry when it has one and the profile
+  empty; receiving keys (`npk`, `vpk`) when a private account holds the name and
+  the profile has none (its only address); and its chat address as the `chat` entry when it has one and the profile
   has none. What is already there (a shop's own `account`, another device's
   `chat`) is kept.
 - Mends a name it holds that lacks them, as after a `Transfer` (which empties the

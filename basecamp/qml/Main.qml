@@ -5481,6 +5481,11 @@ Item {
         }, function(message) {
             repairing = false
             console.log("names_ui: repair of " + name + ":", message)
+            // Asked again with the next list (busy, unreachable): the module never sends twice.
+            var asked = repairAsked
+            delete asked[name + "|true"]
+            delete asked[name + "|false"]
+            repairAsked = asked
             repairNext()
         }, 180000)
     }

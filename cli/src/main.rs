@@ -526,8 +526,8 @@ enum Command {
         name: String,
     },
     /// Give the name fresh private receiving keys, from a new private account in this
-    /// wallet. Registering does this already, and so does any change to a name that has
-    /// none (one handed to you); use it to rotate.
+    /// wallet. Registering does this already, and so does any change to a privately held
+    /// name that has none; use it to rotate, or to add them to a publicly held name.
     ReceivePrivately {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -629,7 +629,7 @@ enum Command {
     },
     /// Hand the name to another account. Its receiving keys, text entries and page are cleared
     /// (the registry empties them); the new holder's first change to it, or `names repair`,
-    /// writes its account and keys back.
+    /// writes its address back: its account, or receiving keys when it holds it privately.
     Transfer {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -4603,8 +4603,13 @@ async fn run() -> Result<()> {
                 .await
         }
         Command::ClearAccount { name } => {
-            // A public holder's name always points at it (SPEC.md §5): only another account set
+            // A public holder's name always points at it (SPEC.md §6): only another account set
             // on it (a shop's) comes off, and the holder's goes back in its place.
+            let (Derived { id, .. }, record, profile) = client.lookup_held(&name).await?;
+            let holder = client.holder(&name, &id, &record)?;
+            if !client.is_private(holder) && profile.account == Some(holder.into_value()) {
+                bail!("{name}{NAME_SUFFIX} is held by Public/{holder}, so it always points at it; nothing was sent");
+            }
             client
                 .edit(&name, |profile| {
                     profile.account = None;
