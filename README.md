@@ -36,10 +36,16 @@ On this branch Names is also the wallet other Basecamp apps use: they connect, s
 the accounts you share, and propose payments, token transfers and program calls that
 you approve in Names, with the app, account, amount, destination, network fee and the
 program's verified source on the prompt, and **who publishes the asking app**, checked
-against its LNS name ("forumer ✓ verified publisher", or a warning that it may be a copy). You hold several public and private accounts
-and choose which one pays, send and receive the native token and fungible tokens,
-publicly or privately, and see each change's fee before and after it goes out. For app
-developers: [the Wallet Provider SDK](docs/wallet/PROVIDER-SDK.md), with two mini-apps
+against its LNS name ("forumer ✓ verified publisher", or a warning that it may be a copy).
+An app's program call may also read the network clock — read only, never signed and never
+written — which is how Vest's creating, cancelling, making permanent, unlocking a milestone
+and transferring a LEZ schedule are approved in Names Wallet; it needs the names tool 0.18
+or later. When an app asks for access or a call, Names opens with the request and, once you
+answer, takes you back to the app unless another request is waiting. You hold several public
+and private accounts and choose which one pays, send and receive the native token and
+fungible tokens, publicly or privately, and see each change's fee before and after it goes
+out. For app developers: [the Wallet Provider SDK](docs/wallet/PROVIDER-SDK.md), with two
+mini-apps
 built on it as worked examples, [a testimonial board](apps/testimonial/README.md) and
 [a faucet](apps/faucet/README.md). Tokens: [docs/wallet/TOKENS.md](docs/wallet/TOKENS.md). LNS name NFTs: [docs/wallet/DEEDS.md](docs/wallet/DEEDS.md).
 Status against the prize: [docs/wallet/PLAN.md](docs/wallet/PLAN.md). It goes live with the
@@ -256,6 +262,16 @@ Live on the **public LEZ testnet** (`testnet.lez.logos.co`):
   short names, Argon2id derivation; deployed 2026-10-16 from CI build `322dda10…c4ce`).
 - Board: `8PwnCKStKQtoBxJCgopCG6CPPMJCUWba1SDG1SXtXYTf` (deployed 2026-10-17; it
   trusts registry v5's records and checks the poster holds the name there).
+
+**Names Wallet 0.18.** Apps' program calls can read the network clock — read only, never
+signed and never written — so Vest's creating, cancelling, making permanent, unlocking a
+milestone and transferring a LEZ schedule are approved in Names Wallet (the names tool 0.18
+or later). An access or call request opens Names with the request, and once you answer it
+takes you back to the app unless another request is waiting. The access sheet is one sheet
+from start to end, nothing is ticked for you on a plain request, and apps are shown by their
+Basecamp display name (e.g. "Vest"); a new warning about an app unticks your accounts and
+clears the "I've read the warnings" box. Faucet and Testimonial use the shared design
+kit: one column, numbered steps, plain words.
 
 Testnet names don't carry over to mainnet automatically: to keep one, claim it
 within 30 days of launch. Written directly against `lee_core` because the SPEL
