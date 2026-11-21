@@ -12,7 +12,6 @@
 // can be brought forward.
 
 import QtQuick
-import QtQuick.LocalStorage
 import "NamesWalletSDK.mjs" as SDK
 
 Item {
@@ -26,7 +25,7 @@ Item {
     /// How long one call may take before it counts as no answer (ms).
     property int patience: 30000
 
-    /// SDK.STATES: checking, none, choose, missing, otherZone, disconnected, asking, connected.
+    /// SDK.STATES: checking, none, choose, missing, unsupported, otherZone, disconnected, asking, connected.
     property string status: "checking"
     property string problem: ""
     property var config: null
@@ -45,9 +44,14 @@ Item {
 
     property var core: null
     property var chosenNow: ({})
+    // QtQuick.LocalStorage, made only when a choice is read or kept (several wallets), so an
+    // engine without it still loads this file: the choice then lasts until the app closes.
+    property var store: null
     function memory() {
-        try { return LocalStorage.openDatabaseSync("NamesWalletSDK", "1", "The wallet each app uses", 4096) }
-        catch (error) { return null }
+        try {
+            if (!store) store = Qt.createQmlObject('import QtQuick; import QtQuick.LocalStorage; QtObject { function db() { return LocalStorage.openDatabaseSync("NamesWalletSDK", "1", "The wallet each app uses", 4096) } }', wallet, "NamesWalletMemory")
+            return store.db()
+        } catch (error) { return null }
     }
     function sdk() {
         if (core) return core

@@ -30,15 +30,17 @@ export const DEFAULT_WALLET = { module: "names", app: "names_ui", display_name: 
 /// Where the wallet stands for this app (`wallet.state`):
 /// checking: not known yet · none: no wallet installed · choose: several are, and the person
 /// hasn't picked one for this app (`wallets`, then `chooseWallet`) · missing: the wallet is
-/// installed but not running (or there is no Basecamp bridge) · otherZone: it is on another
-/// network than the app's · disconnected: no access yet · asking: a connect request waits in
-/// the wallet · connected: the app was given accounts.
-export const STATES = ["checking", "none", "choose", "missing", "otherZone", "disconnected", "asking", "connected"]
+/// installed but not running (or there is no Basecamp bridge) · unsupported: it doesn't declare
+/// an SDK version this file speaks · otherZone: it is on another network than the app's ·
+/// disconnected: no access yet · asking: a connect request waits in the wallet · connected: the
+/// app was given accounts.
+export const STATES = ["checking", "none", "choose", "missing", "unsupported", "otherZone", "disconnected", "asking", "connected"]
 
 /// The shared plain words. An app may show its own instead; these are the defaults.
 export const WORDS = {
     none: "No wallet installed: install Names from Basecamp's app list.",
     choose: "More than one wallet is installed. Choose the one this app uses.",
+    unsupported: "The wallet in use doesn't work with this app's version of the Names Wallet SDK. Update the wallet, or choose another.",
     missing: "Names Wallet isn't installed, or isn't open. Install Names from Basecamp's app list, open it once, then come back here.",
     otherZone: "Names Wallet is on another network. Switch it in Names (Settings, Network), then come back.",
     busy: "Names Wallet is busy.",
@@ -353,6 +355,7 @@ export function create(host) {
             var d = declared(wallet.current.module, config)
             wallet.current.sdk_version = d ? d.version : null
             if (d && d.app) wallet.current.app = d.app
+            if (!d || !speaks(d.version)) { setState("unsupported", WORDS.unsupported); end(wallet); return }
             if (!zoneMatches(config, wallet.chain)) { setState("otherZone", WORDS.otherZone); end(wallet); return }
             wallet.call("granted_accounts", [], function(g) {
                 wallet.accounts = (g && g.connected && g.accounts) || []

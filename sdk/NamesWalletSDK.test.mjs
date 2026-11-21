@@ -154,7 +154,7 @@ test("check: features, zone, accounts", async () => {
   assert.deepEqual(w.accounts, GRANTED.accounts);
   assert.equal(w.has("call_reads_clock"), true);
   assert.equal(w.has("nothing"), false);
-  const other = harness({ get_config: ok({ zone: { channel: "01".repeat(32) } }) });
+  const other = harness({ get_config: ok({ zone: { channel: "01".repeat(32) }, features: [] }) });
   let o = null;
   other.wallet.check({ chain: CHAIN }, (x) => (o = x));
   await other.settle();
@@ -392,6 +392,20 @@ test("listWallets: each with its SDK version, null for one that doesn't answer o
   assert.deepEqual(list.map((w) => [w.module, w.display_name, w.sdk_version]), [["names", "Names", "1.0"], ["ywallet", "Y", null], ["xwallet", "X Wallet", "1.0"], ["zmod", "Z", null]]);
   assert.equal(list.find((w) => w.module === "xwallet").app, "xwallet_ui");
   assert.equal(h.wallet.state, "checking", "a wallet that isn't running doesn't make the app's state 'missing'");
+});
+
+test("a wallet that doesn't declare a version this file speaks is not used", async () => {
+  const byModule = (module, method) => method === "get_config" ? ok(module === "oldwallet" ? { features: [] } : { ...X_CONFIG, wallet_sdk: { name: "names-wallet", version: "2.0", app: "x_ui" } }) : ok(GRANTED);
+  for (const [row, version] of [[{ name: "oldwallet", type: "core", category: "wallet" }, null], [X_ROW, "2.0"]]) {
+    const h = harness({}, { installed: [row], byModule });
+    let w = null;
+    h.wallet.check({}, (x) => (w = x));
+    await h.tick();
+    assert.equal(w.state, "unsupported", row.name);
+    assert.equal(w.problem, SDK.WORDS.unsupported);
+    assert.equal(w.current.sdk_version, version);
+    assert.ok(!h.calls.some(([m]) => m === "granted_accounts"), "nothing more is asked of it");
+  }
 });
 
 test("walletRows and speaks", () => {

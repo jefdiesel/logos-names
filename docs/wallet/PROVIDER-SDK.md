@@ -759,7 +759,7 @@ and sends every call there.
 | File | What it is |
 |---|---|
 | `sdk/qml/NamesWalletSDK.mjs` | Everything: finding the wallet, the calls, retries, waiting, states, words and LNS lookups. Plain JavaScript, so `node --test sdk/NamesWalletSDK.test.mjs` tests it. |
-| `sdk/qml/NamesWallet.qml` | The QML side, about 150 lines: Basecamp's bridge (`logos`), one timer per wait, this app's remembered choice of wallet (QtQuick.LocalStorage), and the wallet's app brought forward with `basecamp.apps.launch`. It mirrors the state in properties to bind to. |
+| `sdk/qml/NamesWallet.qml` | The QML side, about 150 lines: Basecamp's bridge (`logos`), one timer per wait, this app's remembered choice of wallet (QtQuick.LocalStorage, made only when there are several wallets; without it the choice lasts until the app closes), and the wallet's app brought forward with `basecamp.apps.launch`. It mirrors the state in properties to bind to. |
 
 Your `metadata.json` declares `"uses": [{ "intent": "basecamp.apps.launch" }]`. Then, in
 `Main.qml`:
@@ -768,7 +768,7 @@ Your `metadata.json` declares `"uses": [{ "intent": "basecamp.apps.launch" }]`. 
 NamesWallet { id: wallet; app: "my_app_ui"; bridge: typeof logos !== "undefined" ? logos : null }
 
 Component.onCompleted: wallet.check({ chain: "<your chain's channel, 64 hex>" }, function(w) {
-    // w.state: checking | none | choose | missing | otherZone | disconnected | asking | connected
+    // w.state: checking | none | choose | missing | unsupported | otherZone | disconnected | asking | connected
     // w.current: {module, display_name, app, sdk_version}; w.accounts: [{account, account_kind}]
 })
 Text { text: wallet.problem }                                   // the shared words for the state
@@ -802,8 +802,9 @@ everything), so the only list it has is `package_manager`'s
 `getInstalledPackages`, which the Names app already reads. Each row carries what the package's
 `metadata.json` says of `name`, `display_name`, `version`, `description`, `type`, `category`,
 `author`, `license`, `icon`, `view`, `dependencies`, `optional_dependencies`,
-`interface_dependencies` and `installDir` (logos-package-manager `InstalledPackage`, at the
-revision Basecamp's flake pins, d3af297), but not
+`interface_dependencies` and `installDir` (logos-package-manager `InstalledPackage`, d3af297;
+logos-package-manager-module's `toLogosMap` hands a QML app `name`, `displayName`, `type`,
+`category` and the rest, 6955a09; the revisions logos-basecamp's flake pins), but not
 `provides` or any field of the package's own: Basecamp reads `provides` from the installed
 `metadata.json` itself, for its intent broker. So a wallet says it is one in `category`, and
 says which SDK version it speaks in its `get_config`. The SDK lists the core modules (`type`
@@ -822,7 +823,9 @@ says which SDK version it speaks in its `get_config`. The SDK lists the core mod
   it fails `uncertain`, with "Names Wallet didn't answer, so it may have taken the request. Look
   in Names before asking again."
 - **The wallet missing** (installed but not running, or no Basecamp bridge) sets `status` to
-  `missing` with `WORDS.missing`. Another network than `check({chain})`'s sets `otherZone`.
+  `missing` with `WORDS.missing`. A wallet whose `get_config` declares no SDK version of the same
+  major version as this file sets `unsupported`, and nothing more is asked of it. Another network
+  than `check({chain})`'s sets `otherZone`.
 - **Waiting** reads `request_status` every 2 s, one read at a time, until the request is no
   longer `pending` or `running`; `requestLine(request, "the payment")` says the end in plain
   words (declined, expired after 10 minutes, withdrawn, failed with why).
