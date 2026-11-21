@@ -154,6 +154,10 @@ check("requestStatus: turned down", ["rejected", "expired", "cancelled"].map((st
    ["Withdrawn. Nothing was signed or sent.", "Withdrawn. Nothing was inscribed or paid."]]);
 check("requestStatus: a state it doesn't know", L.requestStatus("call", { state: "odd" }), { text: "odd", tone: "plain" });
 check("grouped", [L.grouped("1086"), L.grouped("999"), L.grouped("1234567")], ["1,086", "999", "1,234,567"]);
+check("plural: one and many", [L.plural(1, "testimonial", "testimonials"), L.plural(2, "testimonial", "testimonials"), L.plural(0, "testimonial", "testimonials"), L.plural(1, "account", "accounts")],
+  ["1 testimonial", "2 testimonials", "0 testimonials", "1 account"]);
+check("summaryLine: counts read right", [L.summaryLine(null), L.summaryLine({ total: 1, distinct_authors: 1 }), L.summaryLine({ total: 2, distinct_authors: 2 })],
+  ["", "1 testimonial from 1 account", "2 testimonials from 2 accounts"]);
 
 // ── What the screen teaches ───────────────────────────────────────────────────────
 check("hostOf", [L.hostOf("https://lez.nameswallet.app/"), L.hostOf("http://127.0.0.1:3062/"), L.hostOf("")], ["lez.nameswallet.app", "127.0.0.1", ""]);

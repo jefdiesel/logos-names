@@ -608,6 +608,19 @@ export function grouped(digits) {
     return String(digits).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
 }
 
+/// "1 testimonial" / "2 testimonials": a count with the right word.
+export function plural(n, singular, pluralForm) {
+    var count = Number(n) || 0
+    return count + " " + (count === 1 ? singular : pluralForm)
+}
+
+/// The one-line count under a submission: "1 testimonial from 1 account".
+export function summaryLine(summary) {
+    if (!summary) return ""
+    return plural(summary.total, "testimonial", "testimonials") + " from "
+        + plural(summary.distinct_authors, "account", "accounts")
+}
+
 // ── What the screen teaches ───────────────────────────────────────────────────────────
 // Numbers and words live here so the Node test checks the steps the QML shows. No module call
 // changes: these only decide which step is marked and what help sits under it.

@@ -691,7 +691,7 @@ Item {
                     spacing: 6
                     Text {
                         textFormat: Text.PlainText
-                        text: root.summary ? root.summary.total + " testimonials from " + root.summary.distinct_authors + " accounts" : ""
+                        text: Logic.summaryLine(root.summary)
                         color: look.ink
                         font.family: look.sans
                         font.pixelSize: look.px(17)
