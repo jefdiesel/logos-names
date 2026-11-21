@@ -75,11 +75,15 @@ What this does not hide:
   account for every name, and so does the Basecamp module (its `auto` choice);
   names the module registered before that share their wallet's first private
   account's keys until Receive privately is run on them again.
-- **Clients publish no account.** A conforming client sets only
-  `npk` and `vpk` in a profile, never `account`; pays a name only through its
-  receiving keys; never displays an address or the keys behind a name; and
-  writes no reverse record (section 6). Those fields remain in the format for
-  compatibility only.
+- **A registered name is an address.** There is no step to publish it: every
+  profile a conforming client writes (the first one, in `Register` or `Claim`,
+  and every `SetRecord`) carries where the name is paid and messaged, filled in
+  where it is missing (section 6, A name is an address). For a name held by a
+  public account that is that account, in `account`: the owner tag already lets
+  anyone who knows the name test every public account against it, so this adds
+  no new link. A **private** holder is never written into `account`, which would
+  unmask it; its receiving keys (`npk`, `vpk`) are its address. A client writes
+  no reverse record (section 6).
 
 ## 2. Names
 
@@ -299,6 +303,24 @@ name.
 **There is no listing.** A client that wants to show a person the names they
 hold remembers them itself.
 
+**A name is an address.** A name that resolves to nothing to pay or message is a
+bug, not a state its holder has to fix. A conforming client:
+
+- Writes, in every profile it seals for a name it holds, the holder's public
+  account as `account` when a public account holds the name and `account` is
+  empty; receiving keys (`npk`, `vpk`) when a private account holds the name and
+  the profile has none (its only address); and its chat address as the `chat` entry when it has one and the profile
+  has none. What is already there (a shop's own `account`, another device's
+  `chat`) is kept.
+- Mends a name it holds that lacks them, as after a `Transfer` (which empties the
+  profile) or for a name written before this rule: one `SetRecord` with the
+  profile as it was, plus what is missing, sent by the client itself, at most once
+  per name and holder, and never for sealed bytes that don't open with the name's
+  key. It never signs anything for a name it doesn't hold.
+- Until the registry takes the new holder's profile with `Transfer` itself, a
+  transferred name resolves to no account from the transfer until the new holder's
+  client mends it.
+
 ## 7. Text entries
 
 Text entries are free-form. These keys have an agreed meaning; others are
@@ -456,7 +478,8 @@ Rules:
   name removes the reverse record; with a name, it publishes that name.
 - `Transfer` sets the new owner and empties the profile and the page, so a
   transferred name never keeps routing payments or messages to its last holder.
-  The expiry is kept.
+  The expiry is kept. The new holder's client then writes its address back
+  (section 6, A name is an address).
 - A holder may still change a lapsed name until someone else registers it;
   readers ignore it once it is past grace.
 - `Release` empties the record and the page. The name is then unregistered and
@@ -1035,10 +1058,11 @@ owner for everything else.
 | Method | `value` |
 |---|---|
 | `wallet()` | `{"accounts": [{"account", "balance", "funded", "name"}], "private_accounts": ["account"]}`: the open wallet's public accounts, funded ones first, and its private accounts. `balance` is decimal text; `name` is the name the account has published, or `null`. Fails if the LEZ wallet is not installed or not open. |
-| `mine()` | `{"names": [{"name", "display", "owner", "expires", "never", "lapsed"}], "pending": [{"name", "display", "owner", "stage", "ready_at", "tx"}]}`: the names this device remembers that the open wallet holds (`owner` is the wallet account that holds the name), and the registrations under way. A pending `stage` is `committed` (call `reveal_name` from `ready_at`, in milliseconds; unlike `register_name` it never sends a new commitment) or `revealed` (sent; it shows in `names` once it lands). |
+| `mine()` | `{"names": [{"name", "display", "owner", "account", "address_ok", "sealed", "expires", "never", "lapsed"}], "pending": [{"name", "display", "owner", "stage", "ready_at", "tx"}]}`: the names this device remembers that the open wallet holds (`owner` is the wallet account that holds the name), and the registrations under way. A pending `stage` is `committed` (call `reveal_name` from `ready_at`, in milliseconds; unlike `register_name` it never sends a new commitment) or `revealed` (sent; it shows in `names` once it lands). |
 | `keep("jef")` | The bare name: remembered on this device if the open wallet holds it, so `mine` keeps returning it. Fails for a name the wallet does not hold. |
 | `set_profile(name, entries_json, replace)` | Writes many text entries in one transaction, as the CLI's `names profile` does. `entries_json` is a JSON object of key to text; an empty value (or null) removes that key. Card keys: `display`, `bio`, `avatar` (a `data:image/...` URL), `theme` (`light`, `dark` or `auto`), `color` (`#rrggbb`), `font` (`sans`, `serif`, `mono` or `rounded`) and `cid` (a Logos Storage content ID); any other key of 1-32 characters of a-z, 0-9, `-`, `_` or `.` works too. With `replace`, every existing entry is dropped first; the account and payment keys stay either way. At most 16 entries and 12 KiB of sealed profile. |
 | `transfer(name, new_owner)` | Hands the name to `new_owner` (base58); only a tag of it reaches the chain. The addresses, entries and page the current owner set are emptied. The deposit stays with the name, for whoever releases it. |
+| `repair_name(name)` | `{"name", "repaired", "why"?, "tx"?}`: for a name a public account of the open wallet holds that lacks its account or this installation's chat address (`address_ok: false` in `mine`), one `SetRecord` with its profile as it is plus what is missing, at most once per name and holder, logged in the history as `address_repair`. `why` is `complete` or `tried` when nothing was sent. The Names app calls it on its own. Every other change (`register_name`'s reveal, `set_text`, `set_profile`, ...) seals the same additions, so a name is an address from its first block. `clear_addresses` is refused. |
 | `release(name)` | Gives the name up: its record and page are emptied, anyone may register it again, and the deposit comes back to the holder. Also has `refund`, the deposit account's whole balance (decimal text). |
 | `set_primary(account, name)` | Publishes the name as what `account` (in the open wallet) is shown as; an empty name withdraws it. The one change that puts a name on the chain in the clear. |
 | every change | `{"name", "signer", "tx"}`: the transaction was sent. |

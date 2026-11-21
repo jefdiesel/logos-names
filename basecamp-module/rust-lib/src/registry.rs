@@ -81,6 +81,10 @@ pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
 pub const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
 /// The largest sequencer reply read: one actor's state, a page at most, as JSON.
 const MAX_REPLY_LEN: usize = 1024 * 1024;
+/// The text entry holding a name's chat address (Messages).
+pub const CHAT_KEY: &str = "chat";
+/// A profile holds at most this many text entries.
+pub const MAX_TEXT_ENTRIES: usize = 16;
 /// ML-KEM-768 encapsulation key, as used for LEZ private accounts.
 pub const VPK_LEN: usize = 1184;
 
@@ -480,6 +484,12 @@ impl Writer {
     }
 }
 
+/// Whether `text` is a chat address as the Names app reads one from the chat module
+/// (`chatText` in Main.qml): 16 to 200 characters of letters, digits and `_:+/=.-`.
+pub fn is_chat_address(text: &str) -> bool {
+    (16..=200).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphanumeric() || b"_:+/=.-".contains(&b))
+}
+
 /// What a name resolves to, as its holder sealed it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Profile {
@@ -538,18 +548,49 @@ impl Profile {
         seal(key, &self.encode(), RECORD_SEAL, fresh_nonce()?)
     }
 
+    /// What a name must always carry, filled in where it is missing (SPEC.md §5, A name is an
+    /// address): `holder`, the public account that holds the name, as its account, and `chat`,
+    /// this installation's chat address, as its `chat` entry. An account or chat entry already
+    /// there is kept (a shop's own account, another device's chat address). Returns whether
+    /// anything was added. Every profile this module seals goes through here, so no write
+    /// leaves a name that can't be paid or messaged.
+    pub fn complete(&mut self, holder: &AccountId, chat: Option<&str>) -> bool {
+        let mut added = false;
+        if self.account.is_none() {
+            self.account = Some(*holder);
+            added = true;
+        }
+        if let Some(chat) = chat.filter(|chat| is_chat_address(chat)) {
+            if !self.texts.iter().any(|(key, _)| key == CHAT_KEY) && self.texts.len() < MAX_TEXT_ENTRIES {
+                self.texts.push((CHAT_KEY.to_owned(), chat.to_owned()));
+                added = true;
+            }
+        }
+        added
+    }
+
+    /// Whether [`Self::complete`] would add something.
+    pub fn incomplete(&self, holder: &AccountId, chat: Option<&str>) -> bool {
+        self.clone().complete(holder, chat)
+    }
+
+    /// Opens a record's sealed bytes as the profile of `name`, or `None` when they don't open
+    /// as this name's (another key, tampered, another name's profile, or too long).
+    pub fn try_open(key: &[u8; 32], sealed: &[u8], name: &str) -> Option<Self> {
+        if sealed.len() > MAX_SEALED_RECORD_LEN {
+            return None;
+        }
+        open(key, sealed, RECORD_SEAL)
+            .and_then(|plaintext| Self::decode(&plaintext).ok())
+            .filter(|profile| profile.name == name)
+    }
+
     /// Opens a record's sealed bytes as the profile of `name`. Empty bytes,
     /// bytes this key does not open, and a profile of another name all mean
     /// the same thing: the name has nothing set.
     pub fn open(key: &[u8; 32], sealed: &[u8], name: &str) -> Self {
         // The program never stores more; a reply that has more didn't come from it.
-        if sealed.len() > MAX_SEALED_RECORD_LEN {
-            return Self::bare(name);
-        }
-        open(key, sealed, RECORD_SEAL)
-            .and_then(|plaintext| Self::decode(&plaintext).ok())
-            .filter(|profile| profile.name == name)
-            .unwrap_or_else(|| Self::bare(name))
+        Self::try_open(key, sealed, name).unwrap_or_else(|| Self::bare(name))
     }
 }
 
@@ -621,6 +662,19 @@ pub struct Resolved {
     pub claimed: bool,
     /// The name's deed, if its holder claimed one (record version 7, SPEC.md §8.6).
     pub deed: Option<Deed>,
+    /// What the record's sealed bytes were: nothing (as a transfer leaves them), a profile
+    /// that opened, or bytes that don't open as this name's. Only the first two are ever
+    /// rewritten on their own ([`crate::changes`]'s repair): unreadable bytes may be a
+    /// profile this reader can't read, and are never overwritten unasked.
+    pub sealed: Sealed,
+}
+
+/// What a record's sealed bytes held, read with the name's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sealed {
+    Empty,
+    Opened,
+    Unreadable,
 }
 
 impl Resolved {
@@ -644,7 +698,12 @@ impl Resolved {
         } else {
             None
         };
-        Ok(Self { owner, expires, profile: Profile::open(key, sealed, name), claimed, deed })
+        let (profile, state) = match Profile::try_open(key, sealed, name) {
+            Some(profile) => (profile, Sealed::Opened),
+            None if sealed.is_empty() => (Profile::bare(name), Sealed::Empty),
+            None => (Profile::bare(name), Sealed::Unreadable),
+        };
+        Ok(Self { owner, expires, profile, claimed, deed, sealed: state })
     }
 
     /// Whether the name is held by a deposit, and so never lapses.
@@ -701,6 +760,7 @@ impl Resolved {
             "never": self.never_expires(),
             "lapsed": self.lapsed(local_now()),
             "claimed": self.claimed,
+            "sealed": match self.sealed { Sealed::Empty => "empty", Sealed::Opened => "opened", Sealed::Unreadable => "unreadable" },
             "account": profile.account.as_ref().map(account_text),
             "npk": profile.npk.as_ref().map(|npk| hex(npk)),
             "vpk": (!profile.vpk.is_empty()).then(|| hex(&profile.vpk)),
@@ -1411,6 +1471,10 @@ pub struct Registry {
     pub sequencer: String,
     pub program: AccountId,
     pub deadline: Deadline,
+    /// This installation's chat address, when the Names app has told it (`app_note` `chat`):
+    /// every profile this module writes carries it, so the name can be messaged with no step
+    /// of its own ([`Profile::complete`]).
+    pub chat: Option<String>,
 }
 
 impl Registry {
@@ -1421,7 +1485,7 @@ impl Registry {
 
     /// `program` on `sequencer`, its reads sharing the asking call's `deadline`.
     pub fn by(sequencer: &str, program: AccountId, deadline: Deadline) -> Self {
-        Registry { sequencer: sequencer.to_owned(), program, deadline }
+        Registry { sequencer: sequencer.to_owned(), program, deadline, chat: None }
     }
 
     /// `program`'s state on `account`; empty when it has none. A reply that isn't a
@@ -1759,6 +1823,7 @@ mod tests {
             profile: Profile { name: "nameswallet".into(), texts: vec![("forward".into(), value.into())], ..Profile::default() },
             claimed: false,
             deed: None,
+            sealed: Sealed::Opened,
         };
         assert_eq!(with("names").forward_target().as_deref(), Some("names"));
         assert_eq!(with(" @Names ").forward_target().as_deref(), Some("names"));

@@ -355,6 +355,17 @@ pub trait NamesModule: Send + 'static {
     /// `refund`, the deposit account's whole balance (decimal text).
     fn release(&mut self, name: String) -> String;
 
+    /// Makes `name`, held by one of the open wallet's public accounts, an address again when
+    /// it is not one (a transfer to this wallet empties its profile; names registered before
+    /// this version had no account): one `SetRecord` with its profile as it is, plus the
+    /// holder's account and this installation's chat address. Done by the Names app on its own
+    /// for each name `mine` marks `address_ok: false`, never asked of the person. Sends at most
+    /// once per name and holder (kept in `repairs.json`, written before anything is sent),
+    /// never for a name the wallet doesn't hold or whose profile doesn't open, and puts what it
+    /// sent in the Wallet's history (`address_repair`). The value is `{name, repaired, why?,
+    /// tx?}`; `why` is `complete` (nothing to add) or `tried` (sent once already).
+    fn repair_name(&mut self, name: String) -> String;
+
     /// Publishes `name` as what `account` (base58, in the open wallet) is
     /// shown as; an empty name withdraws it. This is the one change that puts
     /// a name on the chain in the clear.
@@ -1776,12 +1787,25 @@ const MODULE_VERSION: &str = "0.18.0";
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
 /// `call_reads_clock` (0.18): `propose_call` takes the network clock as a read-only account,
 /// `{"account": <clock account>, "program": <clock program>}`.
-const MODULE_FEATURES: [&str; 13] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock"];
+/// `address_repair`: `repair_name` exists, every profile the module seals carries the holder's
+/// account and the chat address noted as `app_note` `chat`, and `mine` says which names need it.
+const MODULE_FEATURES: [&str; 14] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "address_repair"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
 
 /// What a private-name action answers on LEZ 0.4, where names are public only (S-B).
+/// The `app_note` key under which the Names app tells the module this installation's chat
+/// address, so every profile it writes carries it.
+const CHAT_NOTE: &str = "chat";
+/// Where `repair_name` keeps the names it has sent a repair for (per program, name and holder).
+const REPAIRS_FILE: &str = "repairs.json";
+
+/// The `repairs.json` key of one name held by one holder on one registry.
+fn repair_key(program: &AccountId, id: &registry::NameId, owner: &registry::OwnerTag) -> String {
+    format!("{}|{}|{}", registry::account_text(program), registry::hex(id), registry::hex(owner))
+}
+
 const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments and private holders are off there, so nothing was done";
 
 /// The commit this module was built from, so builds of one version tell apart (every 0.17.0
@@ -4240,7 +4264,14 @@ impl Names {
             .program
             .ok_or("no registry is configured; call set_registry with its program ID")?;
         // Names are kept on home, whichever zone is in use.
-        Ok(Registry::new(&self.home_sequencer(), program))
+        let mut registry = Registry::new(&self.home_sequencer(), program);
+        registry.chat = self.chat_address();
+        Ok(registry)
+    }
+
+    /// This installation's chat address, as the Names app noted it (`app_note` `chat`).
+    fn chat_address(&self) -> Option<String> {
+        self.notes.get(CHAT_NOTE).filter(|chat| registry::is_chat_address(chat)).cloned()
     }
 
     /// The identifier and key of `name`, derived the first time it is asked for.
@@ -4399,6 +4430,76 @@ impl Names {
                 self.change(&name, |registry, held| build(registry, &name, &derived, held))
             }
             Err(error) => reply(Err(error)),
+        }
+    }
+
+    /// [`NamesModule::repair_name`].
+    fn repair_step(&mut self, typed: &str) -> Result<Value, String> {
+        self.names_here()?;
+        let name = registry::parse_name(typed)?;
+        if let Some(job) = self.wallet_busy() {
+            return Err(cli::busy_with(&job));
+        }
+        let registry = self.registry()?;
+        let held = self.held()?;
+        let derived = self.derived(&name);
+        // Refused for a name none of the wallet's public accounts holds: nothing is signed for it.
+        let (record, holder) = registry.holder(&name, &derived, &held.public)?;
+        let dir = config_dir().ok_or("there is no folder for Names' settings, so nothing was sent")?;
+        let file = dir.join(REPAIRS_FILE);
+        let key = repair_key(&registry.program, &derived.id, &record.owner);
+        let mut tried = load_object(&file);
+        let change = registry.repair(&name, &derived, &held.public)?;
+        if let Some(before) = tried.get(&key).cloned() {
+            // Sent once already. Landed and complete: its history entry says so.
+            if let Some(entry) = before["entry"].as_str() {
+                if change.is_none() && before["landed"] != true {
+                    activity::update(&dir, entry, &json!({ "state": "done" }));
+                    tried.insert(key.clone(), merged(before.clone(), &json!({ "landed": true })));
+                    let _ = cli::write_private(&file, Value::Object(tried.clone()).to_string().as_bytes());
+                }
+            }
+            // Never sent twice for one name and holder, even if the record still reads as it did
+            // (a slow or stale reply): the holder's next change to the name mends it instead.
+            return Ok(json!({ "name": name, "repaired": false, "why": if change.is_none() { "complete" } else { "tried" } }));
+        }
+        let Some(change) = change else {
+            return Ok(json!({ "name": name, "repaired": false, "why": "complete" }));
+        };
+        // Checked before the attempt is counted: a wallet that can't pay sends nothing.
+        if registry.balance(&holder)? <= change.needs {
+            return Err(format!("{} has no funds to pay the fee, so {name} isn't mended yet", registry::account_text(&holder)));
+        }
+        let entry = activity::add(
+            &dir,
+            now(),
+            activity::in_zone(
+                json!({ "kind": "address_repair", "chain": "lez", "name": name, "from": format!("Public/{}", registry::account_text(&holder)), "state": "sending" }),
+                &self.zones.current_id(),
+            ),
+        );
+        // Counted before it is sent: a send that fails after it left is never sent again.
+        tried.insert(key.clone(), json!({ "at": now(), "entry": entry, "holder": registry::account_text(&holder) }));
+        if let Err(error) = cli::write_private(&file, Value::Object(tried.clone()).to_string().as_bytes()) {
+            activity::update(&dir, &entry, &json!({ "state": "failed" }));
+            return Err(format!("could not keep a note of the repair ({error}), so nothing was sent"));
+        }
+        match self.send(&registry, &held, &name, &change) {
+            // The names CLI answers once the change applied.
+            Ok(sent) => {
+                activity::update(&dir, &entry, &json!({ "state": "done", "hash": sent["tx"] }));
+                if let Some(saved) = tried.get(&key).cloned() {
+                    tried.insert(key, merged(saved, &json!({ "landed": true })));
+                    let _ = cli::write_private(&file, Value::Object(tried).to_string().as_bytes());
+                }
+                self.forget_balances();
+                Ok(merged(sent, &json!({ "repaired": true })))
+            }
+            Err(why) => {
+                // It may have gone through: the next `repair_name` settles it from the record.
+                activity::update(&dir, &entry, &json!({ "state": "unknown" }));
+                Err(why)
+            }
         }
     }
 
@@ -5113,6 +5214,10 @@ fn mine_read(setup: &cli::Setup, registry: &Registry, remembered: &[String], rev
                 "owner": registry::account_text(holder),
                 // The public account the name publishes for payments, or null.
                 "account": resolved.profile.account.as_ref().map(registry::account_text),
+                // Whether it is an address as it should be (its holder's account, this
+                // installation's chat address); when not, the app has `repair_name` mend it.
+                "address_ok": !resolved.profile.incomplete(holder, registry.chat.as_deref()),
+                "sealed": resolved.to_json()["sealed"],
                 "expires": resolved.expires_json(),
                 "never": resolved.never_expires(),
                 "lapsed": resolved.lapsed(registry::local_now()),
@@ -5458,7 +5563,12 @@ impl NamesModule for Names {
             let key = self.served_key("mine", &format!("{}|{}|{}", setup.wallet.display(), registry.sequencer, registry::account_text(&registry.program)));
             let (sequencer, program) = (registry.sequencer.clone(), registry.program);
             let asked: Vec<String> = remembered.iter().map(|(name, _)| name.clone()).collect();
-            let snap = self.served.read(&key, std::time::Duration::from_secs(15), served::Lane::Cli, move || mine_read(&setup, &Registry::new(&sequencer, program), &asked, &revealed, &known));
+            let chat = registry.chat.clone();
+            let snap = self.served.read(&key, std::time::Duration::from_secs(15), served::Lane::Cli, move || {
+                let mut registry = Registry::new(&sequencer, program);
+                registry.chat = chat;
+                mine_read(&setup, &registry, &asked, &revealed, &known)
+            });
             let read = match snap.value_or("your names") {
                 Ok(read) => read.clone(),
                 Err(Ok(busy)) => return Err(BUSY_MARK.to_owned() + &busy),
@@ -5690,6 +5800,14 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         self.change_name(&name, |registry, name, derived, held| registry.release(name, derived, held))
+    }
+
+    fn repair_name(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.forget_reads(&name);
+        reply(self.repair_step(&name))
     }
 
     fn set_primary(&mut self, account: String, name: String) -> String {
@@ -11699,7 +11817,7 @@ mod tests {
         assert!(!dir.join("jobs").exists() || std::fs::read_dir(dir.join("jobs")).unwrap().count() == 0, "nothing ran");
         // A private account is never on the chain to be seen: it goes.
         let derived = registry::derive("xferalpha");
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None, sealed: registry::Sealed::Opened })));
         let started = parsed(&names.cli_transfer("xferalpha".into(), format!("Private/{unseen}")));
         let id = started["value"]["id"].as_str().expect("a job").to_owned();
         assert_eq!(job_end(&mut names, &id)["state"], "done");
@@ -12011,7 +12129,7 @@ mod tests {
         let (mut names, dir) = with_fake_cli("startdeadline", "exit 0");
         let seen = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
         let derived = registry::derive("xferslow");
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None, sealed: registry::Sealed::Opened })));
         // Each read takes 3.2 s: either alone fits the 6 s a job start has, the two together don't.
         registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(3200)));
         let started = std::time::Instant::now();
@@ -12105,7 +12223,7 @@ mod tests {
         let (mut names, dir) = with_fake_cli("mineoct", &tail);
         let derived = registry::derive("seqoct");
         let owner = registry::owner_tag(&derived.id, &registry::parse_account(holder).unwrap());
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner, expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner, expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None, sealed: registry::Sealed::Opened })));
         let mine = parsed(&names.cli_mine());
         assert_eq!(mine["success"], true, "{mine}");
         // goneold has no record (the stand-in sequencer gives none): it really is gone.
@@ -12121,7 +12239,7 @@ mod tests {
     fn a_name_listed_from_its_record_reads_as_the_cli_writes_it() {
         assert_eq!(cli::readable(0), "1970-01-01 00:00:00Z");
         assert_eq!(cli::readable(1_794_243_900_000), "2026-11-09 17:05:00Z");
-        let record = |expires| registry::Resolved { owner: [3; 32], expires, profile: registry::Profile::default(), claimed: false, deed: None };
+        let record = |expires| registry::Resolved { owner: [3; 32], expires, profile: registry::Profile::default(), claimed: false, deed: None, sealed: registry::Sealed::Opened };
         let held = cli::held_entry("jef", &record(1_794_243_900_000), "Private/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_000_000);
         assert_eq!((held["state"].as_str(), held["lapsed"].as_bool(), held["private"].as_bool()), (Some("held until 2026-11-09 17:05:00Z"), Some(false), Some(true)));
         let lapsed = cli::held_entry("jef", &record(1_794_243_900_000), "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_900_000);
@@ -12844,6 +12962,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Jef's rule (2026-11-21): a name is an address with no publish step. A name this wallet
+    /// holds whose profile lost its account (a transfer empties it) is mended by `repair_name`
+    /// on its own: one SetRecord signed by the holder, in the history, never sent twice, never
+    /// for a name the wallet doesn't hold. `mine` says which names need it.
+    #[test]
+    fn a_held_name_without_its_account_is_repaired_once() {
+        let tail = "case \"$*\" in *accounts*) echo '{\"public\":[\"CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk\"],\"private\":[]}';; *send*) cat > /dev/null; echo 'submitted 00ab'; echo '{}';; esac";
+        let (mut names, dir) = with_fake_cli("repair-once", tail);
+        names.sequencer = registry::stub_rpc(|request| registry::rpc_ok(if request["method"] == "getLastBlockId" { json!(7) } else { registry::view_holding(10_000_000) }));
+        let chat = "5ab7e0c5b8a0b11f39e2a5b0b8f66f0c6d1c1b2a3f4e5d6c7b8a9f0e1d2c3b4a";
+        assert_eq!(parsed(&names.app_note(CHAT_NOTE.into(), chat.into()))["success"], true);
+        let holder = registry::parse_account(PUBLIC).unwrap();
+        let derived = registry::derive("emptied");
+        let emptied = registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::bare("emptied"), claimed: false, deed: None, sealed: registry::Sealed::Empty };
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, emptied.clone())));
+
+        let first = parsed(&names.repair_name("emptied".into()));
+        assert_eq!(first["value"]["repaired"], true, "{first}");
+        assert_eq!(first["value"]["tx"], "00ab", "{first}");
+        let row = activity::all(&config_dir().unwrap()).into_iter().find(|e| e["kind"] == "address_repair").expect("a history row");
+        assert_eq!((row["name"].as_str(), row["state"].as_str(), row["from"].as_str()), (Some("emptied"), Some("done"), Some(format!("Public/{PUBLIC}").as_str())), "{row}");
+        // The record (stubbed) still reads empty: the attempt is not made twice.
+        let again = parsed(&names.repair_name("emptied".into()));
+        assert_eq!((again["value"]["repaired"].as_bool(), again["value"]["why"].as_str()), (Some(false), Some("tried")), "{again}");
+        assert_eq!(activity::all(&config_dir().unwrap()).iter().filter(|e| e["kind"] == "address_repair").count(), 1);
+
+        // Complete: nothing to send.
+        let whole = registry::Profile { account: Some(holder), texts: vec![("chat".into(), chat.into())], ..registry::Profile::bare("whole") };
+        let derived_whole = registry::derive("whole");
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived_whole.id, registry::Resolved { owner: registry::owner_tag(&derived_whole.id, &holder), profile: whole, sealed: registry::Sealed::Opened, ..emptied.clone() })));
+        assert_eq!(parsed(&names.repair_name("whole".into()))["value"]["why"], "complete");
+
+        // Someone else's name: refused, nothing signed.
+        let derived_other = registry::derive("notmine");
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived_other.id, registry::Resolved { owner: [9; 32], ..emptied.clone() })));
+        let refused = parsed(&names.repair_name("notmine".into()));
+        assert_eq!(refused["success"], false, "{refused}");
+        assert_eq!(activity::all(&config_dir().unwrap()).iter().filter(|e| e["kind"] == "address_repair").count(), 1);
+        registry::RECORDS.with(|records| records.borrow_mut().clear());
+        let _ = std::fs::remove_dir_all(config_dir().unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// module-self-transfer-starts-job-logs-failed: cli_transfer to the account that
     /// already held the name started a job, the CLI refused it ("... already holds ovone,
     /// so nothing was sent"), and a failed transfer row was left in the history.
@@ -12852,7 +13013,7 @@ mod tests {
         let (mut names, dir) = with_wallet("self-transfer", "exit 0");
         let derived = registry::derive("ovone");
         let holder = registry::parse_account(PRIVATE).unwrap();
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None, sealed: registry::Sealed::Opened })));
         let refused = parsed(&names.cli_transfer("ovone".into(), format!("Private/{PRIVATE}")));
         assert_eq!(refused["error"], format!("{PRIVATE} already holds ovone, so nothing was sent"), "{refused}");
         assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");
@@ -12941,7 +13102,7 @@ mod tests {
         let (mut names, dir) = with_wallet("rp-holder", &tail);
         let derived = registry::derive("probealpha");
         let holder = registry::parse_account(PUBLIC).unwrap();
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false, deed: None, sealed: registry::Sealed::Opened })));
         let started = parsed(&names.cli_receive_privately("probealpha".into()));
         assert_eq!(started["success"], true, "{started}");
         let history = activity::all(&config_dir().unwrap());
@@ -18316,6 +18477,7 @@ mod tests {
             ("set_page", false, true, Box::new(|n: &mut Names| n.set_page("alice".into(), "text/plain".into(), "hi".into()))),
             ("transfer", false, true, Box::new(move |n: &mut Names| n.transfer("alice".into(), d.clone()))),
             ("release", false, true, Box::new(|n: &mut Names| n.release("alice".into()))),
+            ("repair_name", false, true, Box::new(|n: &mut Names| n.repair_name("alice".into()))),
             ("set_primary", false, true, Box::new(move |n: &mut Names| n.set_primary(e.clone(), "alice".into()))),
             ("get_config", false, false, Box::new(|n: &mut Names| n.get_config())),
             ("zone_list", false, false, Box::new(|n: &mut Names| n.zone_list())),

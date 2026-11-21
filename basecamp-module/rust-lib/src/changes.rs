@@ -307,6 +307,10 @@ impl Registry {
         let (record, holder) = self.holder(name, derived, held)?;
         let mut profile = record.profile;
         edit(&mut profile)?;
+        // A name is an address: whatever the edit, the profile sealed points at its holder
+        // and carries this installation's chat address (SPEC.md §5). A name left without them
+        // (a transfer empties a profile) is mended by its holder's next change.
+        profile.complete(&holder, self.chat.as_deref());
         if profile.texts.len() > MAX_TEXT_RECORDS {
             return Err(format!("a name holds at most {MAX_TEXT_RECORDS} entries"));
         }
@@ -370,7 +374,8 @@ impl Registry {
     }
 
     /// Step 2 of registering: reveals the commitment made with `secret` and
-    /// claims `name` for `owner`, with a first profile that holds the name and,
+    /// claims `name` for `owner`, with a first profile that holds the name, `owner`
+    /// as the account it is paid at, this installation's chat address when known, and,
     /// when `private_keys` are given, where it can be paid privately. The
     /// deposit or fee is paid from `owner`.
     pub fn reveal(
@@ -387,6 +392,9 @@ impl Registry {
             profile.npk = Some(npk);
             profile.vpk = vpk;
         }
+        // The first profile already makes the name an address: its holder's account, and this
+        // installation's chat address when known. There is no step after this to publish them.
+        profile.complete(owner, self.chat.as_deref());
         let promised = commitment(&derived.id, &owner_tag(&derived.id, owner), secret);
         let mut reached = vec![
             registry_actor(&self.program, name_seed(&derived.id)),
@@ -421,8 +429,8 @@ impl Registry {
         }))
     }
 
-    /// Publishes the keys for private payments. With `only`, the public
-    /// account is removed too, so the name can be paid no other way.
+    /// Publishes the keys for private payments. The holder's public account stays
+    /// (`only` is ignored): a name always points at its holder.
     pub fn set_private_keys(
         &self,
         name: &str,
@@ -439,23 +447,22 @@ impl Registry {
             return Err(format!("the viewing public key must be {VPK_LEN} bytes"));
         }
         let vpk = vpk.to_vec();
+        // `only` once also took the public account off; a name now always keeps its holder's.
+        let _ = only;
         self.edit_profile(name, derived, held, Box::new(move |profile| {
             profile.npk = Some(npk);
             profile.vpk = vpk;
-            if only {
-                profile.account = None;
-            }
             Ok(())
         }))
     }
 
-    pub fn clear_addresses(&self, name: &str, derived: &Derived, held: &[AccountId]) -> Result<Change, String> {
-        self.edit_profile(name, derived, held, Box::new(|profile| {
-            profile.account = None;
-            profile.npk = None;
-            profile.vpk = Vec::new();
-            Ok(())
-        }))
+    /// Refused: a name is always an address (SPEC.md §5), so its holder's account can't be
+    /// taken off it. Kept so an older app asking gets a reason rather than a missing method.
+    pub fn clear_addresses(&self, name: &str, _derived: &Derived, _held: &[AccountId]) -> Result<Change, String> {
+        Err(format!(
+            "{} always points at the account that holds it, so people can pay and message it; nothing was sent",
+            display(name)
+        ))
     }
 
     /// Sets a text entry; an empty value removes the key.
@@ -519,8 +526,34 @@ impl Registry {
         Ok(self.on_record_and_page(derived, holder, encode_set_page(&derived.id, &sealed)))
     }
 
+    /// The one change that makes a name this wallet holds an address again, when it is not
+    /// one: its profile, as it is, with the holder's account and this installation's chat
+    /// address added ([`Profile::complete`]). `None` when there is nothing to add, and
+    /// refused for a name none of `held` holds, and for one whose sealed bytes don't open
+    /// (they may be a profile this reader can't read; they are never overwritten unasked).
+    /// Its texts, keys and any account already there are kept.
+    pub fn repair(&self, name: &str, derived: &Derived, held: &[AccountId]) -> Result<Option<Change>, String> {
+        let (record, holder) = self.holder(name, derived, held)?;
+        if record.sealed == crate::registry::Sealed::Unreadable {
+            return Err(format!(
+                "{}'s profile doesn't open with its name's key, so it is left as it is; nothing was sent",
+                display(name)
+            ));
+        }
+        if record.gone(crate::registry::local_now()) {
+            return Err(format!("{} is no longer registered", display(name)));
+        }
+        if !record.profile.incomplete(&holder, self.chat.as_deref()) {
+            return Ok(None);
+        }
+        self.edit_profile(name, derived, held, Box::new(|_| Ok(()))).map(Some)
+    }
+
     /// Hands the name to `new_owner`; only its tag reaches the chain. The
-    /// program empties everything the current holder sealed, profile and page.
+    /// program empties everything the current holder sealed, profile and page,
+    /// so until the new holder's wallet writes its account back ([`Self::repair`], which
+    /// Names does by itself) the name resolves to no account. The registry program would
+    /// have to take the new profile with the transfer to close that gap (SPEC.md §5).
     /// The deposit stays with the name, for whoever releases it.
     pub fn transfer(&self, name: &str, derived: &Derived, held: &[AccountId], new_owner: &AccountId) -> Result<Change, String> {
         let (record, holder) = self.holder(name, derived, held)?;
@@ -628,7 +661,7 @@ mod tests {
         assert_eq!(mentions[2].account, pda(&program, &crate::registry::deed_holding_seed(&deed.definition, &new_tag)));
 
         let registry = Registry::new("http://127.0.0.1:9", program);
-        let record = |deed| Resolved { owner: old_tag, expires: crate::registry::NEVER, profile: Profile::default(), claimed: false, deed };
+        let record = |deed| Resolved { owner: old_tag, expires: crate::registry::NEVER, profile: Profile::default(), claimed: false, deed, sealed: crate::registry::Sealed::Opened };
         crate::registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, record(Some(deed)))));
         let change = registry.transfer("lns-deed-check", &derived, &[holder], &other).expect("a transfer");
         assert_eq!(change.mentions[change.mentions.len() - 3..].to_vec(), mentions, "the deed moves with the name");
@@ -821,5 +854,194 @@ mod tests {
         assert_eq!(tier_text(TIER_THREE), "three");
         assert_eq!(tier_text(TIER_NORMAL), "normal");
         assert_eq!(unhex("00").map(|bytes| bytes.len()), Ok(1));
+    }
+
+    /// The sealed profile a `Register` or `SetRecord` message carries.
+    fn sealed_of(message: &[u8]) -> Vec<u8> {
+        assert!(message[0] == 0 && (message[1] == 0 || message[1] == 2), "a Register or SetRecord");
+        let at = 2 + 32;
+        let len = u32::from_le_bytes(message[at..at + 4].try_into().unwrap()) as usize;
+        message[at + 4..at + 4 + len].to_vec()
+    }
+
+    /// Opens what a change seals for `name`, as anyone resolving it would.
+    fn written(change: &Change, name: &str) -> Profile {
+        Profile::try_open(&derive(name).key, &sealed_of(&change.message), name).expect("a profile that opens")
+    }
+
+    const CHAT: &str = "5ab7e0c5b8a0b11f39e2a5b0b8f66f0c6d1c1b2a3f4e5d6c7b8a9f0e1d2c3b4a";
+
+    fn held_record(name: &str, holder: &AccountId, profile: Option<Profile>) -> Resolved {
+        let derived = derive(name);
+        let sealed = if profile.is_some() { crate::registry::Sealed::Opened } else { crate::registry::Sealed::Empty };
+        Resolved {
+            owner: owner_tag(&derived.id, holder),
+            expires: crate::registry::NEVER,
+            profile: profile.unwrap_or_else(|| Profile::bare(name)),
+            claimed: false,
+            deed: None,
+            sealed,
+        }
+    }
+
+    fn put_record(name: &str, record: Resolved) {
+        let id = derive(name).id;
+        crate::registry::RECORDS.with(|records| {
+            records.borrow_mut().retain(|(held, _)| *held != id);
+            records.borrow_mut().push((id, record));
+        });
+    }
+
+    /// Jef's rule (2026-11-21): a registered name is an address, with no step to publish it.
+    /// A registration's first profile already points at its holder and carries the chat address.
+    #[test]
+    fn a_registration_seals_its_holder_and_chat_address() {
+        let owner = [0x31; 32];
+        // The length proof is built from the whole short-name list, slowly in a debug build.
+        let deadline = crate::registry::Deadline::after(std::time::Duration::from_secs(600));
+        let mut registry = Registry::by(&crate::registry::stub_chain_at(1_800_000_000_000), [7; 32], deadline);
+        registry.chat = Some(CHAT.to_owned());
+        let name = "addressnow";
+        let change = registry.reveal(name, &derive(name), &owner, &[0x5A; 32], None).expect("a reveal");
+        let profile = written(&change, name);
+        assert_eq!(profile.account, Some(owner), "the holder's account, in the Register itself");
+        assert_eq!(profile.texts, vec![(crate::registry::CHAT_KEY.to_owned(), CHAT.to_owned())]);
+        // Without a chat address known, still the account.
+        registry.chat = None;
+        let change = registry.reveal(name, &derive(name), &owner, &[0x5A; 32], Some(([3; 32], vec![4; VPK_LEN]))).expect("a reveal");
+        let profile = written(&change, name);
+        assert_eq!((profile.account, profile.npk, profile.texts.len()), (Some(owner), Some([3; 32]), 0));
+    }
+
+    /// Every profile edit seals the holder's account, whatever the edit was and whatever the
+    /// record held before (empty, as a transfer leaves it, or a profile without an account).
+    #[test]
+    fn every_profile_edit_points_at_its_holder() {
+        let holder = [0x41; 32];
+        let mut registry = Registry::new("http://127.0.0.1:9", [7; 32]);
+        registry.chat = Some(CHAT.to_owned());
+        let name = "editedname";
+        let derived = derive(name);
+        put_record(name, held_record(name, &holder, None));
+        let edits: Vec<Change> = vec![
+            registry.set_text(name, &derived, &[holder], "bio", "hi").expect("set_text"),
+            registry.set_profile(name, &derived, &[holder], vec![("display".into(), "Ed".into())], true).expect("set_profile"),
+            registry.set_private_keys(name, &derived, &[holder], &[3; 32], &[4; VPK_LEN], true).expect("set_private_keys"),
+        ];
+        for change in &edits {
+            let profile = written(change, name);
+            assert_eq!(profile.account, Some(holder), "{profile:?}");
+            assert!(profile.texts.iter().any(|(key, value)| key == "chat" && value == CHAT), "{profile:?}");
+        }
+        // A shop's own account, set on purpose, is kept.
+        let shop = [0x42; 32];
+        assert_eq!(written(&registry.set_account(name, &derived, &[holder], &shop).unwrap(), name).account, Some(shop));
+        // Taking the account off is refused: nothing to sign.
+        assert!(registry.clear_addresses(name, &derived, &[holder]).unwrap_err().contains("always points"));
+        crate::registry::RECORDS.with(|records| records.borrow_mut().clear());
+    }
+
+    /// The repair Names makes on its own: only for a name the wallet holds, only when something
+    /// is missing, never over a profile that doesn't open, and keeping everything else.
+    #[test]
+    fn a_name_without_its_address_is_repaired_once_and_kept_whole() {
+        let holder = [0x51; 32];
+        let mut registry = Registry::new("http://127.0.0.1:9", [7; 32]);
+        let name = "mendedname";
+        let derived = derive(name);
+
+        // Emptied by a transfer: account (and chat, once known) written back.
+        put_record(name, held_record(name, &holder, None));
+        let change = registry.repair(name, &derived, &[holder]).expect("a repair").expect("something to send");
+        assert_eq!(change.signer, holder);
+        assert_eq!(written(&change, name).account, Some(holder));
+        // Not this wallet's: refused, nothing built.
+        assert!(registry.repair(name, &derived, &[[0x52; 32]]).is_err());
+
+        // An old-style profile (keys and texts, no account): all of it kept, the account added.
+        let old = Profile { npk: Some([3; 32]), vpk: vec![4; VPK_LEN], texts: vec![("bio".into(), "kept".into())], ..Profile::bare(name) };
+        put_record(name, held_record(name, &holder, Some(old.clone())));
+        let mended = written(&registry.repair(name, &derived, &[holder]).unwrap().unwrap(), name);
+        assert_eq!(mended, Profile { account: Some(holder), ..old.clone() });
+
+        // Complete: nothing to send.
+        let whole = Profile { account: Some(holder), ..old.clone() };
+        put_record(name, held_record(name, &holder, Some(whole.clone())));
+        assert_eq!(registry.repair(name, &derived, &[holder]), Ok(None));
+        // ... until a chat address is known and missing.
+        registry.chat = Some(CHAT.to_owned());
+        let with_chat = written(&registry.repair(name, &derived, &[holder]).unwrap().unwrap(), name);
+        assert_eq!(with_chat.texts.last().map(|(k, v)| (k.as_str(), v.as_str())), Some(("chat", CHAT)));
+        assert_eq!(with_chat.account, Some(holder));
+
+        // Bytes that don't open are never overwritten unasked.
+        put_record(name, Resolved { sealed: crate::registry::Sealed::Unreadable, ..held_record(name, &holder, None) });
+        assert!(registry.repair(name, &derived, &[holder]).unwrap_err().contains("doesn't open"));
+        crate::registry::RECORDS.with(|records| records.borrow_mut().clear());
+    }
+
+    /// The module's own path on a live chain (rc3): `LIVE_RPC`, `LIVE_PROGRAM`, the names CLI at
+    /// `LIVE_CLI` with the wallet at `LIVE_WALLET`, a public `LIVE_HOLDER` of that wallet.
+    fn live() -> (Registry, crate::cli::Setup, AccountId) {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name}"));
+        let program = crate::registry::parse_account(&var("LIVE_PROGRAM")).unwrap();
+        let deadline = crate::registry::Deadline::after(std::time::Duration::from_secs(600));
+        let mut registry = Registry::by(&var("LIVE_RPC"), program, deadline);
+        registry.chat = Some(CHAT.to_owned());
+        let setup = crate::cli::Setup {
+            program: var("LIVE_CLI").into(),
+            wallet: var("LIVE_WALLET").into(),
+            registry: Some(var("LIVE_PROGRAM")),
+            sequencer: var("LIVE_RPC"),
+        };
+        (registry, setup, crate::registry::parse_account(&var("LIVE_HOLDER")).unwrap())
+    }
+
+    /// `LIVE_NAME`, held by `LIVE_HOLDER` with its profile emptied (a transfer): the module's
+    /// repair sends one SetRecord, after which it points at its holder and carries the chat
+    /// address, and a second repair has nothing to send.
+    #[test]
+    #[ignore = "sends to a live chain"]
+    fn live_module_repair() {
+        let (registry, setup, holder) = live();
+        let name = std::env::var("LIVE_NAME").unwrap();
+        let derived = derive(&name);
+        let change = registry.repair(&name, &derived, &[holder]).expect("a repair").expect("something to mend");
+        let tx = crate::wallet::send(&setup, &change).expect("sent");
+        println!("repair tx {tx}");
+        let record = registry.record(&name, &derived).unwrap().unwrap();
+        println!("after: account {:?} texts {:?}", record.profile.account.map(|a| account_text(&a)), record.profile.texts);
+        assert_eq!(record.profile.account, Some(holder));
+        assert!(record.profile.texts.iter().any(|(k, v)| k == "chat" && v == CHAT));
+        assert_eq!(registry.repair(&name, &derived, &[holder]), Ok(None));
+    }
+
+    /// `LIVE_NEW_NAME`, unregistered: the module commits, waits, reveals; the name resolves to
+    /// its holder's account and the chat address from its first block, with nothing after.
+    #[test]
+    #[ignore = "sends to a live chain and waits 15 minutes"]
+    fn live_module_register() {
+        let (registry, setup, holder) = live();
+        let name = std::env::var("LIVE_NEW_NAME").unwrap();
+        let derived = derive(&name);
+        let secret: [u8; 32] = crate::registry::fresh_bytes().unwrap();
+        let (commit, made) = registry.commit(&name, &derived, &holder, &secret).expect("a commit");
+        println!("commit tx {}", crate::wallet::send(&setup, &commit).expect("commit sent"));
+        loop {
+            let now = Registry::new(&registry.sequencer, registry.program).now().unwrap();
+            if now >= made + crate::registry::MIN_COMMIT_AGE_MS {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        let fresh = Registry { deadline: crate::registry::Deadline::after(std::time::Duration::from_secs(600)), ..registry.clone() };
+        let reveal = fresh.reveal(&name, &derived, &holder, &secret, None).expect("a reveal");
+        println!("reveal tx {}", crate::wallet::send(&setup, &reveal).expect("reveal sent"));
+        let record = fresh.record(&name, &derived).unwrap().expect("registered");
+        println!("after: account {:?} texts {:?}", record.profile.account.map(|a| account_text(&a)), record.profile.texts);
+        assert!(record.is_held_by(&derived.id, &holder));
+        assert_eq!(record.profile.account, Some(holder), "an address from its first block");
+        assert!(record.profile.texts.iter().any(|(k, v)| k == "chat" && v == CHAT));
+        assert_eq!(fresh.repair(&name, &derived, &[holder]), Ok(None), "nothing left to publish");
     }
 }
