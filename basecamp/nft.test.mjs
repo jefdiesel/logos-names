@@ -1,5 +1,6 @@
 // Checks Collectibles' rules (qml/nft.mjs). Run with: node basecamp/nft.test.mjs
 import { capabilityTitle, VPK_HEX, leftLine, splitRunningJobs, payerLinkLine, listAccounts, tickedFor, pruneTicks, proofLine, proofKind, proofPublicLine, proofGoodToKnow, proofChecksLine, capabilityVerb, readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
+import { itemOf, deedNameOf, isDeed, itemDescription, itemFields, editionLines, registryLine, ownerShown, toName, nameStep, namePreview, itemSendWhy, GRACE_MS } from "./qml/nft.mjs";
 import { readFileSync } from "node:fs";
 
 let failures = 0;
@@ -135,6 +136,63 @@ check("Hint is plain text by default", /textFormat: Text.PlainText/.test(hint), 
 const timers = block.split("Timer {").slice(1).map((t) => t.slice(0, 400)).filter((t) => /repeat: true/.test(t));
 check("every Collectibles timer needs the page open", timers.length > 0 && timers.every((t) => t.includes('root.section === "collectibles"')), true);
 check("every Collectibles timer is 30 s or slower", timers.every((t) => Number((/interval: (\d+)/.exec(t) || [0, 0])[1]) >= 30000), true);
+
+
+// ── The item page ──
+const item = { program: PROGRAM, account: "Public/" + BOB, definition: ART };
+const listed = [{ ...programs[0], registry: { registry: true, text: "Art program", verified: true } }];
+check("itemOf: the held NFT, with its program's registry fields", (({ account, definition, state, programLabel, registry, isPrivate }) => ({ account, definition, state, programLabel, registry, isPrivate }))(itemOf(listed, item)),
+  { account: "Public/" + BOB, definition: ART, state: "copy", programLabel: "Throwaway", registry: { registry: true, text: "Art program", verified: true }, isPrivate: false });
+check("itemOf: gone once it no longer holds it", [itemOf(programs, { ...item, account: "Public/X" }), itemOf(programs, { ...item, program: "other" }), itemOf(programs, null), itemOf(null, item)], [null, null, null, null]);
+check("itemOf: an unreadable one by its account", itemOf(programs, { program: PROGRAM, account: "Public/Y", definition: "" }).state, "unreadable");
+const deeds = { grace05: { deed: { definition: ART, nft_program: PROGRAM } }, turing: { deed: null }, ada: {} };
+check("deedNameOf", [deedNameOf(deeds, PROGRAM, ART), deedNameOf(deeds, "other", ART), deedNameOf(deeds, PROGRAM, BOB), deedNameOf(null, PROGRAM, ART), deedNameOf(deeds, PROGRAM, "")], ["grace05", "", "", "", ""]);
+check("isDeed: a name's card, or the fixed deed collection under a built-in program",
+  [isDeed(deeds, [], PROGRAM, ART, art), isDeed({}, [{ program: PROGRAM, built_in: true }], PROGRAM, BOB, { name: "LNS name deed" }), isDeed({}, [{ program: PROGRAM }], PROGRAM, BOB, { name: "LNS name deed" }), isDeed({}, [{ program: PROGRAM, built_in: true }], PROGRAM, BOB, art)],
+  [true, true, false, false]);
+check("itemDescription: only when the record carries one", [itemDescription(art), itemDescription({ description: "  A harbour at dawn. " }), itemDescription(null)], ["", "A harbour at dawn.", ""]);
+check("itemFields: the four, then every other field by its name", itemFields({ ...art, edition_note: "first run", extra: null, nested: { a: 1 } }).map((r) => r.label + "=" + r.value),
+  ["Supply=3", "Standard=Simple", "URI=ipfs://bafyart/meta", "Creators=me", "Edition note=first run", "Extra=none given"]);
+check("itemFields: unreadable", itemFields(null).length, 1);
+check("editionLines", [editionLines({ state: "master", print_balance: "3", collection: art }), editionLines({ state: "copy", collection: { printable_supply: "2" } }), editionLines({ state: "master", print_balance: "1", collection: { printable_supply: "1" } }), editionLines({ state: "unreadable", unreadable: "it ends too early" })],
+  [["Master · can print 2 more copies", "The collection allows the master and up to 2 copies.", "Copies of one collection are identical: there is no serial number."],
+   ["Copy", "The collection allows the master and up to 1 copy.", "Copies of one collection are identical: there is no serial number."],
+   ["Master · no prints left", "The collection has one NFT: the master, and no copies.", "Copies of one collection are identical: there is no serial number."],
+   ["Its state can't be read (it ends too early)."]]);
+check("editionLines: a supply too big for a number is left out", editionLines({ state: "copy", collection: { printable_supply: "18446744073709551615" } }).length, 2);
+check("registryLine", [registryLine(null), registryLine({ registry: false }), registryLine({ registry: true, verified: true }), registryLine({ registry: true, verified: true, stale: true }), registryLine({ registry: true, verified: false, kind: "unregistered" }), registryLine({ registry: true, verified: false })],
+  ["The Program Registry isn't installed: its source is unknown.", "The Program Registry isn't installed: its source is unknown.", "Source verified (Program Registry)", "Changed: it runs other code than was registered.", "Not in the Program Registry: its source is unknown.", "Source not verified (Program Registry)"]);
+check("ownerShown: the name, else the short account", [ownerShown("Public/" + BOB, "alice"), ownerShown("Public/" + BOB, ""), ownerShown("Private/" + BOB, undefined)], ["alice", "Public HLEwXN…eim2", "Private HLEwXN…eim2"]);
+check("toName: names only", [toName("Alice.lez"), toName(" bob "), toName("Public/" + BOB), toName("b@d"), toName(""), toName("a".repeat(64) + ":" + "b".repeat(VPK_HEX))], ["alice", "bob", "", "", "", ""]);
+const NOW = 1800000000000;
+check("nameStep: an account", nameStep("alice", "alice", { account: BOB, never: true, expires: null }, NOW), { state: "ok", name: "alice", account: BOB, via: "" });
+check("nameStep: Public/ prefix dropped", nameStep("alice", "alice", { account: "Public/" + BOB, never: true }, NOW).account, BOB);
+check("nameStep: nobody holds it", nameStep("alice", "alice", null, NOW), { state: "not_registered", name: "alice", account: "", via: "" });
+check("nameStep: past its grace period counts as not registered (as the names tool does)", [nameStep("old", "old", { account: BOB, never: false, expires: NOW - GRACE_MS }, NOW).state, nameStep("old", "old", { account: BOB, never: false, expires: NOW - GRACE_MS + 1 }, NOW).state], ["not_registered", "ok"]);
+check("nameStep: no public account", nameStep("jef", "jef", { account: null, npk: "ab", never: true }, NOW), { state: "no_account", name: "jef", account: "", via: "" });
+check("nameStep: one forward followed, then no more", [nameStep("old", "old", { account: BOB, forward: "new", never: true }, NOW), nameStep("old", "new", { account: ART, forward: "newer", never: true }, NOW), nameStep("old", "new", null, NOW)],
+  [{ follow: "new" }, { state: "ok", name: "new", account: ART, via: "old" }, { state: "not_registered", name: "new", account: "", via: "old" }]);
+check("namePreview: none for no name", namePreview("", null), null);
+check("namePreview: checking, and never another name's answer", [namePreview("alice", null).kind, namePreview("alice", { typed: "alic", state: "ok", name: "alic", account: BOB }).kind, namePreview("alice", { typed: "alice", state: "checking" }).text], ["working", "working", "Checking alice…"]);
+check("namePreview: the answer", [
+  namePreview("alice", { typed: "alice", state: "ok", name: "alice", account: BOB, via: "" }),
+  namePreview("old", { typed: "old", state: "ok", name: "new", account: BOB, via: "old" }).text,
+  namePreview("alice", { typed: "alice", state: "not_registered", name: "alice", via: "" }).text,
+  namePreview("old", { typed: "old", state: "not_registered", name: "new", via: "old" }).text,
+  namePreview("jef", { typed: "jef", state: "no_account", name: "jef", via: "" }).text,
+  namePreview("jef", { typed: "jef", state: "unavailable", why: "the names tool isn't set up" }).text],
+  [{ text: "Sends to alice · HLEwXN…eim2", kind: "done" }, "Sends to new · HLEwXN…eim2 (old points to new)", "Nobody holds alice. Check the spelling.", "old points to new, which nobody holds.",
+   "jef has no public account, so it can't take an NFT by name. Ask for an account (Public/…) or receiving keys.", "Couldn't check jef: the names tool isn't set up. Try again in a moment."]);
+const keysTyped = "a".repeat(64) + ":" + "b".repeat(VPK_HEX);
+check("itemSendWhy", [
+  itemSendWhy("", null, false), itemSendWhy("b@d", null, false), itemSendWhy("Public/" + BOB, null, false), itemSendWhy(keysTyped, null, false), itemSendWhy(keysTyped, null, true),
+  itemSendWhy("alice", null, false), itemSendWhy("alice", { typed: "alice", state: "ok", name: "alice", account: BOB }, false), itemSendWhy("jef", { typed: "jef", state: "no_account", name: "jef" }, false)],
+  ["Enter where it goes first.", "That isn't an LNS name, an account or receiving keys.", "", "Tick the box above to send to receiving keys.", "", "Checking the name…", "", "This name can't take it: see above."]);
+
+// Basecamp's QML engine has no BigInt and reads some words as reserved: nft.mjs uses neither.
+const code = source.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+check("nft.mjs: no BigInt literals or calls", /\b\d+n\b|\bBigInt\s*\(/.test(code), false);
+check("nft.mjs: no variables named like Java's reserved words", /\b(?:const|let|var|function)\s+(?:short|int|long|byte|char|float|double|boolean|native|package|private|protected|public|static|synchronized|throws|transient|volatile|goto|abstract|final|implements|interface)\b/.test(code), false);
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures === 0 ? 0 : 1);

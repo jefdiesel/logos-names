@@ -264,8 +264,11 @@ BRIDGE = r"""
             if (method === "pending_nft_requests") return ok(mock.nft ? mock.nft.requests || [] : [])
             if (method === "membership_passes") return ok(mock.nft ? mock.nft.passes || [] : [])
             if (method === "membership_proof_sheet") return mock.nft && mock.nft.proofSheet ? ok(mock.nft.proofSheet) : JSON.stringify({ success: false, value: null, error: "there is no such proof request" })
+            // An account's LNS name (the scenario's mock.reverse: bare ID -> name), else none.
+            if (method === "reverse") { var rv = (mock.reverse || {})[String(args[0]).replace(/^(Public|Private)\//, "")]; return ok(rv ? { name: rv, display: rv + ".lez" } : null) }
             if (/^nft_/.test(method)) {
                 var nm = mock.nft || {}
+                if (method === "nft_collection") return ok((nm.info || {})[args[1]] || null)
                 if (method === "nft_programs") return ok(nm.programs || [])
                 if (method === "nft_holdings") return nm.readError ? JSON.stringify({ success: false, busy: true, value: null, error: "still reading your nfts; this updates in a moment" }) : ok({ programs: nm.read || [] })
                 if (method === "nft_sheet") return JSON.stringify({ success: true, value: nm.sheet, error: null, digest: "ab".repeat(32), warnings: nm.warnings || [], program_label: nm.label || null })
@@ -1542,6 +1545,31 @@ for key, mock, then in [
     MOCKS[key] = {"nft": mock}
     SCENARIOS[key] = OPEN_NFT % (("Qt.callLater(function() { " + then + " })") if then else "")
     HEIGHTS[key] = 2600
+
+# ── The item page (names-nft-item): one NFT, its fields, program, owner and Send by name ──
+NFT_REG = {"registry": True, "text": "Test chain NFTs, by ada", "kind": "registered", "verified": True, "stale": False, "upgradeable": False}
+NFT_ITEM_BASE = dict(NFT_BASE, programs=[dict(NFT_PROGRAMS[0], registry=NFT_REG)], read=[dict(NFT_READ[0], registry=NFT_REG)])
+_PUB = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"
+_PRIV = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z"
+def _item(account, then=""):
+    return 'root.openNftItem({ program: "%s", account: "%s", definition: "%s" })%s' % (NFT_P, account, NFT_ART, ("; Qt.callLater(function() { " + then + " })") if then else "")
+for key, mock, then in [
+    ("nft-item", dict(NFT_ITEM_BASE), _item(_PUB)),
+    ("nft-item-noname", dict(NFT_BASE), _item(_PRIV)),
+    ("nft-item-unreadable", dict(NFT_BASE), 'root.openNftItem({ program: "%s", account: "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR", definition: "9iHYqf77noB5oyGrxhL5GNVLSKcKQZeGBzp294fMi3Mv" })' % NFT_P),
+    ("nft-item-image", dict(NFT_ITEM_BASE), _item(_PUB, 'root.nftConsentFor = "%s|%s|%s"; root.nftConsentUri = "https://img.example.com/harbour.png"' % (NFT_P, _PUB, NFT_ART))),
+    ("nft-item-image-shown", dict(NFT_ITEM_BASE), _item(_PUB, 'root.nftLoadImage("%s", "%s", "https://img.example.com/harbour.png")' % (NFT_P, NFT_ART))),
+    ("nft-item-send-name", dict(NFT_ITEM_BASE), _item(_PUB, 'nftItemTo.text = "hopper"; root.nftCheckName("hopper")')),
+    ("nft-item-send-noaccount", dict(NFT_ITEM_BASE), _item(_PUB, 'nftItemTo.text = "jef"; root.nftCheckName("jef")')),
+    ("nft-item-send-unknown", dict(NFT_ITEM_BASE), _item(_PUB, 'nftItemTo.text = "nobody12"; root.nftCheckName("nobody12")')),
+    ("nft-item-send-checking", dict(NFT_ITEM_BASE), _item(_PUB, 'nftItemTo.text = "hopper"')),
+    ("nft-item-sheet", dict(NFT_ITEM_BASE, sheet=nft_sheet("send", False, ["Both accounts, the collection and the NFT that moved are public."], [], ["Leaving: a copy of this collection.", "To hopper (Public/" + CAROL + ")"])),
+     _item(_PUB, 'nftItemTo.text = "hopper"; root.nftCheckName("hopper"); root.nftOpenSheet("Sending Harbour at dawn (copy)", "%s", { action: "send", from: "%s", to: "hopper" }, null, root.nftItemRow)' % (NFT_P, _PUB))),
+    ("nft-item-gone", dict(NFT_BASE), 'root.openNftItem({ program: "%s", account: "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg", definition: "%s" })' % (NFT_P, NFT_ART)),
+]:
+    MOCKS[key] = {"nft": mock, "reverse": {"CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk": "turing"}}
+    SCENARIOS[key] = OPEN_NFT % ("Qt.callLater(function() { " + then + " })")
+    HEIGHTS[key] = 2400
 # Settings, Connected apps, with NFT capabilities (one row each, with Remove).
 MOCKS["settings-nft-grants"] = MOCKS["collectibles-passes"]
 SCENARIOS["settings-nft-grants"] = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; root.section = "settings"; root.loadAppGrants() })'
@@ -1598,6 +1626,20 @@ for _name, _js, _mock in [
     SCENARIOS[_name] = _js
     MOCKS[_name] = _mock
     HEIGHTS[_name] = 1700
+
+# The item page of an LNS name card: drawn here, its fields read through nft_collection, no
+# Send, Print or Burn (it moves only with its name).
+_DEED_P = _DEED["nft_program"]
+_DEED_NFT = {"programs": [{"program": _DEED_P, "label": "Logos NFT program (LNS name cards)", "added": 0, "built_in": True, "registry": {"registry": False}}],
+             "read": [{"program": _DEED_P, "label": "Logos NFT program (LNS name cards)", "registry": {"registry": False}, "holdings": [], "pending": [], "collections": []}],
+             "info": {_DEED["definition"]: {"definition": _DEED["definition"], "name": "LNS name deed", "printable_supply": "1", "standard": "Simple", "uri": "https://nameswallet.app/lns/deed.png", "creators": "LNS registry"}}}
+for _name, _js, _mock in [
+    ("nft-item-deed", _ON04 % 'root.openCollectibles(); root.againAfter(150, function() { root.openNftItem({ deed: "turing" }) })', {"names_network": "lez-0.4", "deeds": {"turing": _DEED}, "nft": _DEED_NFT}),
+    ("nft-item-deed-gone", _ON04 % 'root.openCollectibles(); root.againAfter(150, function() { root.openNftItem({ deed: "linus" }) })', {"names_network": "lez-0.4", "deeds": {"turing": _DEED}, "nft": _DEED_NFT}),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+    HEIGHTS[_name] = 2200
 
 
 def main():

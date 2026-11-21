@@ -322,3 +322,142 @@ export function capabilityTitle(grant) {
   if (g.capability === "membership_proof") return "Membership proofs: it learns a pass id, nothing about your accounts"
   return String(g.capability || "")
 }
+
+// ── The item page: one NFT, tapped in Collectibles ──────────────────────
+
+/// A name past its grace period counts as not registered (the names tool's `lookup`,
+/// registry.rs GRACE_MS: 30 days).
+export const GRACE_MS = 30 * 24 * 60 * 60 * 1000
+
+/// One NFT as the item page shows it, read again from the last holdings read on every refresh:
+/// `item` is `{program, account, definition}` (an unreadable one has definition ""). null when
+/// the account no longer holds it (sent, burned) or the program is no longer listed.
+export function itemOf(programs, item) {
+  if (!item) return null
+  const entry = (programs || []).find((p) => p.program === item.program)
+  if (!entry) return null
+  const row = (entry.holdings || []).find((r) => r.account === item.account && (r.definition || "") === (item.definition || ""))
+  if (!row || (!row.holds && row.state !== "unreadable")) return null
+  return {
+    program: entry.program, programLabel: entry.label || idShown(entry.program), registry: entry.registry || null,
+    account: row.account, isPrivate: row.account_kind === "private", definition: row.definition || "",
+    state: row.state, print_balance: row.print_balance, collection: row.collection || null, unreadable: row.unreadable,
+  }
+}
+
+/// The LNS name whose card (deed) this is, or "": `deeds` is the app's nameDeeds (name ->
+/// {deed: {definition, nft_program}}).
+export function deedNameOf(deeds, program, definition) {
+  if (!definition) return ""
+  for (const name of Object.keys(deeds || {})) {
+    const d = deeds[name] && deeds[name].deed
+    if (d && d.definition === definition && (!d.nft_program || d.nft_program === program)) return name
+  }
+  return ""
+}
+
+/// Whether a holding is an LNS name card: one of the names' cards, or a collection called
+/// "LNS name deed" under a built-in program (DEEDS.md: its metadata is fixed). A card moves only
+/// with its name: the NFT program refuses its holder's own Transfer or Burn.
+export function isDeed(deeds, listed, program, definition, collection) {
+  if (deedNameOf(deeds, program, definition) !== "") return true
+  const builtIn = (listed || []).some((p) => p.program === program && p.built_in)
+  return builtIn && !!collection && collection.name === "LNS name deed"
+}
+
+/// The collection's description, if its record carries one; "" otherwise (the reference
+/// program stores none today, so the page leaves the line out rather than invent one).
+export function itemDescription(collection) {
+  const text = collection && typeof collection.description === "string" ? collection.description.trim() : ""
+  return text
+}
+
+const KNOWN_FIELDS = ["definition", "name", "printable_supply", "standard", "uri", "creators", "description", "readable"]
+
+/// Every field of the collection, as rows: the four the program stores (as the card shows them),
+/// then any other the read carries, by its own name.
+export function itemFields(collection) {
+  const rows = metadataRows(collection)
+  if (!collection) return rows
+  for (const key of Object.keys(collection)) {
+    if (KNOWN_FIELDS.indexOf(key) >= 0) continue
+    const value = collection[key]
+    if (value !== null && typeof value === "object") continue
+    const label = key.replace(/_/g, " ")
+    rows.push({ label: label.charAt(0).toUpperCase() + label.substr(1), value: value === null || value === undefined || value === "" ? "none given" : String(value) })
+  }
+  return rows
+}
+
+/// The edition: master or copy, print rights, and what the supply allows. No serial exists.
+export function editionLines(row) {
+  if (!row) return []
+  if (row.state === "unreadable") return ["Its state can't be read (" + (row.unreadable || "unknown") + ")."]
+  const lines = [tokenLine(row)]
+  const supply = Number(row.collection && row.collection.printable_supply)
+  if (Number.isSafeInteger(supply) && supply >= 1)
+    lines.push(supply === 1 ? "The collection has one NFT: the master, and no copies." : "The collection allows the master and up to " + (supply - 1) + (supply === 2 ? " copy." : " copies."))
+  lines.push("Copies of one collection are identical: there is no serial number.")
+  return lines
+}
+
+/// What the Program Registry says about the program, in the words of the programs list.
+export function registryLine(registry) {
+  if (!registry || !registry.registry) return "The Program Registry isn't installed: its source is unknown."
+  if (registry.stale) return "Changed: it runs other code than was registered."
+  if (registry.verified) return "Source verified (Program Registry)"
+  if (registry.kind === "unregistered") return "Not in the Program Registry: its source is unknown."
+  return "Source not verified (Program Registry)"
+}
+
+/// The owner as the page shows it: its LNS name, else the shortened account.
+export function ownerShown(account, name) {
+  return name ? name : accountShown(account)
+}
+
+/// The LNS name typed as a Send destination (bare, lower case), or "" when what is typed is an
+/// account, receiving keys, or not usable yet.
+export function toName(text) {
+  const typed = String(text || "").trim()
+  if (typed === "" || toProblem(typed) !== "" || /^(Public|Private)\//.test(typed) || typed.indexOf(":") >= 0) return ""
+  return typed.toLowerCase().replace(/\.lez$/, "")
+}
+
+/// One step of checking a name for Send, from `resolve`'s answer `record` for `asked`:
+/// `{follow}` (a forward to read next; the names tool follows one) or the outcome
+/// `{state: "ok" | "not_registered" | "no_account", name, account, via}`. `typed` is the name
+/// first typed; `via` is set when it forwarded to `asked`.
+export function nameStep(typed, asked, record, now) {
+  const via = typed !== asked ? typed : ""
+  if (!record || (!record.never && record.expires !== null && record.expires !== undefined && (now || Date.now()) >= Number(record.expires) + GRACE_MS))
+    return { state: "not_registered", name: asked, account: "", via: via }
+  if (!via && typeof record.forward === "string" && record.forward !== "") return { follow: record.forward }
+  const account = typeof record.account === "string" ? record.account.replace(/^Public\//, "") : ""
+  return account !== "" ? { state: "ok", name: asked, account: account, via: via } : { state: "no_account", name: asked, account: "", via: via }
+}
+
+/// The line under the Send field for a name: `{text, kind}` (kind "done", "problem" or
+/// "working"), or null when no name is typed. `check` is the last outcome, kept with the name
+/// it was for (`check.typed`); an outcome for another name is never shown.
+export function namePreview(typedName, check) {
+  if (!typedName) return null
+  if (!check || check.typed !== typedName || check.state === "checking") return { text: "Checking " + typedName + "…", kind: "working" }
+  const via = check.via ? " (" + check.via + " points to " + check.name + ")" : ""
+  if (check.state === "ok") return { text: "Sends to " + check.name + " · " + idShown(check.account) + via, kind: "done" }
+  if (check.state === "not_registered") return { text: check.via ? check.via + " points to " + check.name + ", which nobody holds." : "Nobody holds " + typedName + ". Check the spelling.", kind: "problem" }
+  if (check.state === "no_account") return { text: check.name + " has no public account" + via + ", so it can't take an NFT by name. Ask for an account (Public/…) or receiving keys.", kind: "problem" }
+  return { text: "Couldn't check " + typedName + ": " + (check.why || "the wallet didn't answer") + ". Try again in a moment.", kind: "problem" }
+}
+
+/// Why Send (or Print) on the item page can't be pressed yet, or "".
+export function itemSendWhy(text, check, theirKeys) {
+  const typed = String(text || "").trim()
+  if (typed === "") return "Enter where it goes first."
+  const problem = toProblem(typed)
+  if (problem !== "") return problem
+  if (toTheirKeys(typed) && !theirKeys) return "Tick the box above to send to receiving keys."
+  const name = toName(typed)
+  if (name === "") return ""
+  const preview = namePreview(name, check)
+  return preview.kind === "done" ? "" : preview.kind === "working" ? "Checking the name…" : "This name can't take it: see above."
+}
