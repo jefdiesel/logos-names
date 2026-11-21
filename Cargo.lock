@@ -5703,7 +5703,7 @@ dependencies = [
 
 [[package]]
 name = "names_cli"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

@@ -240,22 +240,83 @@ pub fn label_fields(label: Option<&Value>) -> Value {
     })
 }
 
+/// The network clock's account (LEZ 0.4 `clock_core::CLOCK_PROGRAM_ACCOUNT_ID`): the one
+/// account of another program a call may read (Names 0.18). The chain refuses every user
+/// transaction that writes it, so a call can only read it.
+pub const CLOCK_ACCOUNT: AccountId = *b"/LEZ/ClockProgramAccount/0000000";
+/// The clock program (`clock_core::clock_account_id()`, the builtin named `clock`:
+/// SHA-256 of `/LEE-BuiltinProgram/v1/AccountId` and `clock`).
+pub const CLOCK_PROGRAM: AccountId = [
+    0x19, 0x58, 0xa0, 0xfc, 0x62, 0x32, 0xa7, 0xc7, 0xe6, 0xde, 0xae, 0x1a, 0xcd, 0x8d, 0x6c, 0x42, 0xa3, 0x2c, 0xbe, 0x00, 0x13, 0x15, 0xd5,
+    0x1c, 0x18, 0x2f, 0xee, 0x45, 0xe0, 0xb0, 0x32, 0x9c,
+];
+
 /// One account a call reaches besides the signer's own actor: who it is (an
 /// ID, or `signer` for the account the person chooses), the seed when it is
-/// one of the program's own accounts, and whether it is used for its LEZ
-/// balance rather than for the program's data.
+/// one of the program's own accounts, whether it is used for its LEZ
+/// balance rather than for the program's data, and whether it is another
+/// program's account the call only reads (`reads`: the network clock, the
+/// clock program's data on its account; never signed, never its LEZ).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reached {
     pub account: String,
     pub seed: Option<[u8; 32]>,
     pub balance: bool,
+    pub reads: bool,
+}
+
+impl Reached {
+    /// The program whose state on `account` the call reaches: the native token's for a balance,
+    /// the clock's for a read of the clock, else the call's own program.
+    pub fn program(&self, call_program: &AccountId) -> AccountId {
+        if self.reads {
+            CLOCK_PROGRAM
+        } else if self.balance {
+            registry::NATIVE_TOKEN
+        } else {
+            *call_program
+        }
+    }
+}
+
+/// `{"account": <id>, "program": <id>}`: another program's account. Only the network clock is
+/// taken, and only as that: no seed, no balance, not the signer.
+fn foreign(fields: &Map<String, Value>, program: &AccountId, call_program: &AccountId) -> Result<Reached, String> {
+    if program == call_program {
+        return Err("\"program\" names another program; for this program's data on an account, give the account's ID alone".to_owned());
+    }
+    if *program == registry::NATIVE_TOKEN {
+        return Err("for an account's LEZ, write {\"account\": <id>, \"balance\": true}".to_owned());
+    }
+    if fields.get("seed").is_some() || fields.get("balance").and_then(Value::as_bool) == Some(true) {
+        return Err("another program's account is only read: give it as {\"account\", \"program\"}, with no seed or balance".to_owned());
+    }
+    let account = fields.get("account").and_then(Value::as_str).map(str::trim).ok_or("another program's account needs its \"account\"")?;
+    let bare = account.strip_prefix("Public/").unwrap_or(account);
+    let id = if bare == SIGNER { None } else { registry::parse_account(bare).ok() };
+    if *program != CLOCK_PROGRAM || id != Some(CLOCK_ACCOUNT) {
+        return Err(format!(
+            "a call reads only one account of another program: the network clock, {{\"account\": \"{}\", \"program\": \"{}\"}}",
+            registry::account_text(&CLOCK_ACCOUNT),
+            registry::account_text(&CLOCK_PROGRAM)
+        ));
+    }
+    Ok(Reached { account: registry::account_text(&CLOCK_ACCOUNT), seed: None, balance: false, reads: true })
 }
 
 /// One entry of a call's `accounts_json`: an ID (the program's data on that
-/// account), or `{"account", "seed", "balance"}`. The account the person
-/// chooses is written `signer`, and only for its balance: its data for the
-/// program is always the call's first actor.
+/// account), `{"account", "seed", "balance"}`, or `{"account", "program"}`
+/// (another program's account, read: the network clock only). The account the
+/// person chooses is written `signer`, and only for its balance: its data for
+/// the program is always the call's first actor.
 fn reached(entry: &Value, program: &AccountId) -> Result<Reached, String> {
+    if let Value::Object(fields) = entry {
+        if let Some(other) = fields.get("program") {
+            let text = other.as_str().map(str::trim).ok_or("\"program\" is a program ID")?;
+            let other = registry::parse_account(text.strip_prefix("Public/").unwrap_or(text))?;
+            return foreign(fields, &other, program);
+        }
+    }
     let (account, seed, balance) = match entry {
         Value::String(text) => (Some(text.as_str()), None, false),
         Value::Object(fields) => (
@@ -263,7 +324,7 @@ fn reached(entry: &Value, program: &AccountId) -> Result<Reached, String> {
             fields.get("seed").and_then(Value::as_str),
             fields.get("balance").and_then(Value::as_bool).unwrap_or(false),
         ),
-        _ => return Err("each account is an ID or {\"account\", \"seed\", \"balance\"}".to_owned()),
+        _ => return Err("each account is an ID, {\"account\", \"seed\", \"balance\"} or {\"account\", \"program\"}".to_owned()),
     };
     let seed = match seed {
         Some(hex) => Some(
@@ -290,7 +351,7 @@ fn reached(entry: &Value, program: &AccountId) -> Result<Reached, String> {
         (None, Some(seed)) => registry::account_text(&registry::pda(program, &seed)),
         (None, None) => return Err("each account object needs \"account\" or \"seed\"".to_owned()),
     };
-    Ok(Reached { account, seed, balance })
+    Ok(Reached { account, seed, balance, reads: false })
 }
 
 /// A request to run `program` with the message `instruction_hex` (the bytes
@@ -347,6 +408,10 @@ pub fn call_request(
         "It can't move the LEZ in the account you choose; only the fee is paid from it.".to_owned()
     });
     for reached in accounts.iter().filter(|reached| reached.account != SIGNER) {
+        if reached.reads {
+            effects.push("Reads the network clock (the time of the last block). It can't change the clock.".to_owned());
+            continue;
+        }
         effects.push(match (reached.seed.is_some(), reached.balance) {
             (true, true) => format!("Uses the LEZ balance of {named}'s own account Public/{}.", reached.account),
             (true, false) => format!("Reads or writes {named}'s own account Public/{} (made if it is new).", reached.account),
@@ -368,7 +433,13 @@ pub fn call_request(
         Value::from(
             accounts
                 .iter()
-                .map(|reached| json!({ "account": reached.account, "seed": reached.seed.map(|seed| registry::hex(&seed)), "balance": reached.balance }))
+                .map(|reached| {
+                    let mut entry = json!({ "account": reached.account, "seed": reached.seed.map(|seed| registry::hex(&seed)), "balance": reached.balance });
+                    if reached.reads {
+                        entry["program"] = json!(registry::account_text(&CLOCK_PROGRAM));
+                    }
+                    entry
+                })
                 .collect::<Vec<_>>(),
         ),
     );
@@ -396,7 +467,14 @@ pub fn stored_reached(request: &Value) -> Result<Vec<Reached>, String> {
                 ),
                 None => None,
             };
-            Ok(Reached { account: entry["account"].as_str().unwrap_or_default().to_owned(), seed, balance: entry["balance"] == true })
+            let account = entry["account"].as_str().unwrap_or_default().to_owned();
+            // A stored read of another program's account is taken back only as the clock's.
+            let reads = match entry["program"].as_str() {
+                None => false,
+                Some(program) if program == registry::account_text(&CLOCK_PROGRAM) && account == registry::account_text(&CLOCK_ACCOUNT) && seed.is_none() && entry["balance"] != true => true,
+                Some(_) => return Err("a stored call reads an account it may not".to_owned()),
+            };
+            Ok(Reached { account, seed, balance: entry["balance"] == true, reads })
         })
         .collect()
 }
@@ -837,6 +915,49 @@ mod tests {
         let back = stored_reached(&made).unwrap();
         assert_eq!(back[1].seed, Some(seed));
         assert_eq!((back[2].account.as_str(), back[2].balance), (SIGNER, true));
+    }
+
+    /// Names 0.18: a call may read the network clock, another program's account, and only that.
+    #[test]
+    fn a_call_reads_the_network_clock_and_no_other_program_s_account() {
+        let clock = registry::account_text(&CLOCK_ACCOUNT);
+        let clock_program = registry::account_text(&CLOCK_PROGRAM);
+        // The ids the LEZ 0.4 rc3 clock has (`clock_core`), as the chain names them.
+        assert_eq!((clock.as_str(), clock_program.as_str()), ("4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT", "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z"));
+        let seed = [9_u8; 32];
+        let read = format!("{{\"account\": \"{clock}\", \"program\": \"{clock_program}\"}}");
+        let accounts = format!("[{{\"seed\": \"{}\"}}, {{\"account\": \"signer\", \"balance\": true}}, {read}]", registry::hex(&seed));
+        let made = call_request("app", ONE, &accounts, "01", "Create a schedule", None, None, 9).unwrap();
+        assert_eq!(made["accounts"][2], json!({ "account": clock, "seed": null, "balance": false, "program": clock_program }));
+        let effects: Vec<&str> = made["effects"].as_array().unwrap().iter().map(|e| e.as_str().unwrap()).collect();
+        assert_eq!(effects.last().copied(), Some("Reads the network clock (the time of the last block). It can't change the clock."), "{effects:?}");
+        assert!(!made["effects"].to_string().contains(&format!("data on Public/{clock}")), "never as the program's own data");
+        // Read back as the clock, with its program; nothing else is taken back as a read.
+        let back = stored_reached(&made).unwrap();
+        assert!(back[2].reads && !back[2].balance && back[2].seed.is_none());
+        let program = registry::parse_account(ONE).unwrap();
+        assert_eq!((back[2].program(&program), back[1].program(&program), back[0].program(&program)), (CLOCK_PROGRAM, registry::NATIVE_TOKEN, program));
+        let mut forged = made.clone();
+        forged["accounts"][0]["program"] = json!(clock_program);
+        assert!(stored_reached(&forged).is_err(), "a stored seed entry can't be turned into a read");
+        let mut forged = made.clone();
+        forged["accounts"][2]["account"] = json!(TWO);
+        assert!(stored_reached(&forged).is_err(), "nor another account read under the clock");
+        // Anything else of another program is refused, in plain words.
+        let native = registry::account_text(&registry::NATIVE_TOKEN);
+        for (entry, says) in [
+            (format!("{{\"account\": \"{TWO}\", \"program\": \"{clock_program}\"}}"), "only one account of another program"),
+            (format!("{{\"account\": \"{clock}\", \"program\": \"{TWO}\"}}"), "only one account of another program"),
+            (format!("{{\"account\": \"signer\", \"program\": \"{clock_program}\"}}"), "only one account of another program"),
+            (format!("{{\"account\": \"{clock}\", \"program\": \"{clock_program}\", \"balance\": true}}"), "only read"),
+            (format!("{{\"account\": \"{clock}\", \"program\": \"{clock_program}\", \"seed\": \"{}\"}}", "11".repeat(32)), "only read"),
+            (format!("{{\"account\": \"{TWO}\", \"program\": \"{native}\"}}"), "balance\": true"),
+            (format!("{{\"account\": \"{TWO}\", \"program\": \"{ONE}\"}}"), "ID alone"),
+            (format!("{{\"account\": \"{clock}\", \"program\": 5}}"), "program ID"),
+        ] {
+            let refused = call_request("app", ONE, &format!("[{entry}]"), "01", "", None, None, 9).unwrap_err();
+            assert!(refused.contains(says), "{entry}: {refused}");
+        }
     }
 
     #[test]

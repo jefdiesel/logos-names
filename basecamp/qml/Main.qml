@@ -121,9 +121,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.17.0"
+    readonly property string neededModule: "0.18.0"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.17.0"
+    readonly property string appVersion: "0.18.0"
     property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
     property var moduleFeatures: []    // get_config features: what this build of the names module can do
     property real machineMemory: 0     // get_config memory_bytes: this computer's memory (0: unknown)
@@ -14745,7 +14745,7 @@ Item {
                         visible: root.whatsNewShown
                         Layout.fillWidth: true
                         spacing: 6
-                        Part { text: "What's new in Names 0.17.0" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
+                        Part { text: "What's new in Names 0.18.0" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
                         Repeater {
                             model: Logic.WHATS_NEW
                             Hint { required property var modelData; color: root.ink; text: "· " + modelData }

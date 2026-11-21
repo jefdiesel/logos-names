@@ -501,6 +501,15 @@ impl Client {
         if deeds {
             programs.push((names_core::deed::NFT_PROGRAM, self.nft_program().await?));
         }
+        // A program call may read the network clock (Names 0.18, PROVIDER-SDK.md "Program
+        // calls"): another program's account, never signed. The chain refuses any user
+        // transaction that writes it, so the call only reads it. Trying the call first runs the
+        // clock program too, so its bytecode is read from the chain like the call's own (a bare
+        // build tries nothing, and sends the call with its measured cap as any other).
+        if reads_clock(&change.mentions)? && crate::prover::can_run() {
+            let clock = clock_core::clock_account_id();
+            programs.push((clock, self.program_at(clock, "LOGOS_NAMES_CLOCK_ELF", "lez-clock", "the network clock").await?));
+        }
         let cycles = cycles + if deeds { crate::DEED_CYCLES } else { 0 };
         self.transact(mentions, message, programs, spent, cycles).await
     }
@@ -518,6 +527,30 @@ impl Client {
         };
         Ok(identity.select_program_actor_state(program))
     }
+}
+
+/// Whether a change reads the network clock: the clock's own actor, `(CLOCK_PROGRAM_ACCOUNT_ID,
+/// clock program)`. It must be just that: never signed, no seed. Any other mention of the clock
+/// program or of its account is refused, so a call never signs for the clock or reaches it any
+/// other way.
+fn reads_clock(mentions: &[Mention]) -> Result<bool> {
+    let (clock_account, clock_program) = (clock_core::CLOCK_PROGRAM_ACCOUNT_ID, clock_core::clock_account_id());
+    let mut reads = false;
+    for mention in mentions {
+        let account = parse_account(&mention.account).map_err(|error| anyhow!(error))?;
+        let program = parse_account(&mention.program).map_err(|error| anyhow!(error))?;
+        if account != clock_account && program != clock_program {
+            continue;
+        }
+        if account != clock_account || program != clock_program {
+            bail!("a call reaches the network clock only as the clock's own account; nothing was sent");
+        }
+        if mention.signs || mention.seed.is_some() {
+            bail!("a call only reads the network clock: it never signs for it; nothing was sent");
+        }
+        reads = true;
+    }
+    Ok(reads)
 }
 
 /// A nickname as given, trimmed: at most [`MAX_LABEL`] characters, none of them control
@@ -583,4 +616,29 @@ pub async fn restore(accounts: u32, overrides: Option<WalletConfigOverrides>) ->
         })
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mention(account: AccountId, program: AccountId, seed: Option<&str>, signs: bool) -> Mention {
+        Mention { account: account.to_string(), program: program.to_string(), seed: seed.map(str::to_owned), signs }
+    }
+
+    /// Only the clock's own actor, unsigned and without a seed, is a read of the clock; anything
+    /// else that names the clock's account or program is refused.
+    #[test]
+    fn a_call_reads_the_clock_only_as_its_own_unsigned_actor() {
+        let (clock, program) = (clock_core::CLOCK_PROGRAM_ACCOUNT_ID, clock_core::clock_account_id());
+        let other = AccountId::new([7; 32]);
+        assert!(!reads_clock(&[mention(other, other, None, true)]).unwrap(), "no clock");
+        assert!(reads_clock(&[mention(other, other, None, true), mention(clock, program, None, false)]).unwrap());
+        assert!(reads_clock(&[mention(clock, program, None, true)]).unwrap_err().to_string().contains("never signs"));
+        assert!(reads_clock(&[mention(clock, program, Some(&"11".repeat(32)), false)]).is_err());
+        assert!(reads_clock(&[mention(other, program, None, false)]).unwrap_err().to_string().contains("clock's own account"));
+        assert!(reads_clock(&[mention(clock, other, None, false)]).unwrap_err().to_string().contains("clock's own account"));
+        let native = lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID;
+        assert!(reads_clock(&[mention(clock, native, None, false)]).is_err(), "the clock account's LEZ balance");
+    }
 }

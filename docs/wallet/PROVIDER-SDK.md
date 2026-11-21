@@ -201,7 +201,23 @@ Times are in milliseconds. A decided request stays readable for a day.
   - `{"account": "<id>", "balance": true}`: that account's LEZ balance rather
     than your program's data (it may be combined with `seed`);
   - `{"account": "signer", "balance": true}`: the chosen account's LEZ. Only
-    with this entry can your program move the person's LEZ.
+    with this entry can your program move the person's LEZ. (Don't write the
+    chosen account's own ID for its balance: the wallet refuses to sign that,
+    since the prompt said the call can't move its LEZ.)
+  - `{"account": "<id>", "program": "<program id>"}` (Names 0.18): another
+    program's account, which the call only reads. Today that is one account,
+    the network clock, which a program reads to know the time:
+
+    ```json
+    { "account": "4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT",
+      "program": "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z" }
+    ```
+
+    It is never signed and its LEZ is never reached, and the chain refuses any
+    user transaction that writes it, so the call can only read it. Any other
+    program's account is refused, as is this entry with `seed` or `balance`.
+    `get_config` lists the feature `call_reads_clock` in a module that takes
+    it.
 - `summary`: what your app says the call does, at most 280 characters. The
   prompt shows it as your own words, unchecked.
 
@@ -213,7 +229,9 @@ worked out from what it reaches:
   listed `signer` for its balance. Otherwise the prompt says that the call
   can't move that account's LEZ, and only the fee is paid from it.
 - Each other account is described as data, as your program's own account
-  (made if it is new), or as a LEZ balance.
+  (made if it is new), or as a LEZ balance. The clock is described as
+  "Reads the network clock (the time of the last block). It can't change the
+  clock."
 
 The prompt shows the program's label and source-verification status from the
 Program Registry (`program_registry`, `program_label`). When the Program
@@ -232,7 +250,10 @@ chosen public account, sends the call and waits for its block. A call that
 was included but reverted counts as failed. The gas is sized only at this
 point, so the prompt shows no number for it. The answer to `approve_request`
 waits for the block, up to two minutes. The call can only reach your
-program: the CLI loads one program's bytecode per call.
+program, and the network clock when you listed it: the CLI loads your
+program's bytecode, and the clock's when the call reads it (both from the
+chain). A call that reads the clock needs the names CLI 0.18 or later; the
+module refuses to hand it to an older one, with nothing sent.
 
 ### Token transfers
 

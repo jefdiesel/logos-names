@@ -1125,7 +1125,11 @@ pub trait NamesModule: Send + 'static {
     /// the program's own accounts (and lets the call create it), `balance:
     /// true` means its LEZ balance rather than the program's data, and
     /// `"account": "signer"` (with `balance: true`) is the chosen account's
-    /// LEZ, which only then the program may move.
+    /// LEZ, which only then the program may move. Since 0.18, one entry may
+    /// be another program's account, read only: the network clock,
+    /// `{"account": "4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT",
+    /// "program": "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z"}` (never
+    /// signed; the chain refuses any user transaction that writes it).
     /// `summary` (at most 280 characters) is shown as the app's own words;
     /// the prompt also says what the call can do and whether the program's
     /// source is verified (from `program_registry`, when installed).
@@ -1764,13 +1768,15 @@ const NAMES_APP: &str = "names_ui";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.17.0";
+const MODULE_VERSION: &str = "0.18.0";
 /// get_config's `features`: what an app may need beyond the version (`reveal_name`;
 /// `request_access_with` and its `account_hint`; `grant_add_account`: a hint for an account
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
 /// `relayed_bridge_burn`: `propose_relayed_call` signs a burn of one denomination to a bridge whose
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
-const MODULE_FEATURES: [&str; 12] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom"];
+/// `call_reads_clock` (0.18): `propose_call` takes the network clock as a read-only account,
+/// `{"account": <clock account>, "program": <clock program>}`.
+const MODULE_FEATURES: [&str; 13] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -1783,6 +1789,20 @@ const PRIVATE_OFF_04: &str = "on LEZ 0.4 names are public only: private payments
 /// `build_commit.txt` in its copy of the source; a source checkout says `dev`. The line is kept
 /// whole in the library, so the install scripts can read it from the installed file.
 const BUILD_COMMIT_LINE: &str = include_str!("build_commit.txt");
+
+/// Whether a names CLI that says `line` (`names 0.18.0 (LEZ v0.4.0-rc3)`) can send a program call
+/// that reads the network clock: 0.18 or later. An unreadable line is taken as able: the CLI
+/// still tries the call before it sends it.
+fn cli_reads_clock(line: &str) -> bool {
+    let Some(version) = line.trim().strip_prefix("names ").and_then(|rest| rest.split_whitespace().next()) else {
+        return true;
+    };
+    let mut parts = version.split('.').map(|part| part.parse::<u64>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor) >= (0, 18),
+        _ => true,
+    }
+}
 
 fn build_commit() -> &'static str {
     BUILD_COMMIT_LINE.trim().strip_prefix("names-build-commit=").unwrap_or("dev")
@@ -9078,18 +9098,40 @@ impl Names {
             return Err("this request has nothing to send".to_owned());
         }
         let mut mentions = vec![Mention { account: signer, program, seed: None, signs: true }];
+        let mut reads_clock = false;
         for reached in provider::stored_reached(request)? {
             let account = if reached.account == provider::SIGNER { signer } else { registry::parse_account(&reached.account)? };
+            // Another program's account (the network clock) is only read: never signed, and never
+            // the chosen account, whose signature would authorize that program on it.
+            if reached.reads && account == signer {
+                return Err("this call reads another program's data on the account you chose; nothing was sent".to_owned());
+            }
+            // The chosen account's LEZ is given to a program only as `signer`, which the prompt
+            // says: written as its ID it would be given too (the account signs, and LEZ 0.4
+            // authorizes by account), under a prompt that said the call can't move it.
+            if reached.balance && reached.account != provider::SIGNER && account == signer {
+                return Err("this call lists the account you chose by its ID for its LEZ, which the prompt didn't say it may move; reject it, and the app can ask again with \"signer\". Nothing was sent.".to_owned());
+            }
+            reads_clock |= reached.reads;
             mentions.push(Mention {
                 account,
-                program: if reached.balance { registry::NATIVE_TOKEN } else { program },
+                program: reached.program(&program),
                 seed: reached.seed,
-                signs: account == signer && reached.seed.is_none(),
+                signs: !reached.reads && account == signer && reached.seed.is_none(),
             });
         }
         let change = Change { message, mentions, signer, needs: 0, extra: Value::Null };
         let mut setup = self.cli_setup()?;
         setup.wallet_ready()?;
+        if reads_clock {
+            // A CLI before 0.18 can't try a call that reads the clock, so it would refuse it
+            // with a bare "Program violated execution rules"; say what to do instead.
+            if let Ok(line) = self.cli_line(&setup.program) {
+                if !cli_reads_clock(&line) {
+                    return Err(format!("this call reads the network clock, which needs the names tool 0.18 or later (this one says {line}); nothing was sent"));
+                }
+            }
+        }
         setup.registry = Some(registry::account_text(&program));
         wallet::send(&setup, &change)
     }
@@ -14417,6 +14459,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// For the end-to-end check on a real chain (ignored; run by hand): the change this module
+    /// hands `names module send` for an app's call. `NAMES_E2E_CALL` is a file with the app's
+    /// `propose_call` arguments (`program`, `accounts_json`, `instruction_hex`, `summary`, `caller`,
+    /// as Vest's `create_call` answers them), approved with `caller`; the prompt's lines and the
+    /// change are written to `NAMES_E2E_OUT` (a folder), to send with the real CLI and wallet.
+    #[test]
+    #[ignore]
+    fn e2e_the_change_for_an_app_s_call() {
+        let call: Value = serde_json::from_str(&std::fs::read_to_string(std::env::var("NAMES_E2E_CALL").unwrap()).unwrap()).unwrap();
+        let out = std::path::PathBuf::from(std::env::var("NAMES_E2E_OUT").unwrap());
+        let caller = call["caller"].as_str().unwrap().to_owned();
+        let bare = caller.trim_start_matches("Public/");
+        let tail = format!(
+            "case \"$*\" in\n\
+             *--version*) echo 'names 0.18.0 (LEZ v0.4.0-rc3)' ;;\n\
+             *\"module accounts\"*) echo '{{\"public\":[\"{bare}\"],\"private\":[]}}' ;;\n\
+             *\"module send\"*) printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"; cat > \"$(dirname \"$0\")/sent.json\"; echo 'submitted feedbeef' ;;\n\
+             esac"
+        );
+        let (mut names, dir) = with_wallet("e2e-call", &tail);
+        connect(&mut names, "vesting_ui", &caller);
+        as_caller(app("vesting_ui"));
+        let asked = parsed(&names.propose_call(
+            call["program"].as_str().unwrap().into(),
+            call["accounts_json"].as_str().unwrap().into(),
+            call["instruction_hex"].as_str().unwrap().into(),
+            call["summary"].as_str().unwrap_or_default().into(),
+        ));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let shown = parsed(&names.pending_requests())["value"][0].clone();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("prompt.json"), serde_json::to_string_pretty(&json!({ "effects": shown["effects"], "warnings": shown["warnings"], "app_summary": shown["app_summary"] })).unwrap()).unwrap();
+        let mut sent = Value::Null;
+        for _ in 0..100 {
+            if names.cli_line(&std::path::PathBuf::from(names.cli.clone().unwrap())).is_ok() {
+                sent = approve(&mut names, &id, &caller);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(sent["value"]["state"], "done", "{sent}");
+        std::fs::copy(dir.join("sent.json"), out.join("change.json")).unwrap();
+        std::fs::copy(dir.join("argv"), out.join("argv")).unwrap();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Names 0.18: a call that reads the network clock reaches the CLI with the clock's own actor,
+    /// unsigned, and only through a CLI that can try it (0.18 or later).
+    #[test]
+    fn a_program_call_that_reads_the_clock_goes_to_the_cli_unsigned() {
+        let tail = |version: &str| {
+            format!(
+                "case \"$*\" in\n\
+                 *--version*) echo 'names {version} (LEZ v0.4.0-rc3)' ;;\n\
+                 *\"module accounts\"*) echo '{{\"public\":[\"{PUBLIC}\",\"{OTHER}\"],\"private\":[]}}' ;;\n\
+                 *\"module send\"*) cat > \"$(dirname \"$0\")/sent.json\"; echo 'submitted feedbeef'; echo 'applied in block 4' ;;\n\
+                 esac"
+            )
+        };
+        for (version, sends) in [("0.18.0", true), ("0.17.0", false)] {
+            let (mut names, dir) = with_wallet(&format!("provider-clock-{version}"), &tail(version));
+            let program = registry::account_text(&[5; 32]);
+            let seed = [9_u8; 32];
+            let schedule = registry::account_text(&registry::pda(&[5; 32], &seed));
+            let (clock, clock_program) = (registry::account_text(&provider::CLOCK_ACCOUNT), registry::account_text(&provider::CLOCK_PROGRAM));
+            connect(&mut names, "vest_ui", &format!("Public/{OTHER}"));
+            as_caller(app("vest_ui"));
+            let accounts = json!([
+                { "account": "signer", "balance": true },
+                { "seed": registry::hex(&seed) },
+                { "seed": registry::hex(&seed), "balance": true },
+                { "account": clock, "program": clock_program },
+            ])
+            .to_string();
+            let asked = parsed(&names.propose_call(program.clone(), accounts, "00".into(), "Create a schedule".into()))["value"].clone();
+            assert_eq!(asked["state"], "pending", "{asked}");
+            let id = asked["request"].as_str().unwrap().to_owned();
+            as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+            let shown = parsed(&names.pending_requests())["value"][0].clone();
+            assert!(shown["effects"].to_string().contains("Reads the network clock"), "{shown}");
+            // The CLI's version is read on a thread of its own: asked again until it is known.
+            let mut sent = Value::Null;
+            for _ in 0..100 {
+                names.cli_lines.lock().unwrap().clear();
+                let _ = names.cli_line(&std::path::PathBuf::from(names.cli.clone().unwrap()));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                if names.cli_line(&std::path::PathBuf::from(names.cli.clone().unwrap())).is_ok() {
+                    sent = approve(&mut names, &id, &format!("Public/{OTHER}"));
+                    break;
+                }
+            }
+            if sends {
+                assert_eq!(sent["value"]["state"], "done", "{sent}");
+                let change: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("sent.json")).unwrap()).unwrap();
+                let native = registry::account_text(&registry::NATIVE_TOKEN);
+                assert_eq!(change["mentions"], json!([
+                    { "account": OTHER, "program": program, "seed": null, "signs": true },
+                    { "account": OTHER, "program": native, "seed": null, "signs": true },
+                    { "account": schedule, "program": program, "seed": registry::hex(&seed), "signs": false },
+                    { "account": schedule, "program": native, "seed": registry::hex(&seed), "signs": false },
+                    { "account": clock, "program": clock_program, "seed": null, "signs": false },
+                ]), "{change}");
+            } else {
+                let refused = sent.to_string();
+                assert!(refused.contains("0.18 or later") && !dir.join("sent.json").exists(), "{refused}");
+            }
+            as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn a_program_call_is_signed_by_the_names_wallet_only_after_approval() {
         // The fake CLI lists two public accounts and, asked to send, keeps
@@ -14482,6 +14637,13 @@ mod tests {
         // It's sent once.
         std::fs::remove_file(dir.join("sent.json")).unwrap();
         assert!(approve(&mut names, &id, &format!("Public/{OTHER}"))["error"].as_str().unwrap().contains("done already"));
+        // An account listed by its ID for its LEZ is never the one that signs: the prompt said the
+        // call can't move the chosen account's LEZ.
+        as_caller(app("tips_ui"));
+        let by_id = parsed(&names.propose_call(program.clone(), format!("[{{\"account\": \"{OTHER}\", \"balance\": true}}]"), "0c".into(), String::new()))["value"].clone();
+        let refused = approve(&mut names, by_id["request"].as_str().unwrap(), &format!("Public/{OTHER}"));
+        assert!(refused.to_string().contains("by its ID for its LEZ"), "{refused}");
+        assert!(!dir.join("sent.json").exists());
         assert!(!dir.join("sent.json").exists());
         as_caller(app("tips_ui"));
         assert_eq!(parsed(&names.request_status(id))["value"]["tx"], "feedbeef");

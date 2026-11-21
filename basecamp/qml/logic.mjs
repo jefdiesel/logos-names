@@ -2426,7 +2426,7 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
-    "Names now opens on LEZ 0.4, our bridge test network. Your LEZ 0.3 wallet is kept as it was.",
+    "Apps can ask you to approve a call that reads the network clock, such as creating a Vest schedule.",
     "Settings → Network: switch between LEZ 0.4 and LEZ 0.3 there; it is no longer on each screen.",
     "Settings → Network → Custom network: add a chain by its RPC URL and chain id, checked first."
 ]
