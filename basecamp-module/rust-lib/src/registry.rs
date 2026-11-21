@@ -81,6 +81,8 @@ pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
 pub const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
 /// The largest sequencer reply read: one actor's state, a page at most, as JSON.
 const MAX_REPLY_LEN: usize = 1024 * 1024;
+/// The settings version from which a registry takes `TransferSealed` (core's `SETTINGS_VERSION`).
+pub const TRANSFER_SEALED_SETTINGS: u8 = 8;
 /// The text entry holding a name's chat address (Messages).
 pub const CHAT_KEY: &str = "chat";
 /// A profile holds at most this many text entries.
@@ -330,6 +332,9 @@ pub fn local_now() -> u64 {
 /// The registry's settings: who administers it, and how names are paid for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
+    /// The settings' version: 8 and later come from a registry that takes `TransferSealed`
+    /// (a transfer that carries the new holder's profile, SPEC.md §8).
+    pub version: u8,
     pub admin: AccountId,
     /// Where fees go in fee mode. It pays nothing itself.
     pub treasury: AccountId,
@@ -369,7 +374,12 @@ impl Settings {
         // Version 5 (the registry on the LEZ 0.3 testnet) has no claims list.
         let (claims_root, claims_until, claims_program) =
             if version < 6 { ([0; 32], 0, [0; 32]) } else { (reader.account()?, reader.u64()?, reader.account()?) };
-        Ok(Self { admin, treasury, prices, mode, deposits, claims_root, claims_until, claims_program })
+        Ok(Self { version, admin, treasury, prices, mode, deposits, claims_root, claims_until, claims_program })
+    }
+
+    /// Whether the registry takes a transfer that carries the new holder's profile.
+    pub fn transfers_sealed(&self) -> bool {
+        self.version >= TRANSFER_SEALED_SETTINGS
     }
 
     /// Whether names from the earlier chain can still be claimed at `now`.
@@ -2077,6 +2087,7 @@ mod tests {
         assert_eq!(
             settings,
             Settings {
+                version: 6,
                 admin: [1; 32],
                 treasury: [2; 32],
                 prices: [1, 2, 3],

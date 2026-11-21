@@ -157,6 +157,15 @@ pub fn encode_transfer(id: &NameId, new_owner: &OwnerTag) -> Vec<u8> {
     writer.0
 }
 
+/// `TransferSealed { id, new_owner, sealed }`: a transfer that writes the new holder's first
+/// profile in the same step (registries with settings version 8 and later).
+pub fn encode_transfer_sealed(id: &NameId, new_owner: &OwnerTag, sealed: &[u8]) -> Vec<u8> {
+    let mut writer = on_name(11, id);
+    writer.0.extend(new_owner);
+    writer.bytes(sealed);
+    writer.0
+}
+
 /// `Release { id, refund }`.
 pub fn encode_release(id: &NameId, refund: u128) -> Vec<u8> {
     let mut writer = on_name(5, id);
@@ -556,12 +565,31 @@ impl Registry {
     /// have to take the new profile with the transfer to close that gap (SPEC.md §5).
     /// The deposit stays with the name, for whoever releases it.
     pub fn transfer(&self, name: &str, derived: &Derived, held: &[AccountId], new_owner: &AccountId) -> Result<Change, String> {
+        self.transfer_to(name, derived, held, new_owner, Some(false))
+    }
+
+    /// [`Self::transfer`] to a holder that is a private account (`Some(true)`), a public one
+    /// (`Some(false)`), or not known (`None`: private when the chain has never seen it). To a
+    /// registry that takes it, the transfer carries the new holder's first profile, so the
+    /// name points at them from that block: its account when public, just the name when
+    /// private (a private account is never published; its own wallet writes its keys).
+    pub fn transfer_to(&self, name: &str, derived: &Derived, held: &[AccountId], new_owner: &AccountId, private: Option<bool>) -> Result<Change, String> {
         let (record, holder) = self.holder(name, derived, held)?;
         if record.is_held_by(&derived.id, new_owner) {
             return Err(format!("{} already belongs to that account", display(name)));
         }
         let new_tag = owner_tag(&derived.id, new_owner);
-        let mut change = self.on_record_and_page(derived, holder, encode_transfer(&derived.id, &new_tag));
+        let message = if self.settings()?.is_some_and(|settings| settings.transfers_sealed()) {
+            let private = match private {
+                Some(private) => private,
+                None => !crate::registry::account_seen(&self.sequencer, new_owner, self.deadline)?,
+            };
+            let profile = Profile { account: (!private).then_some(*new_owner), ..Profile::bare(name) };
+            crate::changes::encode_transfer_sealed(&derived.id, &new_tag, &profile.seal(&derived.key)?)
+        } else {
+            encode_transfer(&derived.id, &new_tag)
+        };
+        let mut change = self.on_record_and_page(derived, holder, message);
         // A deeded name's deed moves with it, in the same transaction.
         if let Some(deed) = &record.deed {
             change.mentions.extend(deed_mentions(&self.program, &derived.id, deed, &[record.owner, new_tag]));
@@ -660,7 +688,8 @@ mod tests {
         assert_eq!(mentions[1].account, pda(&program, &crate::registry::deed_holding_seed(&deed.definition, &old_tag)));
         assert_eq!(mentions[2].account, pda(&program, &crate::registry::deed_holding_seed(&deed.definition, &new_tag)));
 
-        let registry = Registry::new("http://127.0.0.1:9", program);
+        // A registry without settings: the plain Transfer.
+        let registry = Registry::new(&crate::registry::stub_chain_at(1_800_000_000_000), program);
         let record = |deed| Resolved { owner: old_tag, expires: crate::registry::NEVER, profile: Profile::default(), claimed: false, deed, sealed: crate::registry::Sealed::Opened };
         crate::registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, record(Some(deed)))));
         let change = registry.transfer("lns-deed-check", &derived, &[holder], &other).expect("a transfer");
@@ -761,6 +790,7 @@ mod tests {
 
     fn settings(mode: u8) -> Settings {
         Settings {
+            version: 8,
             admin: [1; 32],
             treasury: [2; 32],
             prices: [10, 20, 30],
@@ -1043,5 +1073,69 @@ mod tests {
         assert_eq!(record.profile.account, Some(holder), "an address from its first block");
         assert!(record.profile.texts.iter().any(|(k, v)| k == "chat" && v == CHAT));
         assert_eq!(fresh.repair(&name, &derived, &[holder]), Ok(None), "nothing left to publish");
+    }
+
+    /// A chain whose registry `program` has settings of `version` (core's layout).
+    fn chain_with_settings(program: AccountId, version: u8) -> String {
+        let mut bytes = vec![version];
+        bytes.extend([1; 32]);
+        bytes.extend([1; 32]);
+        for _ in 0..3 {
+            bytes.extend(0_u128.to_le_bytes());
+        }
+        bytes.push(MODE_DEPOSIT);
+        for _ in 0..2 {
+            bytes.extend(1_000_000_u128.to_le_bytes());
+        }
+        bytes.extend([0; 32]);
+        bytes.extend(0_u64.to_le_bytes());
+        bytes.extend([0; 32]);
+        let settings = account_text(&crate::registry::settings_address(&program));
+        crate::registry::stub_rpc(move |request| {
+            let asked = crate::registry::asked_account(request);
+            crate::registry::rpc_ok(if asked == settings {
+                json!({ "nonce": 0, "data": { "actor_states": { account_text(&program): bytes.clone() } } })
+            } else {
+                // Every other account: seen, holding a little.
+                crate::registry::view_holding(5)
+            })
+        })
+    }
+
+    /// Jef's rule, through a transfer (2026-11-21): to a registry with settings version 8 the
+    /// transfer is a `TransferSealed` whose profile points at the new public holder, so the
+    /// name resolves to them from that block; to a private one, the profile names no account;
+    /// to an older registry, the plain `Transfer`.
+    #[test]
+    fn a_transfer_carries_the_new_holders_profile_when_the_registry_takes_it() {
+        let program = [7; 32];
+        let name = "handedover";
+        let derived = derive(name);
+        let (holder, other) = ([0x11; 32], [0x22; 32]);
+        put_record(name, held_record(name, &holder, None));
+        let sealed = |change: &Change| -> Profile {
+            assert_eq!(&change.message[..2], &[0, 11], "TransferSealed");
+            let at = 2 + 32 + 32;
+            let len = u32::from_le_bytes(change.message[at..at + 4].try_into().unwrap()) as usize;
+            assert_eq!(&change.message[2 + 32..at], &owner_tag(&derived.id, &other), "to the new holder's tag");
+            Profile::try_open(&derived.key, &change.message[at + 4..at + 4 + len], name).expect("a profile the name opens")
+        };
+
+        let new = Registry::new(&chain_with_settings(program, 8), program);
+        let public = new.transfer_to(name, &derived, &[holder], &other, Some(false)).expect("a transfer");
+        assert_eq!(sealed(&public), Profile { account: Some(other), ..Profile::bare(name) });
+        assert!(public.mentions.iter().any(|m| m.seed == Some(page_seed(&derived.id))), "the page is still emptied");
+        let private = new.transfer_to(name, &derived, &[holder], &other, Some(true)).expect("a transfer");
+        assert_eq!(sealed(&private), Profile::bare(name), "a private holder is never published");
+        // A bare ID the chain has seen counts as public.
+        assert_eq!(sealed(&new.transfer_to(name, &derived, &[holder], &other, None).unwrap()).account, Some(other));
+        // Its length is what the program takes.
+        let at = 2 + 32 + 32;
+        assert!(u32::from_le_bytes(public.message[at..at + 4].try_into().unwrap()) as usize >= 12 + 256 + 16);
+
+        let old = Registry::new(&chain_with_settings(program, 7), program);
+        let plain = old.transfer_to(name, &derived, &[holder], &other, Some(false)).expect("a transfer");
+        assert_eq!(plain.message, encode_transfer(&derived.id, &owner_tag(&derived.id, &other)), "an older registry gets Transfer");
+        crate::registry::RECORDS.with(|records| records.borrow_mut().clear());
     }
 }

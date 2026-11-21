@@ -81,3 +81,13 @@ test("success is only what the chain shows afterwards", async () => {
   answering(Uint8Array.of(6, 1, 0, 0, 0, 0, 0, 0, 0));
   await confirmCommitted("http://x", program, fill(3), "tx");
 });
+
+test("a sealed transfer is variant 11 with the new holder's profile, after every older one", async () => {
+  const { transferInstruction, transferSealedInstruction } = await import("./lns-tx.js");
+  const id = fill(7), newOwner = fill(2), sealed = Uint8Array.from([5, 5, 5]);
+  assert.deepEqual([...transferInstruction({ id, newOwner }).slice(0, 2)], [0, 4], "Transfer is still variant 4");
+  assert.deepEqual(
+    [...transferSealedInstruction({ id, newOwner, sealed })],
+    [...join([0, 11], id, newOwner, le32(3), sealed)],
+  );
+});

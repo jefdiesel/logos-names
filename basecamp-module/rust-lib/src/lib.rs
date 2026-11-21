@@ -5771,7 +5771,9 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         self.change_name(&name, |registry, name, derived, held| {
-            registry.transfer(name, derived, held, &registry::parse_account(&new_owner)?)
+            let typed = new_owner.trim();
+            let private = if typed.starts_with("Private/") { Some(true) } else if typed.starts_with("Public/") { Some(false) } else { None };
+            registry.transfer_to(name, derived, held, &registry::parse_account(typed)?, private)
         })
     }
 
@@ -11606,6 +11608,7 @@ mod tests {
     #[test]
     fn deposits_are_reported_by_tier_and_mode() {
         let deposits = Settings {
+            version: 8,
             admin: [1; 32],
             treasury: [2; 32],
             prices: [10, 20, 30],
