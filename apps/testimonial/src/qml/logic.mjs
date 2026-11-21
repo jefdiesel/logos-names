@@ -560,7 +560,7 @@ export function postSummary(submission, author, text) {
 /// Blockchain it is an inscription: the Names Wallet asks the person which of their
 /// node's accounts inscribes it and pays the fee, so this app needs no access first.
 export const TARGETS = [
-    { key: "lez", label: "LEZ zone", sub: "Stored by the testimonial program, signed by one of your public LEZ accounts" },
+    { key: "lez", label: "Logos test network", sub: "Stored by the testimonial program, signed by one of your public accounts" },
     { key: "chain", label: "Logos Blockchain", sub: "Inscribed on the chain itself, paid from one of your node's accounts" },
 ]
 
@@ -606,4 +606,51 @@ export function sentenceOf(message) {
 /// Digits in threes: 1086 as "1,086".
 export function grouped(digits) {
     return String(digits).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+}
+
+// ── What the screen teaches ───────────────────────────────────────────────────────────
+// Numbers and words live here so the Node test checks the steps the QML shows. No module call
+// changes: these only decide which step is marked and what help sits under it.
+
+/// The host of a sequencer URL, for the "Runs on" line (plain text only).
+export function hostOf(url) {
+    var m = /^https?:\/\/(\[[^\]]+\]|[^\/:?#@\s]+)/.exec(String(url == null ? "" : url).trim())
+    return m ? m[1].toLowerCase() : ""
+}
+
+/// Which step of the chosen path the person is on. `s` is the app's current state.
+export function flowStep(target, s) {
+    s = s || {}
+    if (target === "chain") {
+        if (String(s.body || "").trim() === "") return 1
+        if (!s.requestId) return 2
+        if (s.waiting) return 3
+        return 4
+    }
+    if (!s.connected) return 1
+    if (!(s.postable || []).length) return 2
+    if (!s.requestId) return 3
+    if (s.waiting) return 4
+    return 5
+}
+
+/// The numbered steps, with the current one marked and its help under it.
+export function flowSteps(target, at) {
+    var all = target === "chain" ? [
+        { n: 1, text: "Write your testimonial", detail: "Say what the submission did for you. An inscription is public and can't be changed or removed." },
+        { n: 2, text: "Ask the Names app to inscribe it", detail: "The Names app shows these words and the fee your node asks. This app names no account and sees no key." },
+        { n: 3, text: "Choose the paying account and approve", detail: "You pick which of your node's Logos Blockchain accounts pays and approve in the Names app." },
+        { n: 4, text: "It is inscribed on the Logos Blockchain", detail: "It is final in a few minutes and shows in the Names app's history." },
+    ] : [
+        { n: 1, text: "Connect Names Wallet", detail: "The Names app asks which accounts this app may see. Nothing is signed yet." },
+        { n: 2, text: "Choose the account that posts", detail: "A testimonial comes from a public account: one per account and submission. The account pays the fee; the program can't move its LEZ." },
+        { n: 3, text: "Write your testimonial", detail: "You may add a name, but anyone can type any name: it isn't proof of who you are." },
+        { n: 4, text: "Approve in the Names app", detail: "Choose the account you picked here to sign. Another account is refused before anything is sent." },
+        { n: 5, text: "See it in the list", detail: "The list is read straight from the sequencer, newest first." },
+    ]
+    return all.map(function(step) {
+        return Object.assign({}, step, {
+            state: step.n < at ? "done" : step.n === at ? "now" : "later",
+        })
+    })
 }
