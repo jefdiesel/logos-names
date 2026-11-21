@@ -3084,7 +3084,7 @@ impl Names {
     /// `READ_FRESH`, at once after a change to the name (`forget_reads`). None in unit tests, which
     /// read on the spot (`cached_read`).
     ///
-    /// Another app's read (names 0.19, feature `app_name_reads`) goes the same way, apart from the
+    /// Another app's read (feature `app_name_reads`, the release after 0.18.0) goes the same way, apart from the
     /// Names app's: its own keys (`app_reads_key`), its own lane, a derivation of its own (never
     /// the wallet's kept ones), at most `APP_READS_IN_FLIGHT` at a time. Before, it was read on
     /// the module's one thread, so a slow sequencer held every call (Names app's too) for up to

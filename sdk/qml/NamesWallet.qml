@@ -65,7 +65,7 @@ Item {
                 wallet.config = w.config
                 wallet.features = w.features
                 wallet.accounts = w.accounts
-                wallet.balancesRead = w.balances
+                wallet.balancesRead = w.lastBalances
                 wallet.updated()
             }
         })

@@ -11,6 +11,10 @@ connect → account selection → approval → transaction in QML and in C++. Tw
 complete reference apps built on it, [Testimonial](../../apps/testimonial/README.md)
 and [Faucet](../../apps/faucet/README.md), are the longer worked examples.
 
+**Building a QML app? Start with the [Names Wallet SDK](#drop-in-sdk-for-apps-the-names-wallet-sdk)**
+(`sdk/qml/`, version 1.0.0): two files you copy in that do connect, accounts, proposals,
+waiting, busy retries, the plain-words states and LNS lookups for you.
+
 ## How it works
 
 ```
@@ -159,6 +163,29 @@ balances are 128-bit numbers.
 | `cancel_request(request_id)` | Withdraws your request while it's pending. | a request, `state: "cancelled"` |
 | `drop_access()` | Gives up the access you were given. | `{revoked}` |
 | `request_nft_access`, `granted_nfts`, `nft_membership`, `propose_nft_transfer`, … | NFTs: a capability of their own; see [NFTs](#nfts-lp-0001). | |
+
+### LNS lookups for any app
+
+Two reads about names need no access and ask nobody: what a name publishes, and the name an
+account set as its own. Everything in them is the name's public record on the chain, which
+anyone who knows the name can read; nothing comes from the person's wallet.
+
+| Method | Value |
+|---|---|
+| `resolve(name)` | the name's record: `{name, display, owner_tag, expires, never, lapsed, deposit, claimed, account, npk, vpk, texts, forward, deed}`, or `null` when nobody holds it. `account` is the public account ID (base58) the name publishes, or null. `forward` is the name it points to (SPEC.md §7); `resolve` doesn't follow it. A name that isn't one (`b@d`, an account ID) is refused in words |
+| `reverse(account)` | `{name, display}`, the name `account` (`Public/<id>` or the base58 ID) set as its own, checked against that name's record; `null` when it set none |
+| `recipient(name)` | where a payment to `name` goes, one `forward` followed: `{name, display, public, public_hex, private, lapsed, forwarded_from?}` |
+
+In a module whose `get_config().features` lists `app_name_reads` (the release after 0.18.0), another app's `resolve`,
+`reverse`, `recipient`, `page`, `page_view`, `avatar` and `deposit` are read on a thread of
+their own, as the Names app's are: the first call answers `busy` (retry, as for any call) and
+the next ones the value, read again after 30 s. Each app's reads are kept apart from the Names
+app's and from every other app's (so how fast an answer comes says nothing about which names
+the person looked up), and an app has at most 4 under way: one more answers busy with nothing
+started. Before it, these reads ran on the module's one thread, so a slow sequencer could hold
+every call, the Names app's too, for up to 15 s.
+
+The SDK's `resolve` and `reverse` (below) give just what an app needs from these.
 
 You must call `request_access` before `propose_transfer` or `propose_call`.
 Otherwise they fail with `ask for access first (request_access), then propose it`.
@@ -717,6 +744,127 @@ the message's hash.
 Requests and grants are kept in `~/.config/logos-names/provider.json`. The
 file is mode 0600 and written atomically, so a grant survives a restart and a
 crash never leaves a half-written file.
+
+## Drop-in SDK for apps: the Names Wallet SDK
+
+**Names Wallet SDK 1.0.0** (`sdk/qml/`, `VERSION` in `NamesWalletSDK.mjs`). Every Basecamp
+`ui_qml` app of ours uses it the same way: copy the two files into the app's `qml/` folder,
+unchanged, as the design kit is copied, and never edit the copy (update it by copying again).
+
+| File | What it is |
+|---|---|
+| `sdk/qml/NamesWalletSDK.mjs` | Everything: the calls, retries, waiting, states, words and LNS lookups. Plain JavaScript, so `node --test sdk/NamesWalletSDK.test.mjs` tests it. |
+| `sdk/qml/NamesWallet.qml` | The QML side, about 100 lines: Basecamp's bridge (`logos`), one timer per wait, and Names brought forward with `basecamp.apps.launch`. It mirrors the state in properties to bind to. |
+
+Your `metadata.json` lists `names` in `dependencies` (or `optional_dependencies`) and
+`"uses": [{ "intent": "basecamp.apps.launch" }]`. Then, in `Main.qml`:
+
+```qml
+NamesWallet { id: names; bridge: typeof logos !== "undefined" ? logos : null }
+
+Component.onCompleted: names.check({ chain: "<your chain's channel, 64 hex>" }, function(w) {
+    // w.state: checking | missing | otherZone | disconnected | asking | connected
+    // w.accounts: [{account, account_kind}], w.features, w.config
+})
+Text { text: names.status === "missing" ? names.problem : "" }   // the shared words
+```
+
+### What it does for you
+
+- **Every argument as text.** Basecamp's call checker refuses a QML number for an integer
+  parameter (`expected integer, got number`); the SDK sends `String(x)` for numbers, `true` /
+  `false` as text and objects as JSON.
+- **Busy is retried**, five times, 1.5 s then a step longer each time, each retry on a timer of
+  its own (two calls retrying at once both come back). Busy promises nothing happened, so a
+  proposal is retried too.
+- **An unclear answer** (none, or not the SDK's envelope: Names is usually restarting after an
+  update) is retried only for reads (`READS`). A `propose_*` call is never sent twice: it fails
+  `uncertain`, with "Names Wallet didn't answer, so it may have taken the request. Look in Names
+  before asking again."
+- **Names missing** (not installed, not open, or no Basecamp bridge) sets `status` to `missing`
+  with `WORDS.missing`. Another network than `check({chain})`'s sets `otherZone`.
+- **Waiting** reads `request_status` every 2 s, one read at a time, until the request is no
+  longer `pending` or `running`; `requestLine(request, "the payment")` says the end in plain
+  words (declined, expired after 10 minutes, withdrawn, failed with why).
+- **Going to Names and back:** `connect` and every proposal bring Names forward; Names shows
+  your app again once the person answers.
+
+### The calls
+
+Each takes callbacks; none blocks. `handlers` is `{sent, update, done, failed}` (`waiting` for
+`connect`), any of them optional. `failed(r)` gets `{ok: false, error, busy?, missing?,
+unclear?, uncertain?}`, `error` in plain words.
+
+| Call | What it does |
+|---|---|
+| `check({chain}, done(w))` | `get_config` (features, zone), then `granted_accounts`. Sets `status`. |
+| `connect(reason, {accountHint, open}, {waiting, done, failed})` | `request_access` (`request_access_with` when you give a hint and Names has it), brings Names forward, waits, then `check`s again. `done(request)`: `state` is `approved` when the person gave access. |
+| `balances(done(list), failed)` | `account_balances`: `[{account, account_kind, balance, updating, error}]`. `SDK.withBalances(accounts, list)` joins them. |
+| `proposeCall(program, accountsJson, instructionHex, summary, handlers, {open})` | `propose_call`, then waits. `sent(request, watch)` once it is in Names; `done(request)` at the end (`state` `done` with `tx`, or `rejected`, `expired`, `cancelled`, `failed`). |
+| `proposeTransfer(asset, amount, destination, handlers, {open})` | `propose_transfer` the same way. |
+| `propose(method, args, handlers, {open})` | any other `propose_*` that answers a request (inscriptions, private calls, NFT transfers…). |
+| `watch(request, handlers)` | waits on a request you already have; returns `{stop(), withdraw()}`. |
+| `withdraw(requestId, done, failed)` | `cancel_request` while pending; the watch then ends `cancelled`. |
+| `disconnect(done, failed)` | `drop_access`; `status` becomes `disconnected`. |
+| `resolve(name, done(r))` | LNS name → account, through the module's `resolve`, one `forward` followed (as a payment to it is). See below. |
+| `reverse(account, done(r))` | account → its LNS name, through the module's `reverse`. See below. |
+| `call(method, args, done, failed)` | any other names method, with the same retries. |
+| `has(feature)`, `open()` | a `get_config` feature (after `check`); bring Names forward. |
+
+`resolve` answers exactly one of:
+
+```js
+{ ok: true,  name: "alice", display: "alice.lez", account: "<base58>", forwardedFrom: null, lapsed: false }
+{ ok: true,  name: "alice", ..., forwardedFrom: "old" }     // "old" points to alice
+{ ok: false, code: "not_registered", name, error }          // nobody holds it
+{ ok: false, code: "no_account",     name, error }          // it publishes no account
+{ ok: false, code: "refused",        name, error }          // not a name (Names' words)
+{ ok: false, code: "missing" | "unavailable", name, error } // Names isn't there / didn't answer
+```
+
+`reverse` answers `{ok: true, account, name, display}` (`name` and `display` null when the
+account set none) or `{ok: false, code, account, error}` with the codes above. Neither needs
+access, and neither returns anything but the name's public record (see [LNS
+lookups](#lns-lookups-for-any-app)); the SDK keeps only these fields of it.
+
+### Worked example: Vest
+
+Vest (jefdiesel/vest, `miniapp/qml/Main.qml`) pays tokens out over time and signs every change
+through Names Wallet. It uses only the SDK for Names:
+
+```qml
+NamesWallet { id: namesWallet; bridge: typeof logos !== "undefined" ? logos : null }
+readonly property string namesState: namesWallet.status
+readonly property bool namesCanCall: namesWallet.features.indexOf("call_reads_clock") >= 0
+
+// Where Names stands, on Vest's own chain; then the vesting module is told the accounts.
+namesWallet.check({ chain: info.network.chain_id }, function(w) {
+    if (w.state === "connected") namesWallet.balances(function(b) {
+        call("set_accounts", [JSON.stringify(Logic.namesAccounts({ accounts: w.accounts }, b))], readChain)
+    })
+})
+
+// Connect.
+namesWallet.connect("To show your vesting schedules and claim what has vested to you", {}, {
+    waiting: function(v) { accessRequest = v },
+    done: function(v) { say(v.state === "approved" ? "Connected." : Logic.requestLine(v, "the connection")) }
+})
+
+// A claim: the vesting module builds the call, Names shows it, the person approves.
+namesWallet.proposeCall(c.program, c.accounts_json, c.instruction_hex, c.summary, {
+    sent: function(v, watch) { claimRequest = v },               // "Withdraw the request" → namesWallet.withdraw(v.request)
+    update: function(v) { claimRequest = v },
+    done: function(v) { say(v.state === "done" ? "Claimed … · tx " + v.tx : Logic.requestLine(v, "the claim")) },
+    failed: function(r) { say(r.error) }
+})
+
+// The payout box: an LNS name is looked up through Names, and the schedule is made for the
+// account Names found (Vest's own module lookup stays for a wallet folder, or Names absent).
+namesWallet.resolve(typed, function(r) { payee = Logic.payeeFromNames(typed, r) })
+```
+
+Vest keeps its own words (which network to switch to, what a claim is) in its `logic.mjs`; the
+request lines and "Names Wallet isn't installed" are the SDK's shared ones.
 
 ## Methods for the Names app
 

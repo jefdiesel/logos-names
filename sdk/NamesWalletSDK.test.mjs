@@ -278,6 +278,11 @@ test("balances joined to the accounts", async () => {
   h.wallet.balances((x) => (b = x));
   await h.settle();
   assert.equal(b[0].balance, "12");
+  let again = null;
+  h.wallet.balances((x) => (again = x));
+  await h.settle();
+  assert.equal(again[0].balance, "12", "balances can be asked again (its answer is kept apart, in lastBalances)");
+  assert.equal(typeof h.wallet.balances, "function");
   assert.deepEqual(SDK.withBalances([{ account: "Public/A1", account_kind: "public" }, { account: "Private/B", account_kind: "private" }], b),
     [{ account: "Public/A1", account_kind: "public", balance: "12" }, { account: "Private/B", account_kind: "private", balance: "0" }]);
 });
@@ -356,6 +361,13 @@ test("no reserved word after a dot (some Qt builds refuse x.public)", () => {
 
 test("about no one app: no app's own words in the SDK", () => {
   assert.equal(/vest|faucet|testimonial|bridge test network|schedule/i.test(source.replace(/^\/\/.*$/gm, "")), false);
+});
+
+test("no data field shadows a call", () => {
+  const w = SDK.create({});
+  const fields = [...source.matchAll(/^\s+wallet\.(\w+) = (?!function)/gm)].map((m) => m[1]);
+  const shadowed = fields.filter((f) => typeof w[f] === "function");
+  assert.deepEqual(shadowed, []);
 });
 
 test("the QML side forwards every call the SDK has", () => {

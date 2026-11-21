@@ -135,12 +135,12 @@ export function nameRecord(value) {
 /// The SDK for one app. `host` gives what only QML has (NamesWallet.qml makes it):
 ///   call(method, args, callback(raw), timeoutMs) → false when there is no Basecamp bridge;
 ///   later(f, ms) runs f once after ms (one timer each); open() brings Names forward;
-///   changed(wallet) after wallet.state, .accounts, .features or .config change.
+///   changed(wallet) after wallet.state, .accounts, .lastBalances, .features or .config change.
 export function create(host) {
     var h = host || {}
     var wallet = {
         version: VERSION,
-        state: "checking", problem: "", config: null, features: [], accounts: [], balances: [],
+        state: "checking", problem: "", config: null, features: [], accounts: [], lastBalances: [],
         chain: ""
     }
     function changed() { if (h.changed) h.changed(wallet) }
@@ -200,9 +200,9 @@ export function create(host) {
     /// error}])` (balance is decimal text, null until first read).
     wallet.balances = function(done, failed) {
         wallet.call("account_balances", [], function(b) {
-            wallet.balances = b || []
+            wallet.lastBalances = b || []
             changed()
-            if (done) done(wallet.balances)
+            if (done) done(wallet.lastBalances)
         }, failed)
     }
 
@@ -276,7 +276,7 @@ export function create(host) {
     wallet.disconnect = function(done, failed) {
         wallet.call("drop_access", [], function(v) {
             wallet.accounts = []
-            wallet.balances = []
+            wallet.lastBalances = []
             setState("disconnected")
             if (done) done(v)
         }, failed)
