@@ -6,7 +6,7 @@
 // `cli_faucet`): POST {"account": "<base58>"} → 200 {account, amount, tx}, or an HTTP
 // error with {"error": "<reason>"}. GET on the same URL → {amount, per_account}.
 
-/// The Names faucet: run by the Logos Names project for the LEZ testnet. Optional.
+/// The Names faucet: run by the Logos Names project for the Logos test network. Optional.
 export const DEFAULT_FAUCET_URL = "https://lez.buggers.online/faucet"
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
@@ -155,4 +155,52 @@ export function balanceOf(balances, account) {
 export function short(text) {
     var s = String(text)
     return s.length <= 14 ? s : s.substr(0, 6) + "…" + s.substr(s.length - 4)
+}
+
+// ── The workflow the screen teaches ──────────────────────────────────────────────────
+// Numbers and words live here so the Node test checks the steps the QML shows. No module call
+// changes: these only decide which step is marked and what help is printed under it.
+
+/// Plain text for a network name someone else supplied: no control or bidi characters.
+export function clean(text) {
+    return String(text == null ? "" : text)
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u202a-\u202e\u2066-\u2069]/g, "")
+        .trim()
+}
+
+/// Which of the five steps the person is on. `s` is the app's current state.
+export function faucetStep(s) {
+    s = s || {}
+    if (!s.connected) return 1
+    if (!(s.payable || []).length) return 2
+    if (s.arrived) return 5
+    if (s.asking || s.waiting) return 4
+    return 3
+}
+
+/// The numbered steps, with the current one marked. Help sits under the current step.
+export function guideSteps(at) {
+    var all = [
+        { n: 1, text: "Connect Names Wallet", detail: "Names Wallet asks which accounts this app may see. You approve it in the Names app; the faucet signs nothing." },
+        { n: 2, text: "Choose a public account", detail: "The faucet pays public accounts. Have a private one? Have a public account paid, then move LEZ to private in the Names app." },
+        { n: 3, text: "Ask for test LEZ", detail: "This asks the Names faucet for free test LEZ. It sends only the account ID you choose; the service sees your internet address." },
+        { n: 4, text: "Wait for the test LEZ to arrive", detail: "It usually arrives within a block or two. The account balance is read every 15 seconds." },
+        { n: 5, text: "Use the test LEZ", detail: "Try the vesting app, or bridge LEZ from the Logos Blockchain in the Names app. You can ask this faucet again tomorrow." },
+    ]
+    return all.map(function(step) {
+        return Object.assign({}, step, {
+            state: step.n < at ? "done" : step.n === at ? "now" : "later",
+        })
+    })
+}
+
+/// What happens next, in one short sentence under a result line.
+export function nextLine(kind) {
+    var lines = {
+        connect: "Choose the public account that receives the LEZ.",
+        add: "Names Wallet is open with the request: tick the accounts you use and approve. You come back here after.",
+        ask: "Watch the balance: the test LEZ arrives within a block or two.",
+        arrive: "You can now use the test LEZ in the vesting app.",
+    }
+    return lines[kind] || ""
 }

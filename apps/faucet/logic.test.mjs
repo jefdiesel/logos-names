@@ -61,6 +61,23 @@ check("above", [L.above("2000001", "2000000"), L.above("2000000", "2000000"), L.
 check("grouped", [L.grouped("2000000"), L.grouped("12"), L.grouped("x")], ["2,000,000", "12", "x"]);
 check("balanceOf", [L.balanceOf([{ account: "Public/" + ID, balance: "5" }], "Public/" + ID), L.balanceOf([], "Public/" + ID)], ["5", null]);
 
+// ── The workflow the screen teaches ─────────────────────────────────────────────────
+check("faucetStep: one step at a time", [
+    L.faucetStep({}),
+    L.faucetStep({ connected: true, payable: [] }),
+    L.faucetStep({ connected: true, payable: ["Public/" + ID] }),
+    L.faucetStep({ connected: true, payable: ["Public/" + ID], asking: true }),
+    L.faucetStep({ connected: true, payable: ["Public/" + ID], waiting: true }),
+    L.faucetStep({ connected: true, payable: ["Public/" + ID], arrived: true }),
+], [1, 2, 3, 4, 4, 5]);
+const steps = L.guideSteps(3);
+check("guideSteps: marks exactly the current step", steps.map((s) => s.state), ["done", "done", "now", "later", "later"]);
+check("guideSteps: current step has help, later steps do not", [!!steps[2].detail, !!steps[1].detail, steps[0].detail !== steps[2].detail], [true, true, true]);
+check("guideSteps: five numbered steps", steps.map((s) => s.n), [1, 2, 3, 4, 5]);
+check("clean: strips control and bidi characters", L.clean("  Bridge\u202etest\u0000network \t"), "Bridgetestnetwork");
+check("plain words: LEZ is the coin, not the network", /test LEZ/.test(L.guideSteps(3)[2].text) && !/LEZ testnet/.test(L.guideSteps(3)[2].text), true);
+check("nextLine", [L.nextLine("connect"), L.nextLine("ask"), L.nextLine("unknown")], ["Choose the public account that receives the LEZ.", "Watch the balance: the test LEZ arrives within a block or two.", ""]);
+
 // ── QML hygiene (as basecamp/logic.test.mjs) ───────────────────────────────────────
 const reserved = /\.(public|private|protected|package|interface|implements|static|let|yield|enum|class|const|export|import|extends|super)\b/;
 for (const file of ["./src/qml/Main.qml", "./src/qml/logic.mjs"]) {
