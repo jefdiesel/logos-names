@@ -13,6 +13,55 @@ through the `names` module's SDK, and the app never sees a key.
 | Defaults | submission `lp-0021:names-wallet`; sequencer = the one the Names Wallet uses (`get_config`: the zone in use's) |
 | Settings | sequencer, testimonial program ID (deployed when testnet 0.4 launches), submission ID |
 
+## The screen
+
+The page uses the shared kit: one left-aligned column, at most 680 px wide, 56 px from the window
+edge (24 px when narrow). The header is `PageHeader`:
+
+- **Title:** "Testimonial"
+- **Sentence:** "Vouch for a Logos prize submission. Your Names Wallet signs it; this app never sees a key."
+- **Runs on:** "Runs on Bridge test network · <host>" when posting to the program, or
+  "Runs on Logos Blockchain" when inscribing.
+
+The "Where to write it" card offers "Logos test network" and "Logos Blockchain" (the exact
+labels from `Logic.TARGETS` in [`src/qml/logic.mjs`](src/qml/logic.mjs)).
+
+The "How it works" card teaches these steps, word for word from `Logic.flowSteps()` in
+[`src/qml/logic.mjs`](src/qml/logic.mjs). The current step is marked and its help is printed
+under it.
+
+Posting on the Logos test network:
+
+1. **Connect Names Wallet** — The Names app asks which accounts this app may see. Nothing is signed yet.
+2. **Choose the account that posts** — A testimonial comes from a public account: one per account and submission. The account pays the fee; the program can't move its LEZ.
+3. **Write your testimonial** — You may add a name, but anyone can type any name: it isn't proof of who you are.
+4. **Approve in the Names app** — Choose the account you picked here to sign. Another account is refused before anything is sent.
+5. **See it in the list** — The list is read straight from the sequencer, newest first.
+
+Inscribing on the Logos Blockchain:
+
+1. **Write your testimonial** — Say what the submission did for you. An inscription is public and can't be changed or removed.
+2. **Ask the Names app to inscribe it** — The Names app shows these words and the fee your node asks. This app names no account and sees no key.
+3. **Choose the paying account and approve** — You pick which of your node's Logos Blockchain accounts pays and approve in the Names app.
+4. **It is inscribed on the Logos Blockchain** — It is final in a few minutes and shows in the Names app's history.
+
+Buttons use the exact labels from [`src/qml/Main.qml`](src/qml/Main.qml):
+
+- "Connect" and "Add an account" open the Names Wallet access request; while it waits they read
+  "Waiting for you in Names…". "Disconnect Names Wallet" drops access.
+- "Post testimonial" checks the chain and proposes the call; it reads "Checking…" while it runs.
+  "Ask to inscribe" proposes the inscription and reads "Asking…" while it runs.
+- "Write it below" moves focus to the text box; "Withdraw the request" cancels a pending request.
+- "Refresh list" reads the testimonials again and reads "Reading…" while it runs; "Show more"
+  reveals the rest of the list.
+- "Copy" copies a full transaction hash shown short in the result card.
+- "Use these settings" applies the sequencer, program and submission IDs.
+- "Got it" hides the steps; "Steps" brings them back, and "Hide steps" is the header link while
+  they are shown.
+
+Every button disables itself at once and ends in a plain result line, with a "What happens next:"
+line where there is one. Red is used only for a real problem.
+
 ## Worked example: connect → account selection → approval → transaction
 
 All four steps are in [`src/qml/Main.qml`](src/qml/Main.qml); the bytes are built in
@@ -59,7 +108,7 @@ node = pda(TST, sha256(pad32("testimonial/v1/node") ‖ sha256(submission) ‖ a
 
 `propose_call` has to name `node` before the person chooses the signer in Names. So the app
 fixes the author first, computes both seeds for that account, names it in the summary and in
-the waiting screen ("Choose Public/… to sign"), and the person picks the same account in the
+the waiting card, and the person picks the same account in the
 approval sheet. If they pick another, the wallet's dry run refuses the call before anything is
 sent or charged (tested live, below).
 

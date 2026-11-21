@@ -1,32 +1,35 @@
-// Faucet: free LEZ testnet tokens for an account the person picks from their Names Wallet.
+// Faucet: free test LEZ for an account the person picks from their Names Wallet.
 //
 // The wallet side is built only on the Names Wallet Provider SDK
 // (docs/wallet/PROVIDER-SDK.md): connect (request_access), account selection
-// (granted_accounts), and balances (account_balances) to see the tokens arrive. Asking a
+// (granted_accounts), and balances (account_balances) to see the LEZ arrive. Asking a
 // faucet signs nothing, so there is no approval step for it; the person approves which
 // accounts this app may see.
 //
-// The faucet is an optional third-party service, and the app says which one it contacts
-// before anything is sent. Basecamp gives a QML view no network, so this app's small
-// backend (src/faucet_ui_backend.cpp) makes the request; it holds no key and sends only
-// the account ID.
+// The faucet is an optional service and the app says which one it contacts before anything is
+// sent. Basecamp gives a QML view no network, so this app's small backend
+// (src/faucet_ui_backend.cpp) makes the request; it holds no key and sends only the account ID.
 //
-// Controls are drawn here rather than taken from Qt Quick Controls, as in the Names app.
+// The look is the shared kit (./kit): one left-aligned column, at most 680 px. The steps the
+// person takes, their help and the plain result words are in logic.mjs, which the Node test runs.
+// All wallet and backend calls, and every argument, are unchanged from the earlier app.
 
 import QtQuick
 import QtQuick.Layouts
 import Logos.Theme
 import "logic.mjs" as Logic
+import "kit"
 
 Item {
     id: root
+    property Look look: Look {}
 
-    // ── Settings ────────────────────────────────────────────────────────────
+    // ── Settings ─────────────────────────────────────────────────────────────────────
     property string faucetUrl: Logic.DEFAULT_FAUCET_URL
     property bool settingsOpen: false
     property var faucetInfo: null        // what the faucet says it gives: {amount, per_account}
 
-    // ── Wallet (Provider SDK) ───────────────────────────────────────────────
+    // ── Wallet (Provider SDK) ────────────────────────────────────────────────────────
     property var granted: []             // [{account, account_kind}]
     property bool connected: false
     property string chosen: ""           // the account to fund: Public/<id>
@@ -34,7 +37,7 @@ Item {
     property string requestId: ""
     property var request: null
 
-    // ── The faucet ──────────────────────────────────────────────────────────
+    // ── The faucet ───────────────────────────────────────────────────────────────────
     property bool asking: false
     property var outcome: null           // Logic.interpret(...) of the last answer, with {account, at, before}
     property var lastGrant: ({})         // account → when this app saw the faucet pay it (ms)
@@ -57,22 +60,20 @@ Item {
         && (outcome.before !== null ? Logic.above(Logic.balanceOf(balances, outcome.account), outcome.before)
                                     : Logic.atLeast(Logic.balanceOf(balances, outcome.account), outcome.amount || "1"))
 
-    // ── Palette (the shared Logos theme, as the Names app uses it) ─────────
-    readonly property color slate: Theme.palette.background
-    readonly property color card: Theme.isDark ? Theme.palette.backgroundSecondary : Theme.palette.surfaceRaised
-    readonly property color raised: Theme.isDark ? Theme.palette.surface : Theme.palette.backgroundButton
-    readonly property color line: Theme.palette.border
-    readonly property color ink: Theme.palette.text
-    readonly property color dim: Theme.palette.textSecondary
-    readonly property color faint: Theme.palette.textPlaceholder
-    readonly property color brass: Theme.isDark ? Theme.palette.warning : Theme.palette.primary
-    readonly property color alarm: Theme.palette.error
-    readonly property color good: Theme.palette.success
-    readonly property string sans: "Avenir Next"
-    readonly property string mono: "Menlo"
-    function px(size) { return Math.round(size * (Theme.typography.scale || 1)) }
+    // ── View state ───────────────────────────────────────────────────────────────────
+    property bool guideOpen: true
+    property bool guideDone: false
+    readonly property bool showGuide: guideOpen || !guideDone
+    readonly property int step: Logic.faucetStep({ connected: connected, payable: payable,
+        asking: asking, waiting: arriving, arrived: arrived })
+    property string resultLine: ""
+    property string nextLine: ""
+    property bool resultBad: false
 
-    // ── The names module (Provider SDK) ─────────────────────────────────────
+    readonly property string networkName: "Bridge test network"
+    readonly property string networkDetail: Logic.hostOf(faucetUrl)
+
+    // ── The names module (Provider SDK) ──────────────────────────────────────────────
 
     function names(method, args, done, failed) {
         if (!bridgeReady) {
@@ -92,18 +93,29 @@ Item {
         }, 30000)
     }
 
+    /// One result line, and what happens next. Only a real problem is red.
+    function say(message, bad, next) {
+        var t = String(message || "").trim()
+        resultLine = t === "" ? "" : t.charAt(0).toUpperCase() + t.substr(1) + (/[.?!…]$/.test(t) ? "" : ".")
+        resultBad = !!bad
+        nextLine = bad ? "" : (next || "")
+    }
+
     function fail(message) {
         var t = String(message).trim()
         problem = t === "" ? "" : t.charAt(0).toUpperCase() + t.substr(1) + (/[.?!]$/.test(t) ? "" : ".")
         asking = false
+        say(problem, true)
     }
 
     /// 1. Connect: the person picks, in the Names app, which accounts this app may see.
     function connect() {
         problem = ""
+        say("")
         names("request_access", ["Choose an account to receive free testnet tokens"], function(v) {
             if (v.state === "approved") {
                 readGranted()
+                say("Connected.", false, Logic.nextLine("connect"))
                 return
             }
             requestId = v.request
@@ -130,6 +142,7 @@ Item {
 
     function disconnect() {
         names("drop_access", [], function() { connected = false; granted = []; chosen = ""; balances = [] })
+        say("Names Wallet disconnected.")
     }
 
     Timer {
@@ -140,7 +153,8 @@ Item {
             root.request = v
             if (v.state === "pending") return
             poll.stop()
-            if (v.state === "approved") root.readGranted()
+            if (v.state === "approved") { root.readGranted(); root.say("Connected.", false, Logic.nextLine("connect")) }
+            else root.fail("Not connected: the request was " + v.state + ".")
         }, function(message) { poll.stop(); root.fail(message) })
     }
 
@@ -154,7 +168,7 @@ Item {
 
     Timer { interval: 1000; repeat: true; running: root.coolingDown || root.arriving; onTriggered: root.tick = Date.now() }
 
-    // ── The faucet (this app's backend) ────────────────────────────────────
+    // ── The faucet (this app's backend) ──────────────────────────────────────────────
 
     function backendCall(pending, done) {
         logos.watch(pending, function(text) {
@@ -173,9 +187,10 @@ Item {
     /// 3. Asks the faucet to pay the chosen account; reports what came of it.
     function ask() {
         problem = ""
-        if (urlProblem !== "") { problem = urlProblem; return }
-        if (chosen === "") { problem = "Choose the account that receives the tokens."; return }
-        if (!backend || !backendReady) { problem = "This app's faucet client isn't running yet; try again in a moment."; return }
+        say("")
+        if (urlProblem !== "") { problem = urlProblem; say(problem, true); return }
+        if (chosen === "") { problem = "Choose the account that receives the LEZ."; say(problem, true); return }
+        if (!backend || !backendReady) { problem = "This app's faucet client isn't running yet; try again in a moment."; say(problem, true); return }
         var account = chosen
         var before = Logic.balanceOf(balances, account)
         asking = true
@@ -197,9 +212,25 @@ Item {
             lastGrant = grants
             retryAt = waits
             tick = now
+            say(o.message, !o.ok, o.ok ? Logic.nextLine("ask") : "")
             readBalances()
         })
     }
+
+    function finishGuide() {
+        guideOpen = false
+        guideDone = true
+    }
+
+    /// Copy a full id or hash, with a plain result line. The screen shows only the short form.
+    function copy(text, what) {
+        clipboard.text = text
+        clipboard.selectAll()
+        clipboard.copy()
+        say(what + " copied.")
+    }
+
+    TextEdit { id: clipboard; visible: false }
 
     Component.onCompleted: {
         backendReady = backend !== null && logos.isViewModuleReady && logos.isViewModuleReady("faucet_ui")
@@ -218,107 +249,191 @@ Item {
         }
     }
 
-    // ── View ────────────────────────────────────────────────────────────────
+    // ── Screen ───────────────────────────────────────────────────────────────────────
 
-    Rectangle { anchors.fill: parent; color: root.slate }
+    Rectangle { anchors.fill: parent; color: look.slate }
 
     Flickable {
         id: page
         anchors.fill: parent
-        contentHeight: column.implicitHeight + 64
+        contentHeight: column.implicitHeight + 80
         clip: true
+        boundsBehavior: Flickable.StopAtBounds
 
         ColumnLayout {
             id: column
-            width: Math.min(page.width - 48, 720)
-            x: (page.width - width) / 2
-            y: 32
-            spacing: 18
+            x: root.width >= 600 ? look.edge : 24
+            y: 40
+            width: Math.min(root.width - 2 * x, look.pageWidth)
+            spacing: 16
 
             RowLayout {
                 Layout.fillWidth: true
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-                    Text {
-                        text: "Faucet"
-                        color: root.ink
-                        font.family: root.sans
-                        font.pixelSize: root.px(28)
-                        font.weight: Font.Bold
-                    }
-                    Text {
-                        Layout.fillWidth: true
-                        text: "Free LEZ testnet tokens, paid to an account you choose from your Names Wallet."
-                        color: root.dim
-                        font.family: root.sans
-                        font.pixelSize: root.px(16)
-                        wrapMode: Text.Wrap
-                    }
+                spacing: 16
+                PageHeader {
+                    look: root.look
+                    title: "Faucet"
+                    sentence: "Get free test LEZ on the Logos network."
+                    runsOnPrefix: "Runs on"
+                    network: root.networkName
+                    networkDetail: root.networkDetail
                 }
-                Link { label: root.settingsOpen ? "Close settings" : "Settings"; onPressed: root.settingsOpen = !root.settingsOpen }
+                Link {
+                    look: root.look
+                    font.underline: true
+                    Layout.alignment: Qt.AlignTop
+                    text: root.showGuide ? "Hide steps" : "Steps"
+                    onPressed: root.showGuide ? root.finishGuide() : root.guideOpen = true
+                }
             }
 
-            // Which service this app contacts, before anything is sent.
-            Panel {
-                title: "An optional service"
-                Hint {
-                    text: "This app asks the faucet at " + root.faucetUrl + " (" + Logic.hostOf(root.faucetUrl) + ")"
-                        + (root.faucetUrl === Logic.DEFAULT_FAUCET_URL ? ", the Names faucet run by the Logos Names project for the LEZ testnet." : ", a faucet you entered in Settings.")
-                        + " It sends that service only the account ID you choose; the service also sees your internet address."
-                        + " Nothing is sent until you press the button below."
+            // ── The steps, with the current one marked and its help under it ──────────
+            Card {
+                visible: root.showGuide && !root.settingsOpen
+                Heading { text: "How it works" }
+                Repeater {
+                    model: Logic.guideSteps(root.step)
+                    delegate: RowLayout {
+                        id: stepRow
+                        required property var modelData
+                        readonly property bool now: modelData.state === "now"
+                        Layout.fillWidth: true
+                        Layout.topMargin: 6
+                        spacing: 12
+                        Rectangle {
+                            Layout.alignment: Qt.AlignTop
+                            Layout.preferredWidth: look.px(24); Layout.preferredHeight: look.px(24); radius: width / 2
+                            color: stepRow.now ? look.brass : "transparent"
+                            border.width: 1
+                            border.color: stepRow.modelData.state === "later" ? look.line : look.brass
+                            Text {
+                                anchors.centerIn: parent
+                                textFormat: Text.PlainText
+                                text: stepRow.modelData.state === "done" ? "✓" : String(stepRow.modelData.n)
+                                color: stepRow.now ? look.slate : look.ink
+                                font.family: look.sans
+                                font.pixelSize: look.px(13)
+                                font.weight: Font.DemiBold
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Text {
+                                textFormat: Text.PlainText
+                                Layout.fillWidth: true
+                                text: stepRow.modelData.text
+                                color: stepRow.modelData.state === "later" ? look.dim : look.ink
+                                font.family: look.sans
+                                font.pixelSize: look.px(16)
+                                font.weight: stepRow.now ? Font.DemiBold : Font.Normal
+                                wrapMode: Text.Wrap
+                            }
+                            Body {
+                                visible: stepRow.now
+                                text: stepRow.modelData.n === 1 && root.request !== null && root.request.state === "pending"
+                                    ? "Names Wallet is open with the request: tick the accounts you use for Faucet and approve. You come back here after."
+                                    : stepRow.modelData.detail
+                            }
+                            Action {
+                                visible: stepRow.now && stepRow.modelData.n === 1
+                                look: root.look; strong: true; changes: true; busy: root.asking
+                                label: "Connect"; busyLabel: "Waiting for you in Names…"
+                                working: root.request !== null && root.request.state === "pending"
+                                enabledNow: !(root.request !== null && root.request.state === "pending")
+                                onPressed: root.connect()
+                            }
+                            Action {
+                                visible: stepRow.now && stepRow.modelData.n === 2 && root.payable.length === 0
+                                look: root.look; strong: true
+                                label: "Add an account"; busyLabel: "Waiting for you in Names…"
+                                working: root.request !== null && root.request.state === "pending"
+                                enabledNow: !(root.request !== null && root.request.state === "pending")
+                                onPressed: root.connect()
+                            }
+                            Body {
+                                visible: stepRow.now && stepRow.modelData.n === 3 && root.payable.length > 0
+                                text: "The account to pay is " + Logic.short(root.chosen) + "."
+                            }
+                            Action {
+                                visible: stepRow.now && stepRow.modelData.n === 3
+                                look: root.look; strong: true; changes: true; busy: root.asking
+                                label: root.coolingDown ? "Try again " + Logic.waitText(root.waitUntil - root.tick, root.waitUntil) : "Request test LEZ"
+                                busyLabel: "Requesting…"; working: root.asking
+                                enabledNow: !root.asking && !root.coolingDown && root.chosen !== "" && root.urlProblem === ""
+                                onPressed: root.ask()
+                            }
+                            Link {
+                                visible: stepRow.now && stepRow.modelData.n === 4
+                                look: root.look
+                                font.underline: true
+                                text: root.arriving ? "Not arrived yet? Check the balance" : "Check the balance"
+                                onPressed: root.readBalances()
+                            }
+                        }
+                    }
                 }
-                Hint {
-                    text: "You don't need it: you can bridge tokens from the Logos Blockchain in the Names app, or have someone pay your account."
+                RowLayout {
+                    Layout.topMargin: 4
+                    spacing: 20
+                    Action { look: root.look; label: "Got it"; visible: root.connected; onPressed: root.finishGuide() }
+                }
+            }
+
+            // ── Service disclosure ────────────────────────────────────────────────────
+            Card {
+                visible: !root.settingsOpen
+                Heading { text: "An optional service" }
+                Body {
+                    text: "This app asks the faucet at " + root.faucetUrl + " (" + root.networkDetail + ")"
+                        + (root.faucetUrl === Logic.DEFAULT_FAUCET_URL ? ", the Names faucet run by the Logos Names project for the Logos test network." : ", a faucet you entered in Settings.")
+                        + " It sends that service only the account ID you choose; the service also sees your internet address."
+                        + " Nothing is sent until you press Request test LEZ."
+                }
+                Body {
+                    text: "You don't need it: bridge LEZ from the Logos Blockchain in the Names app, or have someone pay your account."
                         + (root.faucetInfo && root.faucetInfo.amount ? " This faucet gives " + Logic.grouped(root.faucetInfo.amount) + " LEZ, " + (root.faucetInfo.per_account || "once a day") + " per account and per internet address." : " The Names faucet pays each account and each internet address once a day.")
                 }
-            }
-
-            Panel {
-                visible: root.settingsOpen
-                title: "Settings"
-                Hint { text: "Faucet address. Any faucet that takes POST {\"account\": \"<id>\"} works, such as an official LEZ faucet once there is one." }
-                Field { Layout.fillWidth: true; text: root.faucetUrl; code: true; onEdited: { root.faucetUrl = text.trim(); root.describe() } }
-                Bad { text: root.urlProblem }
-                Link { label: "Use the Names faucet"; onPressed: { root.faucetUrl = Logic.DEFAULT_FAUCET_URL; root.describe() } }
-            }
-
-            // 1. Connect.
-            Panel {
-                title: "1. Connect your Names Wallet"
-                Hint {
-                    text: root.connected
-                        ? "Connected. This app may see: " + root.granted.map(function(a) { return Logic.short(a.account) }).join(", ") + "."
-                        : "The Names app asks you which accounts this app may see. Nothing is signed or sent."
-                }
-                Status {
-                    visible: root.request !== null && root.request.state === "pending"
-                    text: "Waiting for you to choose accounts in the Names app…"
-                }
-                Bad { text: root.request && /rejected|expired|cancelled/.test(root.request.state) ? "Not connected: the request was " + root.request.state + "." : "" }
                 RowLayout {
-                    spacing: 12
-                    Action {
-                        label: root.connected ? "Add an account" : "Connect"
-                        strong: !root.connected
-                        enabledNow: !(root.request !== null && root.request.state === "pending")
-                        onPressed: root.connect()
+                    visible: !!(root.outcome && root.outcome.tx)
+                    Layout.fillWidth: true
+                    spacing: 16
+                    Text {
+                        textFormat: Text.PlainText
+                        text: "Transaction"
+                        color: look.dim
+                        font.family: look.sans
+                        font.pixelSize: look.px(14)
+                        Layout.preferredWidth: look.px(132)
+                        Layout.alignment: Qt.AlignTop
                     }
-                    Link { visible: root.connected; label: "Disconnect"; onPressed: root.disconnect() }
+                    Text {
+                        textFormat: Text.PlainText
+                        text: root.outcome && root.outcome.tx ? Logic.short(root.outcome.tx) : ""
+                        color: look.ink
+                        font.family: look.mono
+                        font.pixelSize: look.px(13)
+                    }
+                    Link {
+                        look: root.look
+                        font.underline: true
+                        text: "Copy"
+                        onPressed: root.copy((root.outcome && root.outcome.tx) || "", "Transaction")
+                    }
                 }
             }
 
-            // 2. Account selection.
-            Panel {
-                title: "2. Choose the account that receives them"
-                visible: root.connected
-                Hint {
+            // ── Account selection ─────────────────────────────────────────────────────
+            Card {
+                visible: root.connected && !root.settingsOpen
+                Heading { text: "Accounts that may receive LEZ" }
+                Body {
                     visible: root.payable.length === 0
-                    text: "Give this app a public account (Add an account): the faucet pays public accounts."
+                    text: "The faucet pays public accounts. Add a public account in Names Wallet."
                 }
-                Hint {
+                Body {
                     visible: root.hasPrivate
-                    text: "Private accounts can't be paid by a faucet. Have a public one paid, then move tokens to private in the Names app."
+                    text: "Private accounts can't be paid by a faucet. Have a public account paid, then move LEZ to private in the Names app."
                 }
                 Repeater {
                     model: root.payable
@@ -334,152 +449,133 @@ Item {
                         onPressed: root.chosen = modelData
                     }
                 }
+                Action {
+                    visible: root.payable.length === 0 && !root.showGuide
+                    look: root.look; strong: true; changes: true; busy: root.asking
+                    label: "Add an account"; busyLabel: "Waiting for you in Names…"
+                    working: root.request !== null && root.request.state === "pending"
+                    enabledNow: !(root.request !== null && root.request.state === "pending")
+                    onPressed: root.connect()
+                }
+                Link { look: root.look; font.underline: true; visible: root.connected && root.payable.length > 0; text: "Add an account"; onPressed: root.connect() }
+                Link { look: root.look; font.underline: true; visible: root.connected; text: "Disconnect Names Wallet"; onPressed: root.disconnect() }
             }
 
-            // 3. Ask.
-            Panel {
-                title: "3. Ask the faucet"
-                visible: root.connected && root.payable.length > 0
+            // ── Ask (the main action when the steps are hidden) ──────────────────────
+            Card {
+                visible: root.connected && root.payable.length > 0 && !root.settingsOpen && !root.showGuide
+                Heading { text: "Ask for test LEZ" }
+                Body { text: "The Names faucet sends free test LEZ to " + Logic.short(root.chosen) + ". It sends only the account ID; nothing is signed." }
+                Action {
+                    look: root.look; strong: true; changes: true; busy: root.asking
+                    label: root.coolingDown ? "Try again " + Logic.waitText(root.waitUntil - root.tick, root.waitUntil) : "Request test LEZ"
+                    busyLabel: "Requesting…"; working: root.asking
+                    enabledNow: !root.asking && !root.coolingDown && root.chosen !== "" && root.urlProblem === ""
+                    onPressed: root.ask()
+                }
+            }
+
+            // ── Settings ──────────────────────────────────────────────────────────────
+            Card {
+                visible: root.settingsOpen
+                Heading { text: "Faucet address" }
+                Body { text: "Any faucet that takes a POST with an account ID works, such as an official Logos faucet once there is one." }
+                Field {
+                    id: urlField
+                    look: root.look
+                    Layout.fillWidth: true
+                    code: true
+                    text: root.faucetUrl
+                    hint: Logic.DEFAULT_FAUCET_URL
+                    onAccepted: { root.faucetUrl = text.trim(); root.describe() }
+                }
+                Body {
+                    visible: root.urlProblem !== ""
+                    text: root.urlProblem
+                    color: look.alarm
+                }
                 RowLayout {
-                    spacing: 12
+                    spacing: 8
                     Action {
-                        label: root.asking ? "Asking…" : root.coolingDown ? "Try again " + Logic.waitText(root.waitUntil - root.tick, root.waitUntil) : "Get test tokens for " + Logic.short(root.chosen)
-                        strong: true
-                        enabledNow: !root.asking && !root.coolingDown && root.chosen !== "" && root.urlProblem === ""
-                        onPressed: root.ask()
+                        look: root.look; strong: true
+                        label: "Use this address"; busyLabel: "Checking…"
+                        working: false
+                        onPressed: { root.faucetUrl = urlField.text.trim(); root.describe() }
                     }
+                    Link { look: root.look; font.underline: true; text: "Use the Names faucet"; onPressed: { root.faucetUrl = Logic.DEFAULT_FAUCET_URL; urlField.text = root.faucetUrl; root.describe() } }
                 }
-                Status {
-                    visible: root.outcome !== null
-                    text: root.outcome ? root.outcome.message : ""
-                    tone: root.outcome && root.outcome.ok ? root.good : root.alarm
-                }
-                Hint {
-                    visible: root.outcome !== null && !root.outcome.ok && !root.outcome.final && root.outcome.retryText !== ""
-                    text: root.outcome ? "You can ask again " + root.outcome.retryText + "." : ""
-                }
-                Fact { visible: !!(root.outcome && root.outcome.tx); label: "Transaction"; value: root.outcome && root.outcome.tx ? root.outcome.tx : "" }
-                Status {
-                    visible: root.outcome !== null && root.outcome.ok
-                    text: root.arrived
-                        ? "Arrived: " + Logic.short(root.outcome.account) + " now holds " + Logic.grouped(Logic.balanceOf(root.balances, root.outcome.account)) + " LEZ."
-                        : root.tick - (root.outcome ? root.outcome.at : 0) > 600000
-                            ? "Not arrived after 10 minutes. The faucet forgets a grant that never arrives, so you can ask again."
-                            : "Waiting for it to arrive (the balance is read every 15 s)…"
-                    tone: root.arrived ? root.good : root.ink
-                }
-                Bad { text: root.problem }
             }
-        }
-    }
 
-    // ── Controls ────────────────────────────────────────────────────────────
+            TechDetails {
+                visible: !root.settingsOpen
+                look: root.look
+                title: "Technical details"
+                summary: root.faucetUrl ? Logic.hostOf(root.faucetUrl) : ""
+                FactRow { look: root.look; key: "Faucet"; value: root.faucetUrl; monospace: true }
+                FactRow { look: root.look; key: "What it receives"; value: "Only the public account ID you choose, never a key."; }
+                FactRow { look: root.look; key: "Balance reads"; value: "At most once every 15 seconds."; }
+            }
 
-    component Panel: Rectangle {
-        default property alias content: panelColumn.data
-        property string title: ""
-        Layout.fillWidth: true
-        implicitHeight: panelColumn.implicitHeight + 36
-        radius: 8
-        color: root.card
-        border.width: 1
-        border.color: root.line
-        ColumnLayout {
-            id: panelColumn
-            anchors.fill: parent
-            anchors.margins: 18
-            spacing: 10
+            // The plain result of the last step, and what happens next.
             Text {
-                text: parent.parent.title
-                color: root.ink
-                font.family: root.sans
-                font.pixelSize: root.px(19)
-                font.weight: Font.DemiBold
+                textFormat: Text.PlainText
+                visible: root.resultLine !== ""
+                Layout.fillWidth: true
+                text: root.resultLine
+                color: root.resultBad ? look.alarm : look.ink
+                font.family: look.sans
+                font.pixelSize: look.px(16)
+                font.weight: Font.Medium
+                wrapMode: Text.Wrap
+            }
+            Text {
+                textFormat: Text.PlainText
+                visible: root.nextLine !== ""
+                Layout.fillWidth: true
+                text: "What happens next: " + root.nextLine
+                color: look.dim
+                font.family: look.sans
+                font.pixelSize: look.px(15)
+                wrapMode: Text.Wrap
             }
         }
     }
 
-    component Hint: Text {
-        Layout.fillWidth: true
-        color: root.dim
-        font.family: root.sans
-        font.pixelSize: root.px(15)
-        wrapMode: Text.Wrap
-        textFormat: Text.PlainText
-    }
+    // ── Parts of this screen (the shared ones are in ./kit) ──────────────────────────
 
-    component Bad: Text {
+    component Card: Rectangle {
+        default property alias content: cardColumn.data
         Layout.fillWidth: true
-        visible: text !== ""
-        color: root.alarm
-        font.family: root.sans
-        font.pixelSize: root.px(15)
-        wrapMode: Text.Wrap
-        textFormat: Text.PlainText
-    }
-
-    component Status: Text {
-        property color tone: root.ink
-        Layout.fillWidth: true
-        color: tone
-        font.family: root.sans
-        font.pixelSize: root.px(17)
-        font.weight: Font.Medium
-        wrapMode: Text.Wrap
-        textFormat: Text.PlainText
-    }
-
-    component Fact: RowLayout {
-        property string label: ""
-        property string value: ""
-        Layout.fillWidth: true
-        spacing: 10
-        Text { text: parent.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15) }
-        TextEdit {
-            Layout.fillWidth: true
-            text: parent.value
-            readOnly: true
-            selectByMouse: true
-            color: root.ink
-            font.family: root.mono
-            font.pixelSize: root.px(14)
-            wrapMode: TextEdit.WrapAnywhere
+        implicitHeight: cardColumn.implicitHeight + 36
+        radius: 8
+        color: root.look.card
+        border.width: 1
+        border.color: root.look.line
+        ColumnLayout {
+            id: cardColumn
+            anchors { left: parent.left; right: parent.right; top: parent.top; margins: 18 }
+            spacing: 10
         }
     }
 
-    component Action: Rectangle {
-        id: action
-        property string label: ""
-        property bool strong: false
-        property bool enabledNow: true
-        signal pressed()
-        implicitWidth: actionText.implicitWidth + 28
-        implicitHeight: 38
-        radius: 6
-        color: !enabledNow ? "transparent" : strong ? (actionArea.containsMouse ? Qt.lighter(root.brass, 1.08) : root.brass) : (actionArea.containsMouse ? root.raised : "transparent")
-        border.width: strong && enabledNow ? 0 : 1
-        border.color: activeFocus ? root.brass : root.line
-        opacity: enabledNow ? 1 : 0.55
-        activeFocusOnTab: enabledNow
-        Keys.onReturnPressed: if (enabledNow) action.pressed()
-        Keys.onSpacePressed: if (enabledNow) action.pressed()
-        Text {
-            id: actionText
-            anchors.centerIn: parent
-            text: action.label
-            color: action.strong && action.enabledNow ? root.slate : root.ink
-            font.family: root.sans
-            font.pixelSize: root.px(17)
-            font.weight: Font.DemiBold
-        }
-        MouseArea {
-            id: actionArea
-            anchors.fill: parent
-            hoverEnabled: true
-            enabled: action.enabledNow
-            cursorShape: Qt.PointingHandCursor
-            onClicked: action.pressed()
-        }
+    component Heading: Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        color: root.look.ink
+        font.family: root.look.sans
+        font.pixelSize: root.look.px(19)
+        font.weight: Font.DemiBold
+        wrapMode: Text.Wrap
+    }
+
+    component Body: Text {
+        textFormat: Text.PlainText
+        Layout.fillWidth: true
+        color: root.look.dim
+        font.family: root.look.sans
+        font.pixelSize: root.look.px(15)
+        lineHeight: 1.2
+        wrapMode: Text.Wrap
     }
 
     component Choice: Rectangle {
@@ -488,73 +584,25 @@ Item {
         property string detail: ""
         property bool chosen: false
         signal pressed()
-        implicitHeight: 40
+        implicitHeight: 42
         radius: 6
-        color: choiceArea.containsMouse ? root.raised : "transparent"
+        color: choiceArea.containsMouse ? root.look.raised : "transparent"
         border.width: 1
-        border.color: chosen ? root.brass : root.line
+        border.color: chosen ? root.look.brass : root.look.line
+        activeFocusOnTab: true
+        Keys.onSpacePressed: choice.pressed()
         RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: 12
-            anchors.rightMargin: 12
+            anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
             spacing: 10
             Rectangle {
-                implicitWidth: 14
-                implicitHeight: 14
-                radius: 7
-                color: choice.chosen ? root.brass : "transparent"
+                implicitWidth: 14; implicitHeight: 14; radius: 7
+                color: choice.chosen ? root.look.brass : "transparent"
                 border.width: 1
-                border.color: choice.chosen ? root.brass : root.dim
+                border.color: choice.chosen ? root.look.brass : root.look.dim
             }
-            Text {
-                Layout.fillWidth: true
-                text: choice.label
-                color: root.ink
-                font.family: root.mono
-                font.pixelSize: root.px(14)
-                elide: Text.ElideMiddle
-            }
-            Text { text: choice.detail; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: choice.label; color: root.look.ink; font.family: root.look.sans; font.pixelSize: root.look.px(15); elide: Text.ElideRight }
+            Text { textFormat: Text.PlainText; text: choice.detail; color: root.look.dim; font.family: root.look.sans; font.pixelSize: root.look.px(14) }
         }
         MouseArea { id: choiceArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: choice.pressed() }
-    }
-
-    component Link: Text {
-        id: link
-        property string label: ""
-        signal pressed()
-        text: label
-        color: linkArea.containsMouse ? root.brass : root.ink
-        font.family: root.sans
-        font.pixelSize: root.px(16)
-        font.underline: true
-        MouseArea { id: linkArea; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: link.pressed() }
-    }
-
-    component Field: Rectangle {
-        id: field
-        property alias text: input.text
-        property bool code: false
-        signal edited()
-        implicitHeight: 40
-        radius: 6
-        color: root.slate
-        border.width: 1
-        border.color: input.activeFocus ? root.brass : root.line
-        TextInput {
-            id: input
-            anchors.fill: parent
-            anchors.leftMargin: 12
-            anchors.rightMargin: 12
-            verticalAlignment: TextInput.AlignVCenter
-            color: root.ink
-            selectionColor: root.brass
-            selectedTextColor: root.slate
-            font.family: field.code ? root.mono : root.sans
-            font.pixelSize: field.code ? root.px(15) : root.px(17)
-            clip: true
-            selectByMouse: true
-            onEditingFinished: field.edited()
-        }
     }
 }
