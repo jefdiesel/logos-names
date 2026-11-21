@@ -11754,7 +11754,7 @@ Item {
                 // 9. What can be done with it: a name card moves only with its name.
                 Part { visible: nftItemPage.deed && nftItemPage.shown; text: "Moving it" }
                 Hint { visible: nftItemPage.deed && nftItemPage.shown; color: root.ink; text: "It moves with the name: transferring " + root.nftItemDeed + " sends the card too, and releasing the name burns it. It can't be sent, printed or burned on its own." }
-                Link { visible: nftItemPage.deed && root.nftItemDeed !== ""; text: "Go to " + root.nftItemDeed + " in My names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
+                Link { visible: nftItemPage.deed && nftItemPage.shown && root.nftItemDeed !== ""; text: "Go to " + root.nftItemDeed + " in My names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
 
                 Part { visible: !nftItemPage.deed && nftItemPage.row !== null && nftItemPage.row.state !== "unreadable"; text: "Send, print or burn" }
                 ColumnLayout {
