@@ -61,6 +61,11 @@ check("above", [L.above("2000001", "2000000"), L.above("2000000", "2000000"), L.
 check("grouped", [L.grouped("2000000"), L.grouped("12"), L.grouped("x")], ["2,000,000", "12", "x"]);
 check("balanceOf", [L.balanceOf([{ account: "Public/" + ID, balance: "5" }], "Public/" + ID), L.balanceOf([], "Public/" + ID)], ["5", null]);
 
+// ── Short ids for display (the Transaction row shows a short hash, Copy has the full one) ──
+const HASH = "ab".repeat(32);
+check("short: a 64-character hash keeps its ends", L.short(HASH), "ababab…abab");
+check("short: a short id is left alone", L.short("abc"), "abc");
+
 // ── The workflow the screen teaches ─────────────────────────────────────────────────
 check("faucetStep: one step at a time", [
     L.faucetStep({}),

@@ -222,6 +222,16 @@ Item {
         guideDone = true
     }
 
+    /// Copy a full id or hash, with a plain result line. The screen shows only the short form.
+    function copy(text, what) {
+        clipboard.text = text
+        clipboard.selectAll()
+        clipboard.copy()
+        say(what + " copied.")
+    }
+
+    TextEdit { id: clipboard; visible: false }
+
     Component.onCompleted: {
         backendReady = backend !== null && logos.isViewModuleReady && logos.isViewModuleReady("faucet_ui")
         readGranted()
@@ -270,6 +280,7 @@ Item {
                 }
                 Link {
                     look: root.look
+                    font.underline: true
                     Layout.alignment: Qt.AlignTop
                     text: root.showGuide ? "Hide steps" : "Steps"
                     onPressed: root.showGuide ? root.finishGuide() : root.guideOpen = true
@@ -279,7 +290,7 @@ Item {
             // ── The steps, with the current one marked and its help under it ──────────
             Card {
                 visible: root.showGuide && !root.settingsOpen
-                Heading { text: "What do you want to do?" }
+                Heading { text: "How it works" }
                 Repeater {
                     model: Logic.guideSteps(root.step)
                     delegate: RowLayout {
@@ -355,6 +366,7 @@ Item {
                             Link {
                                 visible: stepRow.now && stepRow.modelData.n === 4
                                 look: root.look
+                                font.underline: true
                                 text: root.arriving ? "Not arrived yet? Check the balance" : "Check the balance"
                                 onPressed: root.readBalances()
                             }
@@ -382,9 +394,32 @@ Item {
                     text: "You don't need it: bridge LEZ from the Logos Blockchain in the Names app, or have someone pay your account."
                         + (root.faucetInfo && root.faucetInfo.amount ? " This faucet gives " + Logic.grouped(root.faucetInfo.amount) + " LEZ, " + (root.faucetInfo.per_account || "once a day") + " per account and per internet address." : " The Names faucet pays each account and each internet address once a day.")
                 }
-                FactRow {
+                RowLayout {
                     visible: !!(root.outcome && root.outcome.tx)
-                    look: root.look; key: "Transaction"; value: root.outcome && root.outcome.tx ? root.outcome.tx : ""; monospace: true
+                    Layout.fillWidth: true
+                    spacing: 16
+                    Text {
+                        textFormat: Text.PlainText
+                        text: "Transaction"
+                        color: look.dim
+                        font.family: look.sans
+                        font.pixelSize: look.px(14)
+                        Layout.preferredWidth: look.px(132)
+                        Layout.alignment: Qt.AlignTop
+                    }
+                    Text {
+                        textFormat: Text.PlainText
+                        text: root.outcome && root.outcome.tx ? Logic.short(root.outcome.tx) : ""
+                        color: look.ink
+                        font.family: look.mono
+                        font.pixelSize: look.px(13)
+                    }
+                    Link {
+                        look: root.look
+                        font.underline: true
+                        text: "Copy"
+                        onPressed: root.copy((root.outcome && root.outcome.tx) || "", "Transaction")
+                    }
                 }
             }
 
@@ -422,8 +457,8 @@ Item {
                     enabledNow: !(root.request !== null && root.request.state === "pending")
                     onPressed: root.connect()
                 }
-                Link { look: root.look; visible: root.connected && root.payable.length > 0; text: "Add an account"; onPressed: root.connect() }
-                Link { look: root.look; visible: root.connected; text: "Disconnect Names Wallet"; onPressed: root.disconnect() }
+                Link { look: root.look; font.underline: true; visible: root.connected && root.payable.length > 0; text: "Add an account"; onPressed: root.connect() }
+                Link { look: root.look; font.underline: true; visible: root.connected; text: "Disconnect Names Wallet"; onPressed: root.disconnect() }
             }
 
             // ── Ask (the main action when the steps are hidden) ──────────────────────
@@ -467,7 +502,7 @@ Item {
                         working: false
                         onPressed: { root.faucetUrl = urlField.text.trim(); root.describe() }
                     }
-                    Link { look: root.look; text: "Use the Names faucet"; onPressed: { root.faucetUrl = Logic.DEFAULT_FAUCET_URL; urlField.text = root.faucetUrl; root.describe() } }
+                    Link { look: root.look; font.underline: true; text: "Use the Names faucet"; onPressed: { root.faucetUrl = Logic.DEFAULT_FAUCET_URL; urlField.text = root.faucetUrl; root.describe() } }
                 }
             }
 
