@@ -383,6 +383,22 @@ export function create(host) {
     /// metadata.json `uses`). The wallet shows your app again once the person answers.
     wallet.open = function() { if (h.open && wallet.current && wallet.current.app) h.open(wallet.current.app) }
 
+    /// Show the person a name, or an account with its name, in the wallet's own lookup:
+    /// Names comes forward on that name's card (the `names.open` intent, read only: nothing is
+    /// asked or changed). `nameOrAccount`: "jef", "jef.lez" or a base58 account ID.
+    /// done(r): {ok, error} once the wallet has it on screen ("unavailable" when it can't:
+    /// check has("show_name")). Declare `{ "intent": "names.open" }` in metadata.json `uses`;
+    /// Basecamp may ask the person once to let your app open it.
+    wallet.show = function(nameOrAccount, done) {
+        var text = String(nameOrAccount === undefined || nameOrAccount === null ? "" : nameOrAccount).trim()
+        var finish = function(r) { if (done) done(r) }
+        if (text === "") { finish({ ok: false, error: "bad_request" }); return }
+        if (!h.show) { finish({ ok: false, error: "unavailable" }); return }
+        h.show(text, function(res) {
+            finish(res && res.ok ? { ok: true, error: "" } : { ok: false, error: String(res && res.error || "failed") })
+        })
+    }
+
     /// Read `request` (its id, or the request) every POLL_MS until it is no longer open
     /// (options.status: another method to read it with, options.cancel: to withdraw it).
     /// handlers: update(request) each read while open, done(request) at the end (approved,

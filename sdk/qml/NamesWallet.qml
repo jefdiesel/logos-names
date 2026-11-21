@@ -7,9 +7,9 @@
 // and bind to wallet.status, .problem, .accounts, .features, .wallets, .current. The calls are
 // the SDK's (NamesWalletSDK.mjs documents each): listWallets, getWallet, chooseWallet,
 // forgetWallet, check, connect, disconnect, balances, proposeCall, proposeTransfer, propose,
-// watch, withdraw, resolve, reverse, call, has, open. Your app never names a wallet module.
+// watch, withdraw, resolve, reverse, show, call, has, open. Your app never names a wallet module.
 // Your metadata.json declares `"uses": [{ "intent": "basecamp.apps.launch" }]`, so the wallet
-// can be brought forward.
+// can be brought forward, and `{ "intent": "names.open" }` for `show`.
 
 import QtQuick
 import "NamesWalletSDK.mjs" as SDK
@@ -76,6 +76,11 @@ Item {
             open: function(appName) {
                 var b = wallet.bridge
                 if (b && b.request && appName) b.request("basecamp.apps.launch", { app: appName }, function() {})
+            },
+            show: function(text, done) {
+                var b = wallet.bridge
+                if (!(b && b.request)) { done({ ok: false, error: "unavailable" }); return }
+                b.request("names.open", { name: text }, function(res) { done(res) })
             },
             recall: function(key) {
                 var k = wallet.app + "/" + key
@@ -145,4 +150,5 @@ Item {
     function proposeTransfer(asset, amount, destination, handlers, options) { sdk().proposeTransfer(asset, amount, destination, handlers, options) }
     function resolve(name, done) { sdk().resolve(name, done) }
     function reverse(account, done) { sdk().reverse(account, done) }
+    function show(nameOrAccount, done) { sdk().show(nameOrAccount, done) }
 }

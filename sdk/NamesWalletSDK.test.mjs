@@ -20,7 +20,7 @@ const NAMES_ROW = { name: "names", moduleName: "names", type: "core", category: 
 /// called; the wallet's calls are recorded in `calls` ([method, args]), every call in `all`.
 function harness(answers, options) {
   const o = options || {};
-  const calls = [], all = [], timers = [], opened = [], changes = [], kept = {};
+  const calls = [], all = [], timers = [], opened = [], changes = [], kept = {}, shown = [];
   const counts = {};
   const host = {
     call(module, method, args, callback) {
@@ -43,6 +43,7 @@ function harness(answers, options) {
     },
     later(f, ms) { timers.push({ f, ms }); },
     open(app) { opened.push(app); },
+    show: o.noShow ? undefined : function(text, done) { shown.push(text); queueMicrotask(() => done(o.showAnswer || { ok: true, error: "", data: { name: text } })); },
     recall(key) { return kept[key] || ""; },
     remember(key, value) { kept[key] = value; },
     changed(w) { changes.push(w.state); },
@@ -58,7 +59,7 @@ function harness(answers, options) {
       await settle();
     }
   }
-  return { wallet, calls, all, timers, opened, changes, kept, tick, settle };
+  return { wallet, calls, all, timers, opened, changes, kept, shown, tick, settle };
 }
 
 test("VERSION is semver text", () => assert.match(SDK.VERSION, /^\d+\.\d+\.\d+$/));
@@ -521,4 +522,25 @@ test("the QML side forwards every call the SDK has", () => {
     assert.match(qml, new RegExp("function " + name + "\\("), name);
   assert.match(qml, /basecamp\.apps\.launch/);
   assert.match(qml, /oneShot\.createObject/);
+});
+
+test("show: a name or an account, trimmed, through the wallet's lookup; no way there, unavailable", async () => {
+  const h = harness({});
+  const got = [];
+  h.wallet.show("  jefdiesel ", (r) => got.push(r));
+  h.wallet.show("BawxwquWtPEVcrwSFftD6jS3XFxZNv4qYrV8pkyo9mu7", (r) => got.push(r));
+  h.wallet.show("", (r) => got.push(r));
+  await h.settle();
+  assert.deepEqual(h.shown, ["jefdiesel", "BawxwquWtPEVcrwSFftD6jS3XFxZNv4qYrV8pkyo9mu7"]);
+  // Nothing to show answers at once; the others once the wallet has them.
+  assert.deepEqual(got, [{ ok: false, error: "bad_request" }, { ok: true, error: "" }, { ok: true, error: "" }]);
+  const none = harness({}, { noShow: true });
+  const r = [];
+  none.wallet.show("jef", (x) => r.push(x));
+  assert.deepEqual(r, [{ ok: false, error: "unavailable" }]);
+  const refused = harness({}, { showAnswer: { ok: false, error: "cancelled" } });
+  const c = [];
+  refused.wallet.show("jef", (x) => c.push(x));
+  await refused.settle();
+  assert.deepEqual(c, [{ ok: false, error: "cancelled" }]);
 });

@@ -176,7 +176,7 @@ anyone who knows the name can read; nothing comes from the person's wallet.
 | Method | Value |
 |---|---|
 | `resolve(name)` | the name's record: `{name, display, owner_tag, expires, never, lapsed, deposit, claimed, account, npk, vpk, texts, forward, deed}`, or `null` when nobody holds it. `account` is the public account ID (base58) the name publishes, or null. `forward` is the name it points to (SPEC.md §7); `resolve` doesn't follow it. A name that isn't one (`b@d`, an account ID) is refused in words |
-| `reverse(account)` | `{name, display}`, the name `account` (`Public/<id>` or the base58 ID) set as its own, checked against that name's record; `null` when it set none |
+| `reverse(account)` | `{name, display}`, the name `account` (`Public/<id>` or the base58 ID) set as its own, checked against that name's record. A plain public account sets none: then the first name this wallet holds whose record publishes `account` (public information, checked against the chain the same way). `null` when there is neither |
 | `recipient(name)` | where a payment to `name` goes, one `forward` followed: `{name, display, public, public_hex, private, lapsed, forwarded_from?}` |
 
 In a module whose `get_config().features` lists `app_name_reads` (the release after 0.18.0), another app's `resolve`,
@@ -854,6 +854,7 @@ unclear?, uncertain?, none?}`, `error` in plain words.
 | `disconnect(done, failed)` | `drop_access`; `status` becomes `disconnected`. |
 | `resolve(name, done(r))` | LNS name → account, through the wallet's `resolve`, one `forward` followed (as a payment to it is). See below. |
 | `reverse(account, done(r))` | account → its LNS name, through the wallet's `reverse`. See below. |
+| `show(nameOrAccount, done(r))` | brings Names forward on that name's card (a name, `name.lez`, or a base58 account with its name): the `names.open` intent, read only. `r` is `{ok, error}`. Needs `{ "intent": "names.open" }` in your `uses`; Basecamp may ask the person once to let your app open Names. Check `get_config().features` for `"show_name"` first. |
 | `call(method, args, done, failed)` | any other method of the wallet, with the same retries (`app_secret`, `resign_relayed_call`, `granted_nfts`, …). |
 | `has(feature)`, `open()` | a `get_config` feature (after `check`); bring the wallet forward. |
 

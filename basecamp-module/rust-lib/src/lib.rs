@@ -230,6 +230,9 @@ pub trait NamesModule: Send + 'static {
 
     /// The name `account` (base58) has published for itself, or null. The
     /// answer is checked against the name's own record, so it cannot be spoofed.
+    /// An account with no reverse record of its own (a plain public account) is
+    /// looked up in the names this device remembers holding: the first whose
+    /// record publishes the account; for the Names app also one the account holds.
     fn reverse(&mut self, account: String) -> String;
 
     /// The bare name for what a person typed (`Jef.LEZ` gives `jef`), or an
@@ -1811,7 +1814,9 @@ const MODULE_VERSION: &str = "0.18.0";
 /// `address_repair`: `repair_name` exists, every profile the module seals carries the holder's
 /// account and the chat address noted as `app_note` `chat`, and `mine` says which names need it.
 /// `app_name_reads`: other apps' `resolve`/`reverse` run on their own thread, per app.
-const MODULE_FEATURES: [&str; 15] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "address_repair", "app_name_reads"];
+/// `show_name`: the Names app opens a name or an account for another app (the `names.open`
+/// intent, the SDK's `show`), and `reverse` falls back to a held name that publishes the account.
+const MODULE_FEATURES: [&str; 16] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "address_repair", "app_name_reads", "show_name"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -5333,10 +5338,39 @@ fn recipient_answer(registry: &Registry, name: &str, derived: &Derived) -> Resul
     Ok(value)
 }
 
-/// `reverse`'s read: the name `account` set as its own, if any.
-fn reverse_answer(registry: &Registry, account: &AccountId) -> Result<Value, String> {
-    let name = registry.reverse(account)?;
+/// `reverse`'s read: the name `account` set as its own, if any; else the first of `remembered`
+/// (the names this device remembers holding) whose own record ties it to `account`
+/// (`held_name_for`). Each is read from the chain here, so neither can be spoofed.
+fn reverse_answer(registry: &Registry, account: &AccountId, remembered: &[String], own: bool) -> Result<Value, String> {
+    let name = match registry.reverse(account)? {
+        Some(name) => Some(name),
+        None => {
+            let now = registry::local_now();
+            let mut found = None;
+            for name in remembered {
+                let derived = derived_kept(name);
+                let record = registry.resolve(name, &derived).ok().flatten();
+                if held_name_for(account, &[(name.clone(), derived.id, record)], own, now).is_some() {
+                    found = Some(name.clone());
+                    break;
+                }
+            }
+            found
+        }
+    };
     Ok(name.map_or(Value::Null, |name| json!({ "name": name, "display": format!("{name}{}", registry::NAME_SUFFIX) })))
+}
+
+/// The first of `held` ((name, its identifier, its record as read)) whose own record ties it
+/// to `account`: the record publishes the account (public, so any app may learn it), or, for
+/// the Names app only (`own`), the account holds it (the holder is a tag only the wallet can
+/// match). A name past its grace period counts for nothing.
+fn held_name_for(account: &AccountId, held: &[(String, registry::NameId, Option<registry::Resolved>)], own: bool, now: u64) -> Option<String> {
+    held.iter()
+        .find(|(_, id, record)| {
+            record.as_ref().is_some_and(|record| !record.gone(now) && (record.profile.account == Some(*account) || (own && record.is_held_by(id, account))))
+        })
+        .map(|(name, _, _)| name.clone())
 }
 
 /// The Logos Blockchain key `name` publishes (one forward followed): `{key, name, forwarded_from}`.
@@ -5586,21 +5620,23 @@ impl NamesModule for Names {
                 Ok(read) => read,
                 Err(why) => return reply(Err(why)),
             };
+            // The names this device remembers: what an account with no reverse record of its own
+            // is looked up in (reverse_answer).
+            let remembered = memory().map(|memory| memory.names(&program).into_iter().map(|(name, _)| name).collect::<Vec<_>>()).unwrap_or_default();
             let key = format!("reverse:{}:{sequencer}:{}", registry::account_text(&account), registry::account_text(&program));
             if let Some(app) = app {
                 let host = sequencer.clone();
-                return self.app_read(&app, &key, &host, move || reverse_answer(&Registry::new(&sequencer, program), &account));
+                return self.app_read(&app, &key, &host, move || reverse_answer(&Registry::new(&sequencer, program), &account, &remembered, false));
             }
             let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
-            let snap = self.served.read(&key, READ_FRESH, lane, move || reverse_answer(&Registry::new(&sequencer, program), &account));
+            let snap = self.served.read(&key, READ_FRESH, lane, move || reverse_answer(&Registry::new(&sequencer, program), &account, &remembered, true));
             return served::reply_of(&snap, "This account's name", |_| Value::Null);
         }
         reply((|| {
             let account = registry::parse_account(&account)?;
-            let name = self.registry()?.reverse(&account)?;
-            Ok(name.map_or(Value::Null, |name| {
-                json!({ "name": name, "display": format!("{name}{}", registry::NAME_SUFFIX) })
-            }))
+            let registry = self.registry()?;
+            let remembered = memory().map(|memory| memory.names(&registry.program).into_iter().map(|(name, _)| name).collect::<Vec<_>>()).unwrap_or_default();
+            reverse_answer(&registry, &account, &remembered, only_the_names_app().is_ok())
         })())
     }
 
@@ -14898,6 +14934,36 @@ mod tests {
         std::fs::copy(dir.join("argv"), out.join("argv")).unwrap();
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A plain public account has no reverse record: its name is the one this device holds whose
+    /// record publishes it (any app may learn that), or, for the Names app, the one it holds.
+    #[test]
+    fn reverse_falls_back_to_a_held_name_that_publishes_the_account() {
+        let account = registry::parse_account("BawxwquWtPEVcrwSFftD6jS3XFxZNv4qYrV8pkyo9mu7").unwrap();
+        let other = registry::parse_account(PUBLIC).unwrap();
+        let record = |name: &str, publishes: Option<AccountId>, holder: &AccountId, id: &registry::NameId| registry::Resolved {
+            owner: registry::owner_tag(id, holder),
+            expires: registry::NEVER,
+            profile: registry::Profile { account: publishes, ..registry::Profile::bare(name) },
+            claimed: false,
+            deed: None,
+            sealed: registry::Sealed::Opened,
+        };
+        let (jef04, jefdiesel, quiet) = ([4_u8; 32], [7_u8; 32], [9_u8; 32]);
+        let held = vec![
+            ("jef04".to_owned(), jef04, Some(record("jef04", Some(other), &other, &jef04))),
+            ("quiet".to_owned(), quiet, Some(record("quiet", None, &account, &quiet))),
+            ("gone".to_owned(), [1; 32], None),
+            ("jefdiesel".to_owned(), jefdiesel, Some(record("jefdiesel", Some(account), &account, &jefdiesel))),
+        ];
+        // Another app: only a name whose record publishes the account.
+        assert_eq!(held_name_for(&account, &held, false, 0).as_deref(), Some("jefdiesel"));
+        // The Names app: the first the account holds, published or not.
+        assert_eq!(held_name_for(&account, &held, true, 0).as_deref(), Some("quiet"));
+        assert_eq!(held_name_for(&other, &held, false, 0).as_deref(), Some("jef04"));
+        let nobody = registry::parse_account(OTHER).unwrap();
+        assert_eq!(held_name_for(&nobody, &held, true, 0), None);
     }
 
     /// Names 0.18: a call that reads the network clock reaches the CLI with the clock's own actor,
