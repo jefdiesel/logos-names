@@ -1,7 +1,7 @@
 # Faucet (Basecamp mini-app)
 
-Free LEZ testnet tokens, paid to an account the person picks from their Names Wallet. It is the
-LP-0021 **Faucet mini-app** and a worked example of the
+Free test LEZ on the Logos test network, paid to an account the person picks from their Names
+Wallet. It is the LP-0021 **Faucet mini-app** and a worked example of the
 [Wallet Provider SDK](../../docs/wallet/PROVIDER-SDK.md): the wallet side (connect, account
 selection, balances) goes through the `names` module's SDK, and the app never sees a key.
 
@@ -10,7 +10,43 @@ selection, balances) goes through the `names` module's SDK, and the app never se
 | Basecamp name | `faucet_ui` |
 | Needs | the `names` module `>=0.11.0` and the Names app open to approve access |
 | Default faucet | `https://lez.buggers.online/faucet`, the Names faucet ([`chain/faucet.py`](../../chain/faucet.py)), the same one the module's `cli_faucet` uses |
-| Settings | the faucet URL (https, or http only on this computer) |
+| Faucet URL | `Logic.DEFAULT_FAUCET_URL` (https, or http only on this computer) |
+
+## The screen
+
+The page uses the shared kit: one left-aligned column, at most 680 px wide, 56 px from the window
+edge (24 px when narrow). The header is `PageHeader`:
+
+- **Title:** "Faucet"
+- **Sentence:** "Get free test LEZ on the Logos network."
+- **Runs on:** "Runs on Bridge test network · <host>" (the host of the faucet URL).
+
+The "How it works" card teaches these five steps, word for word from `Logic.guideSteps()` in
+[`src/qml/logic.mjs`](src/qml/logic.mjs). The current step is marked and its help is printed
+under it.
+
+1. **Connect Names Wallet** — Names Wallet asks which accounts this app may see. You approve it in the Names app; the faucet signs nothing.
+2. **Choose a public account** — The faucet pays public accounts. Have a private one? Have a public account paid, then move LEZ to private in the Names app.
+3. **Ask for test LEZ** — This asks the Names faucet for free test LEZ. It sends only the account ID you choose; the service sees your internet address.
+4. **Wait for the test LEZ to arrive** — It usually arrives within a block or two. The account balance is read every 15 seconds.
+5. **Use the test LEZ** — Try the vesting app, or bridge LEZ from the Logos Blockchain in the Names app. You can ask this faucet again tomorrow.
+
+Buttons use the exact labels from [`src/qml/Main.qml`](src/qml/Main.qml):
+
+- "Connect" (step 1) and "Add an account" (step 2, or the account card when the steps are hidden)
+  open the Names Wallet access request; while it waits they read "Waiting for you in Names…".
+- "Request test LEZ" asks the faucet and reads "Requesting…" while it runs. After a grant it
+  becomes "Try again " with the wait time (24 hours for that account).
+- "Check the balance", or "Not arrived yet? Check the balance" once a request is waiting,
+  re-reads the account balance.
+- "Got it" hides the steps; "Steps" brings them back, and "Hide steps" is the header link while
+  they are shown.
+- "Disconnect Names Wallet" drops access. "Copy" copies the full transaction hash shown short in
+  the Transaction row.
+- "Use this address" applies a typed faucet URL; "Use the Names faucet" restores the default.
+
+Every button disables itself at once and ends in a plain result line, with a "What happens next:"
+line where there is one. Red is used only for a real problem.
 
 ## An optional, disclosed service
 
