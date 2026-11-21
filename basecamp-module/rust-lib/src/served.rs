@@ -314,6 +314,20 @@ impl Served {
         Self::snap(lock(&self.shared.slots).1.get(key))
     }
 
+    /// How many keys start with `prefix`, and how many of those are being read now.
+    pub fn count(&self, prefix: &str) -> (usize, usize) {
+        let slots = lock(&self.shared.slots);
+        let mine = slots.1.iter().filter(|(key, _)| key.starts_with(prefix));
+        mine.fold((0, 0), |(kept, reading), (_, slot)| (kept + 1, reading + usize::from(slot.updating)))
+    }
+
+    /// Forgets every key under `prefix` that isn't being read now (a read under way stays, so it
+    /// still counts against what may be under way).
+    pub fn forget_idle(&self, prefix: &str) {
+        lock(&self.shared.slots).1.retain(|key, slot| !key.starts_with(prefix) || slot.updating);
+        self.shared.ended.notify_all();
+    }
+
     /// Forgets one key exactly. Unlike `forget`, this does not clear other keys that happen to
     /// start with it (one name's key can prefix another's). The next call reads afresh, and a read
     /// under way for this key is dropped when it ends.

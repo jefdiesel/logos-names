@@ -374,8 +374,10 @@ pub trait NamesModule: Send + 'static {
     /// The sequencer URL, registry program ID and wallet files in use. To the Names app, the
     /// plain object (as every version of the app reads it); to any other app, the network part
     /// only (`sequencer`, `names_sequencer`, `registry`, `token_program`, `zone`,
-    /// `names_network`, `module_version`) in the usual `{success, value, error}` envelope
-    /// (since 0.17.0; before, it was a plain object for every caller).
+    /// `names_network`, `module_version`, `features`, and `wallet_sdk`: `{name: "names-wallet",
+    /// version, app}`, the Names Wallet SDK this module implements) in the usual
+    /// `{success, value, error}` envelope (since 0.17.0; before, it was a plain object for every
+    /// caller).
     fn get_config(&mut self) -> String;
 
     /// Switches the names network to `network`: `lez-0.3` (the public Logos testnet) or
@@ -1539,6 +1541,15 @@ struct Names {
 
 /// How long a cached read about a name is used before it is read again.
 const READ_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+/// Another app's reads of names and accounts (`app_read`): how many may be under way at once
+/// (one more is answered busy, nothing started), and how many are kept.
+const APP_READS_IN_FLIGHT: usize = 4;
+const APP_READS_KEPT: usize = 128;
+
+/// The keys another app's reads are kept under: never the Names app's, never another app's.
+fn app_reads_prefix(app: &str) -> String {
+    format!("app:{app}|")
+}
 
 /// A board read: the last result, and whether a newer one is being fetched.
 #[derive(Default)]
@@ -1774,6 +1785,8 @@ impl Default for Names {
 /// The one app that may use the methods that spend, sign, change the module's
 /// settings or read the person's own state: the Names app.
 const NAMES_APP: &str = "names_ui";
+/// The Names Wallet SDK version this module implements (sdk/qml/NamesWalletSDK.mjs `SDK_VERSION`).
+const WALLET_SDK_VERSION: &str = "1.0";
 
 /// This module's package version, the one in `basecamp-module/metadata.json`.
 /// `get_config` reports it so the Names app can refuse a module from another
@@ -1789,7 +1802,8 @@ const MODULE_VERSION: &str = "0.18.0";
 /// `{"account": <clock account>, "program": <clock program>}`.
 /// `address_repair`: `repair_name` exists, every profile the module seals carries the holder's
 /// account and the chat address noted as `app_note` `chat`, and `mine` says which names need it.
-const MODULE_FEATURES: [&str; 14] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "address_repair"];
+/// `app_name_reads`: other apps' `resolve`/`reverse` run on their own thread, per app.
+const MODULE_FEATURES: [&str; 15] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "address_repair", "app_name_reads"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -1929,7 +1943,17 @@ fn public_config(config: &Value) -> Value {
         // What this build can do (MODULE_FEATURES): an app checks it before using a newer call
         // (`request_access_with`, `grant_add_account`). Nothing in it is private.
         "features": config["features"],
+        // That this module implements the Names Wallet SDK, its version and the app to open
+        // (docs/wallet/PROVIDER-SDK.md, "Implementing the SDK in another wallet").
+        "wallet_sdk": config["wallet_sdk"],
     })
+}
+
+/// The Names Wallet SDK this module implements (`get_config`'s `wallet_sdk`): an app's
+/// `listWallets` reads it to know this is a wallet, which version it speaks, and which app to
+/// bring forward for the person's answers.
+fn wallet_sdk() -> Value {
+    json!({ "name": "names-wallet", "version": WALLET_SDK_VERSION, "app": NAMES_APP })
 }
 
 /// The home zone as the configuration's own fields give it: `sequencer`, and nothing
@@ -3033,6 +3057,7 @@ impl Names {
         // What this build can do that an earlier 0.17.0 can't, for an app to check (every 0.17.0
         // says 0.17.0): `reveal_name` (the reveal driver's reveal-only call).
         config["features"] = json!(MODULE_FEATURES);
+        config["wallet_sdk"] = wallet_sdk();
         // This computer's memory, for the app's warning before a proof (about 9.5 GB).
         config["memory_bytes"] = machine_memory().map_or(Value::Null, Value::from);
         config["names_network"] = self.net.shown();
@@ -3093,15 +3118,28 @@ impl Names {
         self.about(&name, avatar_answer)
     }
 
-    /// A read about a name for the Names app (`resolve`, `page`, `page_view`, `avatar`,
-    /// `deposit`): made on a thread of its own (the name's derivation too, Argon2, seconds of CPU)
-    /// and answered at once with the last one (served.rs), busy until the first is back; read again
-    /// after `READ_FRESH`, at once after a change to the name (`forget_reads`). None for another
-    /// app's read and in unit tests, which read on the spot (`cached_read`), as every app's did.
+    /// A read about a name (`resolve`, `recipient`, `page`, `page_view`, `avatar`, `deposit`):
+    /// made on a thread of its own (the name's derivation too, Argon2, seconds of CPU) and answered
+    /// at once with the last one (served.rs), busy until the first is back; read again after
+    /// `READ_FRESH`, at once after a change to the name (`forget_reads`). None in unit tests, which
+    /// read on the spot (`cached_read`).
+    ///
+    /// Another app's read (feature `app_name_reads`, the release after 0.18.0) goes the same way, apart from the
+    /// Names app's: its own keys (`app_reads_key`), its own lane, a derivation of its own (never
+    /// the wallet's kept ones), at most `APP_READS_IN_FLIGHT` at a time. Before, it was read on
+    /// the module's one thread, so a slow sequencer held every call (Names app's too) for up to
+    /// `READ_BUDGET`, and how fast an answer came said which names the wallet had looked up.
     fn name_read(&mut self, kind: &str, typed: &str, answer: fn(&Registry, &str, &Derived) -> Result<Value, String>) -> Option<String> {
-        if self.served.inline || only_the_names_app().is_err() {
+        if self.served.inline {
             return None;
         }
+        let app = match only_the_names_app() {
+            Ok(()) => None,
+            Err(_) => match asking_app() {
+                Ok(app) => Some(app),
+                Err(why) => return Some(reply(Err(why))),
+            },
+        };
         let name = match registry::parse_name(typed) {
             Ok(name) => name,
             Err(why) => return Some(reply(Err(why))),
@@ -3110,15 +3148,42 @@ impl Names {
             Ok(registry) => registry,
             Err(why) => return Some(reply(Err(why))),
         };
-        let known = self.derived.get(&name).cloned();
         let (sequencer, program) = (registry.sequencer.clone(), registry.program);
         let key = format!("name:{name}:{kind}:{sequencer}:{}", registry::account_text(&program));
-        let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
-        let snap = self.served.read(&key, READ_FRESH, lane, move || {
-            let derived = known.unwrap_or_else(|| derived_kept(&name));
-            answer(&Registry::new(&sequencer, program), &name, &derived)
-        });
-        Some(served::reply_of(&snap, "This name", |_| Value::Null))
+        let Some(app) = app else {
+            let known = self.derived.get(&name).cloned();
+            let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
+            let snap = self.served.read(&key, READ_FRESH, lane, move || {
+                let derived = known.unwrap_or_else(|| derived_kept(&name));
+                answer(&Registry::new(&sequencer, program), &name, &derived)
+            });
+            return Some(served::reply_of(&snap, "This name", |_| Value::Null));
+        };
+        let host = sequencer.clone();
+        Some(self.app_read(&app, &key, &host, move || answer(&Registry::new(&sequencer, program), &name, &registry::derive(&name))))
+    }
+
+    /// Another app's read of public LNS data (`name_read`, `reverse`) on a thread of its own, kept
+    /// under that app's keys only, in that app's lane, at most `APP_READS_IN_FLIGHT` at a time and
+    /// `APP_READS_KEPT` kept (the oldest idle ones are dropped past that).
+    fn app_read(&self, app: &str, key: &str, sequencer: &str, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> String {
+        let prefix = app_reads_prefix(app);
+        let key = format!("{prefix}{key}");
+        let (kept, reading) = self.served.count(&prefix);
+        let last = self.served.peek(&key);
+        if !last.updating && reading >= APP_READS_IN_FLIGHT {
+            // No new read while this app has its fill under way: the last answer as it is, or busy.
+            return match last.value {
+                Some(_) => served::reply_of(&last, "This name", |_| Value::Null),
+                None => served::still_reading("the names you asked about"),
+            };
+        }
+        if kept >= APP_READS_KEPT {
+            self.served.forget_idle(&prefix);
+        }
+        let lane = served::Lane::Own(format!("{prefix}names@{}", served::host_of(sequencer)));
+        let snap = self.served.read(&key, READ_FRESH, lane, fetch);
+        served::reply_of(&snap, "This name", |_| Value::Null)
     }
 
     /// Drops every answer read from the chain, after the chain or registry changed.
@@ -5494,8 +5559,16 @@ impl NamesModule for Names {
     }
 
     fn reverse(&mut self, account: String) -> String {
-        // The Names app (find): read on a thread of its own, busy until the first is back.
-        if !self.served.inline && only_the_names_app().is_ok() {
+        // Read on a thread of its own, busy until the first is back: the Names app's (find) in
+        // its lane, another app's under its own keys (`app_read`, feature `app_name_reads`).
+        if !self.served.inline {
+            let app = match only_the_names_app() {
+                Ok(()) => None,
+                Err(_) => match asking_app() {
+                    Ok(app) => Some(app),
+                    Err(why) => return reply(Err(why)),
+                },
+            };
             let read = (|| {
                 let account = registry::parse_account(&account)?;
                 let registry = self.registry()?;
@@ -5506,6 +5579,10 @@ impl NamesModule for Names {
                 Err(why) => return reply(Err(why)),
             };
             let key = format!("reverse:{}:{sequencer}:{}", registry::account_text(&account), registry::account_text(&program));
+            if let Some(app) = app {
+                let host = sequencer.clone();
+                return self.app_read(&app, &key, &host, move || reverse_answer(&Registry::new(&sequencer, program), &account));
+            }
             let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
             let snap = self.served.read(&key, READ_FRESH, lane, move || reverse_answer(&Registry::new(&sequencer, program), &account));
             return served::reply_of(&snap, "This account's name", |_| Value::Null);
@@ -12837,6 +12914,76 @@ mod tests {
         assert!(slow["error"].as_str().unwrap().contains("didn't answer within"), "{slow}");
     }
 
+    /// app-name-reads: another app's `resolve` and `reverse` are read on a thread of their own,
+    /// so a slow sequencer never holds the module's one thread; kept under that app's own keys,
+    /// never the Names app's (whose reads say which names the person looked up).
+    #[test]
+    fn another_apps_name_reads_never_hold_the_module() {
+        let mut names = fresh();
+        names.served = served::Served::threaded();
+        names.program = Some([7; 32]);
+        names.sequencer = registry::stub_rpc(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            registry::rpc_ok(Value::Null)
+        });
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "vesting_ui".into(), instance: None });
+        let answered = |names: &mut Names, call: &dyn Fn(&mut Names) -> String| {
+            let started = std::time::Instant::now();
+            let first = parsed(&call(names));
+            assert!(started.elapsed() < std::time::Duration::from_secs(2), "the call waited for the sequencer: {:?}", started.elapsed());
+            assert_eq!(first["busy"], true, "{first}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+            loop {
+                let again = parsed(&call(names));
+                if again["busy"] != true || std::time::Instant::now() > deadline {
+                    return again;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        let resolved = answered(&mut names, &|names| names.resolve("alice".into()));
+        assert!(resolved["busy"] != true && resolved.get("success").is_some(), "{resolved}");
+        let account = registry::account_text(&[9; 32]);
+        let reversed = answered(&mut names, &|names| names.reverse(account.clone()));
+        assert!(reversed["busy"] != true && reversed.get("success").is_some(), "{reversed}");
+        let (kept, _) = names.served.count(&app_reads_prefix("vesting_ui"));
+        assert_eq!(kept, 2, "both reads kept under the app's own keys");
+        assert_eq!(names.served.count("name:").0 + names.served.count("reverse:").0, 0, "nothing kept under the Names app's keys");
+        // The same answers as the read on the spot gives (the way every app's was read before).
+        names.served = served::Served::default();
+        let inline_resolved = parsed(&names.resolve("alice".into()));
+        let inline_reversed = parsed(&names.reverse(account.clone()));
+        for (threaded, inline) in [(&resolved, &inline_resolved), (&reversed, &inline_reversed)] {
+            assert_eq!((&threaded["success"], &threaded["value"], &threaded["error"]), (&inline["success"], &inline["value"], &inline["error"]), "{threaded} vs {inline}");
+        }
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// An app can't start more than `APP_READS_IN_FLIGHT` name reads at once: one more is busy,
+    /// with nothing started (a flood of names can't pile up threads or Argon2 runs).
+    #[test]
+    fn an_app_has_at_most_four_name_reads_under_way() {
+        let mut names = fresh();
+        names.served = served::Served::threaded();
+        names.program = Some([7; 32]);
+        names.sequencer = registry::stub_rpc(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            registry::rpc_ok(Value::Null)
+        });
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "flood_ui".into(), instance: None });
+        for name in ["one", "two", "three", "four", "five", "six"] {
+            let answer = parsed(&names.resolve(name.into()));
+            assert_eq!(answer["busy"], true, "{answer}");
+        }
+        let (kept, reading) = names.served.count(&app_reads_prefix("flood_ui"));
+        assert_eq!((kept, reading), (APP_READS_IN_FLIGHT, APP_READS_IN_FLIGHT));
+        // Another app has its own allowance.
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "other_ui".into(), instance: None });
+        let _ = names.resolve("seven".into());
+        assert_eq!(names.served.count(&app_reads_prefix("other_ui")).1, 1);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
     /// first-call-no-result-field-slow-cli-exceeds-host-timeout: on a wallet behind the chain
     /// the first cli_accounts / cli_balance ran the CLI past the host's 20 s call limit, so
     /// the caller got METHOD_FAILED with no result. A call now waits a bounded time and is
@@ -13771,7 +13918,7 @@ mod tests {
         assert_eq!(answered["success"], true, "the envelope: {answered}");
         let other = answered["value"].clone();
         let keys: Vec<&String> = other.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["features", "module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
+        assert_eq!(keys, ["features", "module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "wallet_sdk", "zone"], "{other}");
         let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
         assert_eq!(zone, ["channel", "home", "id"], "{other}");
     }
@@ -13966,6 +14113,8 @@ mod tests {
         for feature in documented {
             assert!(features.contains(&feature), "PROVIDER-SDK.md names {feature}, which another app doesn't see in get_config");
         }
+        // It says it implements the Names Wallet SDK (an app's listWallets reads this).
+        assert_eq!(seen["value"]["wallet_sdk"], json!({ "name": "names-wallet", "version": WALLET_SDK_VERSION, "app": "names_ui" }));
         // Nothing beyond the network part and the features: no paths, wallet or CLI.
         for private in ["cli", "cli_wallet", "wallet_config", "wallet_storage", "main_name", "memory_bytes"] {
             assert!(seen["value"].get(private).is_none(), "{private} must stay with the Names app");

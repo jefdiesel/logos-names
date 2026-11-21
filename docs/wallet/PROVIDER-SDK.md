@@ -11,6 +11,12 @@ connect → account selection → approval → transaction in QML and in C++. Tw
 complete reference apps built on it, [Testimonial](../../apps/testimonial/README.md)
 and [Faucet](../../apps/faucet/README.md), are the longer worked examples.
 
+**Building a QML app? Start with the [Names Wallet SDK](#drop-in-sdk-for-apps-the-names-wallet-sdk)**
+(`sdk/qml/`, version 1.0.0): two files you copy in that find the person's wallet and do
+connect, accounts, proposals, waiting, busy retries, the plain-words states and LNS lookups for
+you. Another wallet can implement the same calls ([Implementing the SDK in another
+wallet](#implementing-the-sdk-in-another-wallet)), and every such app works with it unchanged.
+
 ## How it works
 
 ```
@@ -159,6 +165,29 @@ balances are 128-bit numbers.
 | `cancel_request(request_id)` | Withdraws your request while it's pending. | a request, `state: "cancelled"` |
 | `drop_access()` | Gives up the access you were given. | `{revoked}` |
 | `request_nft_access`, `granted_nfts`, `nft_membership`, `propose_nft_transfer`, … | NFTs: a capability of their own; see [NFTs](#nfts-lp-0001). | |
+
+### LNS lookups for any app
+
+Two reads about names need no access and ask nobody: what a name publishes, and the name an
+account set as its own. Everything in them is the name's public record on the chain, which
+anyone who knows the name can read; nothing comes from the person's wallet.
+
+| Method | Value |
+|---|---|
+| `resolve(name)` | the name's record: `{name, display, owner_tag, expires, never, lapsed, deposit, claimed, account, npk, vpk, texts, forward, deed}`, or `null` when nobody holds it. `account` is the public account ID (base58) the name publishes, or null. `forward` is the name it points to (SPEC.md §7); `resolve` doesn't follow it. A name that isn't one (`b@d`, an account ID) is refused in words |
+| `reverse(account)` | `{name, display}`, the name `account` (`Public/<id>` or the base58 ID) set as its own, checked against that name's record; `null` when it set none |
+| `recipient(name)` | where a payment to `name` goes, one `forward` followed: `{name, display, public, public_hex, private, lapsed, forwarded_from?}` |
+
+In a module whose `get_config().features` lists `app_name_reads` (the release after 0.18.0), another app's `resolve`,
+`reverse`, `recipient`, `page`, `page_view`, `avatar` and `deposit` are read on a thread of
+their own, as the Names app's are: the first call answers `busy` (retry, as for any call) and
+the next ones the value, read again after 30 s. Each app's reads are kept apart from the Names
+app's and from every other app's (so how fast an answer comes says nothing about which names
+the person looked up), and an app has at most 4 under way: one more answers busy with nothing
+started. Before it, these reads ran on the module's one thread, so a slow sequencer could hold
+every call, the Names app's too, for up to 15 s.
+
+The SDK's `resolve` and `reverse` (below) give just what an app needs from these.
 
 You must call `request_access` before `propose_transfer` or `propose_call`.
 Otherwise they fail with `ask for access first (request_access), then propose it`.
@@ -717,6 +746,200 @@ the message's hash.
 Requests and grants are kept in `~/.config/logos-names/provider.json`. The
 file is mode 0600 and written atomically, so a grant survives a restart and a
 crash never leaves a half-written file.
+
+## Drop-in SDK for apps: the Names Wallet SDK
+
+**Names Wallet SDK 1.0.0** (`sdk/qml/`, `VERSION` in `NamesWalletSDK.mjs`; it speaks SDK
+version `1.0`, `SDK_VERSION`). Every Basecamp `ui_qml` app of ours uses it the same way: copy
+the two files into the app's `qml/` folder, unchanged, as the design kit is copied, and never
+edit the copy (update it by copying again). The app never names a wallet: the SDK finds the
+one installed (Names, or any wallet that [implements the SDK](#implementing-the-sdk-in-another-wallet))
+and sends every call there.
+
+| File | What it is |
+|---|---|
+| `sdk/qml/NamesWalletSDK.mjs` | Everything: finding the wallet, the calls, retries, waiting, states, words and LNS lookups. Plain JavaScript, so `node --test sdk/NamesWalletSDK.test.mjs` tests it. |
+| `sdk/qml/NamesWallet.qml` | The QML side, about 150 lines: Basecamp's bridge (`logos`), one timer per wait, this app's remembered choice of wallet (QtQuick.LocalStorage, made only when there are several wallets; without it the choice lasts until the app closes), and the wallet's app brought forward with `basecamp.apps.launch`. It mirrors the state in properties to bind to. |
+
+Your `metadata.json` declares `"uses": [{ "intent": "basecamp.apps.launch" }]`. Then, in
+`Main.qml`:
+
+```qml
+NamesWallet { id: wallet; app: "my_app_ui"; bridge: typeof logos !== "undefined" ? logos : null }
+
+Component.onCompleted: wallet.check({ chain: "<your chain's channel, 64 hex>" }, function(w) {
+    // w.state: checking | none | choose | missing | unsupported | otherZone | disconnected | asking | connected
+    // w.current: {module, display_name, app, sdk_version}; w.accounts: [{account, account_kind}]
+})
+Text { text: wallet.problem }                                   // the shared words for the state
+Repeater { model: wallet.status === "choose" ? wallet.wallets : []   // several wallets installed
+           delegate: Button { text: modelData.display_name; onClicked: wallet.chooseWallet(modelData.module) } }
+```
+
+A wallet module is called only once it is loaded: Basecamp loads it with its own app (opening
+Names once is enough), so `missing` says to open it.
+
+### Which wallet: `listWallets` and `getWallet`
+
+- `listWallets(done)` gives the installed packages that declare the SDK: `[{module,
+  display_name, sdk_version, app}]`, Names first. Each is asked `get_config` for its
+  `wallet_sdk`; `sdk_version` is null for one that isn't running or doesn't implement it.
+- `getWallet(done)` gives the wallet this app uses, `{module, display_name, app, sdk_version}`:
+  - **one installed:** it;
+  - **several:** the one the person chose for this app before (kept by `NamesWallet.qml` under
+    the app's `app` name), else `status` becomes `choose` with `wallets` listed, and `done` runs
+    once the app calls `chooseWallet(module)` (remembered from then on; `forgetWallet()` asks
+    again);
+  - **none:** `done(null)`, `status` `none`, `problem` "No wallet installed: install Names from
+    Basecamp's app list."
+- `check`, and any call made before it, call `getWallet` first. When Basecamp's package list
+  can't be read at all, Names (`names`) is assumed.
+
+How it finds them, and why this way: a QML app can't read another package's files (Basecamp's
+QML sandbox, `app/restricted/QmlSandbox.cpp`, lets it load files only from its own install
+folder and the shared Qt and Logos QML modules, and its network access manager refuses
+everything), so the only list it has is `package_manager`'s
+`getInstalledPackages`, which the Names app already reads. Each row carries what the package's
+`metadata.json` says of `name`, `display_name`, `version`, `description`, `type`, `category`,
+`author`, `license`, `icon`, `view`, `dependencies`, `optional_dependencies`,
+`interface_dependencies` and `installDir` (logos-package-manager `InstalledPackage`, d3af297;
+logos-package-manager-module's `toLogosMap` hands a QML app `name`, `displayName`, `type`,
+`category` and the rest, 6955a09; the revisions logos-basecamp's flake pins), but not
+`provides` or any field of the package's own: Basecamp reads `provides` from the installed
+`metadata.json` itself, for its intent broker. So a wallet says it is one in `category`, and
+says which SDK version it speaks in its `get_config`. The SDK lists the core modules (`type`
+`core`) whose `category` is `wallet`, plus `names` (Names 0.18 predates the declaration).
+
+### What it does for you
+
+- **Every argument as text.** Basecamp's call checker refuses a QML number for an integer
+  parameter (`expected integer, got number`); the SDK sends `String(x)` for numbers, `true` /
+  `false` as text and objects as JSON.
+- **Busy is retried**, five times, 1.5 s then a step longer each time, each retry on a timer of
+  its own (two calls retrying at once both come back). Busy promises nothing happened, so a
+  proposal is retried too.
+- **An unclear answer** (none, or not the SDK's envelope: the wallet is usually restarting
+  after an update) is retried only for reads (`READS`). A `propose_*` call is never sent twice:
+  it fails `uncertain`, with "Names Wallet didn't answer, so it may have taken the request. Look
+  in Names before asking again."
+- **The wallet missing** (installed but not running, or no Basecamp bridge) sets `status` to
+  `missing` with `WORDS.missing`. A wallet whose `get_config` declares no SDK version of the same
+  major version as this file sets `unsupported`, and nothing more is asked of it. Another network
+  than `check({chain})`'s sets `otherZone`.
+- **Waiting** reads `request_status` every 2 s, one read at a time, until the request is no
+  longer `pending` or `running`; `requestLine(request, "the payment")` says the end in plain
+  words (declined, expired after 10 minutes, withdrawn, failed with why).
+- **Going to the wallet and back:** `connect` and every proposal bring the wallet's app
+  forward (`get_config().wallet_sdk.app`; `names_ui` for Names); it shows your app again once
+  the person answers.
+
+### The calls
+
+Each takes callbacks; none blocks. `handlers` is `{sent, update, done, failed}` (`waiting` for
+`connect`), any of them optional. `failed(r)` gets `{ok: false, error, busy?, missing?,
+unclear?, uncertain?, none?}`, `error` in plain words.
+
+| Call | What it does |
+|---|---|
+| `listWallets(done)`, `getWallet(done)`, `chooseWallet(module)`, `forgetWallet()` | Which wallet (above). |
+| `check({chain}, done(w))` | `getWallet`, then `get_config` (features, zone, `wallet_sdk`), then `granted_accounts`. Sets `status`. |
+| `connect(reason, {accountHint, open}, {waiting, done, failed})` | `request_access` (`request_access_with` when you give a hint and the wallet has it), brings the wallet forward, waits, then `check`s again. `done(request)`: `state` is `approved` when the person gave access. |
+| `balances(done(list), failed)` | `account_balances`: `[{account, account_kind, balance, updating, error}]`. `SDK.withBalances(accounts, list)` joins them. |
+| `proposeCall(program, accountsJson, instructionHex, summary, handlers, {open})` | `propose_call`, then waits. `sent(request, watch)` once it is in the wallet; `done(request)` at the end (`state` `done` with `tx`, or `rejected`, `expired`, `cancelled`, `failed`). |
+| `proposeTransfer(asset, amount, destination, handlers, {open})` | `propose_transfer` the same way. |
+| `propose(method, args, handlers, {open, status, cancel})` | any other `propose_*` that answers a request (`propose_inscription`, `propose_private_call`, `declare_programs`, `propose_relayed_call`, `propose_token_source`). NFT requests are read and withdrawn by their own methods: pass `{status: "nft_request_status", cancel: "cancel_nft_request"}`. |
+| `watch(request, handlers, {status, cancel})` | waits on a request you already have; returns `{stop(), withdraw()}`. |
+| `withdraw(requestId, done, failed, cancelMethod)` | `cancel_request` (or `cancelMethod`) while pending; the watch then ends `cancelled`. |
+| `disconnect(done, failed)` | `drop_access`; `status` becomes `disconnected`. |
+| `resolve(name, done(r))` | LNS name → account, through the wallet's `resolve`, one `forward` followed (as a payment to it is). See below. |
+| `reverse(account, done(r))` | account → its LNS name, through the wallet's `reverse`. See below. |
+| `call(method, args, done, failed)` | any other method of the wallet, with the same retries (`app_secret`, `resign_relayed_call`, `granted_nfts`, …). |
+| `has(feature)`, `open()` | a `get_config` feature (after `check`); bring the wallet forward. |
+
+Not covered by 1.0.0 beyond `call`: membership proofs (`request_membership_proof` answers
+`awaiting-approval` and `membership_proof_status` has states of its own, so `watch` doesn't
+fit them), and `app_secret`'s `{granted: false, request}` answer (watch `request.request`, then
+call again).
+
+`resolve` answers exactly one of:
+
+```js
+{ ok: true,  name: "alice", display: "alice.lez", account: "<base58>", forwardedFrom: null, lapsed: false }
+{ ok: true,  name: "alice", ..., forwardedFrom: "old" }     // "old" points to alice
+{ ok: false, code: "not_registered", name, error }          // nobody holds it
+{ ok: false, code: "no_account",     name, error }          // it publishes no account
+{ ok: false, code: "refused",        name, error }          // not a name (the wallet's words)
+{ ok: false, code: "missing" | "unavailable", name, error } // no wallet there / didn't answer
+```
+
+`reverse` answers `{ok: true, account, name, display}` (`name` and `display` null when the
+account set none) or `{ok: false, code, account, error}` with the codes above. Neither needs
+access, and neither returns anything but the name's public record (see [LNS
+lookups](#lns-lookups-for-any-app)); the SDK keeps only these fields of it.
+
+### Implementing the SDK in another wallet
+
+Any wallet built to these rules works with every app that uses the SDK, unchanged.
+
+1. **Declare it.** In the wallet's core module `metadata.json` (the module apps call):
+   `"type": "core"` and `"category": "wallet"`. Its `display_name` is what the person sees when
+   choosing. Names' own: `basecamp-module/metadata.json`.
+2. **Say which version, and which app answers.** `get_config()` answers, in the usual
+   envelope, at least `{"features": [...], "zone": {"id", "channel", "home"}, "wallet_sdk":
+   {"name": "names-wallet", "version": "1.0", "app": "<your ui_qml app>"}}`. `app` is the app the
+   SDK brings forward (`basecamp.apps.launch`) for the person to answer. The SDK uses a wallet
+   whose major version is its own (`speaks`).
+3. **Answer the calls** with the names, arguments (all text) and reply shapes on this page:
+   `request_access` / `request_access_with`, `granted_accounts`, `account_balances`,
+   `propose_transfer`, `propose_call`, `request_status`, `cancel_request`, `drop_access`,
+   `resolve`, `reverse`, and any others your wallet offers. Every reply is `{success, value,
+   error}`; a call that can't be taken now answers `{success: false, busy: true, value: null,
+   error}` and must have changed nothing. A request's `state` is one of `pending`, `approved`,
+   `running`, `done`, `failed`, `rejected`, `expired`, `cancelled` ([A request](#a-request)).
+4. **Identify the app from the call** (`current_caller()`), never from an argument, and show the
+   person every request before anything is signed ([Security model](#security-model)).
+5. **Bring the app back** when the person answers, with `basecamp.apps.launch`, as Names does.
+
+Names implements it in `basecamp-module/rust-lib/src/lib.rs` (`wallet_sdk()`, `public_config`).
+
+### Worked example: Vest
+
+Vest (jefdiesel/vest, `miniapp/qml/Main.qml`) pays tokens out over time and signs every change
+through the person's wallet; it has no signer of its own in Basecamp. It uses only the SDK, and
+never names a wallet:
+
+```qml
+NamesWallet { id: wallet; app: "vesting_ui"; bridge: typeof logos !== "undefined" ? logos : null }
+readonly property bool canCreate: wallet.features.indexOf("call_reads_clock") >= 0
+
+// Where the wallet stands, on Vest's own chain; then the vesting module is told the accounts.
+wallet.check({ chain: info.network.chain_id }, function(w) {
+    if (w.state === "connected") wallet.balances(function(b) {
+        call("set_accounts", [JSON.stringify(Logic.namesAccounts({ accounts: w.accounts }, b))], readChain)
+    })
+})
+
+// Connect.
+wallet.connect("To show your vesting schedules and claim what has vested to you", {}, {
+    waiting: function(v) { accessRequest = v },
+    done: function(v) { say(v.state === "approved" ? "Connected." : Logic.requestLine(v, "the connection")) }
+})
+
+// A claim: the vesting module builds the call, the wallet shows it, the person approves.
+wallet.proposeCall(c.program, c.accounts_json, c.instruction_hex, c.summary, {
+    sent: function(v, watch) { claimRequest = v },               // "Withdraw the request" → wallet.withdraw(v.request)
+    update: function(v) { claimRequest = v },
+    done: function(v) { say(v.state === "done" ? "Claimed … · tx " + v.tx : Logic.requestLine(v, "the claim")) },
+    failed: function(r) { say(r.error) }
+})
+
+// The payout box: an LNS name is looked up through the wallet, and the schedule is made for
+// the account it found.
+wallet.resolve(typed, function(r) { payee = Logic.payeeFromNames(typed, r) })
+```
+
+Vest keeps its own words (which network to switch to, what a claim is) in its `logic.mjs`; the
+request lines and the wallet states' words are the SDK's shared ones.
 
 ## Methods for the Names app
 

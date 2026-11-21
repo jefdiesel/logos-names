@@ -4,7 +4,7 @@
   "version": "0.18.0",
   "type": "core",
   "interface": "cdylib",
-  "category": "identity",
+  "category": "wallet",
   "description": "Resolve, register and manage private .lez names for any Logos app (registry v5: refundable deposits)",
   "main": "names_plugin",
   "dependencies": [],
