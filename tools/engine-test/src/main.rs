@@ -186,7 +186,7 @@ fn short_list() -> names_core::shortlist::ShortList {
 fn register(id: NameId, secret: [u8; 32], now: u64, length: LengthProof) -> Instruction {
     Instruction::Register {
         id,
-        sealed: b"profile".to_vec(),
+        sealed: padded(b"profile"),
         term: 0,
         fee: DEPOSIT,
         treasury: None,
@@ -195,6 +195,13 @@ fn register(id: NameId, secret: [u8; 32], now: u64, length: LengthProof) -> Inst
         deposit: true,
         length,
     }
+}
+
+/// A stand-in sealed profile, padded to the least the program takes.
+fn padded(text: &[u8]) -> Vec<u8> {
+    let mut sealed = text.to_vec();
+    sealed.resize(sealed.len().max(names_core::MIN_SEALED_RECORD_LEN), 0);
+    sealed
 }
 
 fn main() {
@@ -341,7 +348,7 @@ fn main() {
     run.send(
         "alice updates her profile",
         &mut alice,
-        Instruction::SetRecord { id: jef, sealed: b"new".to_vec() },
+        Instruction::SetRecord { id: jef, sealed: padded(b"new") },
         actors.clone(),
         later,
     );
@@ -410,8 +417,17 @@ fn main() {
     run.send("bob hands the name back to alice", &mut bob, Instruction::Transfer { id: jef, new_owner: alices }, back.clone(), later);
     assert_eq!(run.deed_balance(&definition, &alices), Some(1), "alice's old deed account holds it again");
     assert_eq!(run.deed_balance(&definition, &bobs), Some(0));
-    run.send("and alice gives it to bob again", &mut alice, Instruction::Transfer { id: jef, new_owner: bobs }, back, later);
+    // The new instruction: the name goes to bob with his profile in the same write, deed and all.
+    run.send(
+        "and alice gives it to bob again, with his profile (TransferSealed)",
+        &mut alice,
+        Instruction::TransferSealed { id: jef, new_owner: bobs, sealed: padded(b"points at bob") },
+        back,
+        later,
+    );
     assert_eq!(run.deed_balance(&definition, &bobs), Some(1), "and bob's again");
+    let handed = run.record(&jef).expect("still registered");
+    assert_eq!((handed.owner, handed.sealed.clone()), (bobs, padded(b"points at bob")), "bob's profile came with it");
     println!("ok   A -> B -> A -> B: the deed lands again in an emptied deed account each time");
     let before = run.balance(bob.id);
     let mut actors = actors;
@@ -436,7 +452,7 @@ fn main() {
     println!("ok   the release burned the deed (supply 0)");
 
     // Claims.
-    let claim = |id, proof, now| Instruction::Claim { id, sealed: b"carried".to_vec(), now, proof };
+    let claim = |id, proof, now| Instruction::Claim { id, sealed: padded(b"carried"), now, proof };
     let mut actors = run.name_actors(&held);
     actors.push(settings);
     run.refuse(
@@ -456,7 +472,7 @@ fn main() {
         later,
     );
     let record = run.record(&held).expect("claimed");
-    assert!(record.claimed && record.expires == u64::MAX && record.sealed == b"carried");
+    assert!(record.claimed && record.expires == u64::MAX && record.sealed == padded(b"carried"));
     assert_eq!(run.balance(alice.id), balance, "a claim costs no deposit");
     run.refuse(
         "a name is claimed once",

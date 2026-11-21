@@ -414,6 +414,8 @@ So the bytes of a transaction's message are the tag `00`, then the `Instruction`
 | 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2], claims_root: [u8; 32], claims_until: u64, claims_program: AccountId` | settings; the signer is the program's own account the first time, then the admin |
 | 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment |
 | 9 | `Claim` | `id, sealed: Vec<u8>, now: u64, proof: Vec<[u8; 32]>` | record, page, settings |
+| 10 | `ClaimDeed` | `id, nonce: [u8; 32], length: LengthProof` | record and the deed's accounts (section 8.6) |
+| 11 | `TransferSealed` | `id, new_owner: [u8; 32], sealed: Vec<u8>` (the new holder's first profile) | record, page, and a deeded name's deed accounts |
 
 Rules:
 
@@ -480,6 +482,15 @@ Rules:
   transferred name never keeps routing payments or messages to its last holder.
   The expiry is kept. The new holder's client then writes its address back
   (section 6, A name is an address).
+- `TransferSealed` does the same and writes `sealed` as the new holder's profile in
+  the same step, so the name resolves to its new holder from that block. The sender
+  seals it under the name's key: the new holder's account when it is a public account
+  (the sender knows it), a profile with just the name when it is a private one. A
+  client sends it to a registry whose settings `version` is 8 or later, and `Transfer`
+  to an older one.
+- `Register`, `SetRecord`, `Claim` and `TransferSealed` refuse a `sealed` shorter than
+  284 bytes (a nonce, one padded 256-byte block, a tag): a name always carries a profile.
+  Only the length can be checked.
 - A holder may still change a lapsed name until someone else registers it;
   readers ignore it once it is past grace.
 - `Release` empties the record and the page. The name is then unregistered and

@@ -82,6 +82,15 @@ pub const NAME_SUFFIX: &str = "";
 pub const LEGACY_SUFFIX: &str = ".lez";
 /// Room for a sealed profile with private receiving keys and sixteen entries.
 pub const MAX_SEALED_RECORD_LEN: usize = 12 * 1024;
+/// The least a sealed profile can be: a nonce (12 bytes), one padded block of profile
+/// (256) and the tag (16). A registered name is an address (SPEC.md §6), so every write
+/// of a profile carries one: shorter (an empty one, say) is refused. Only the length can
+/// be checked here; what is inside is sealed.
+pub const MIN_SEALED_RECORD_LEN: usize = 12 + 256 + 16;
+/// The settings version this program writes. Version 8 says its registry takes
+/// [`Instruction::TransferSealed`]: a client checks it before sending one, and sends the
+/// older [`Instruction::Transfer`] to a registry whose settings are older.
+pub const SETTINGS_VERSION: u8 = 8;
 /// LEZ caps actor data at 100 KiB, but a page that large does not fit one
 /// transaction under the wallet's default gas limit: 80 KiB applies, 96 KiB fails.
 pub const MAX_SEALED_PAGE_LEN: usize = 80 * 1024;
@@ -338,7 +347,8 @@ pub enum Instruction {
     SetPage { id: NameId, sealed: Vec<u8> },
     /// Hand the name to a new owner. Everything the last owner sealed is
     /// emptied, profile and page, so the name never keeps routing payments or
-    /// messages to them.
+    /// messages to them. Kept for older clients: [`Instruction::TransferSealed`]
+    /// leaves the name an address.
     Transfer { id: NameId, new_owner: OwnerTag },
     /// Give the name up. Its record and page are emptied, so nothing of it
     /// remains and anyone may register it again, and `refund` moves from the
@@ -390,6 +400,17 @@ pub enum Instruction {
         id: NameId,
         nonce: [u8; 32],
         length: LengthProof,
+    },
+    /// [`Instruction::Transfer`], with the new owner's first profile in the same write:
+    /// the name resolves to its new holder from the transfer's block, never to nothing
+    /// (SPEC.md §6, A name is an address). `sealed` is sealed by the sender for the new
+    /// holder (its account, as the sender knows it); the last holder's profile and page
+    /// are gone all the same, and a deed moves as with `Transfer`. Registries with
+    /// settings version [`SETTINGS_VERSION`] or later take it.
+    TransferSealed {
+        id: NameId,
+        new_owner: OwnerTag,
+        sealed: Vec<u8>,
     },
 }
 
@@ -476,6 +497,13 @@ pub enum Effect {
     /// seed grant authorizes this account for the whole creation; the definition
     /// is authorized by the seed passed on to it.
     CreateDeed { definition_seed: [u8; 32] },
+    /// On the record: give it to `new_owner` with `sealed` as its profile, refused
+    /// unless `signer` owns it.
+    TransferSealed {
+        signer: OwnerTag,
+        new_owner: OwnerTag,
+        sealed: Vec<u8>,
+    },
 }
 
 /// Emitted when a name is claimed. Events are emitted while planning, before
@@ -898,6 +926,19 @@ pub fn handle(input: &ReceiveInput, message: Message) -> Response {
     }
 }
 
+/// Refuses a sealed profile shorter than [`MIN_SEALED_RECORD_LEN`] (a name must stay
+/// an address) or longer than [`MAX_SEALED_RECORD_LEN`].
+fn check_sealed_profile(sealed: &[u8]) {
+    assert!(
+        sealed.len() <= MAX_SEALED_RECORD_LEN,
+        "sealed profile exceeds {MAX_SEALED_RECORD_LEN} bytes"
+    );
+    assert!(
+        sealed.len() >= MIN_SEALED_RECORD_LEN,
+        "sealed profile is under {MIN_SEALED_RECORD_LEN} bytes: a name must point somewhere"
+    );
+}
+
 /// Turns an instruction from the signer into the effects it has on other actors.
 #[must_use]
 pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
@@ -918,10 +959,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
             deposit,
             length,
         } => {
-            assert!(
-                sealed.len() <= MAX_SEALED_RECORD_LEN,
-                "sealed profile exceeds {MAX_SEALED_RECORD_LEN} bytes"
-            );
+            check_sealed_profile(&sealed);
             // A deposit holds the name until it is released.
             let expires = if deposit { u64::MAX } else { after(now, term_length(term)) };
             let tier = length_tier(&id, &length);
@@ -968,10 +1006,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
                 ))
         }
         Instruction::SetRecord { id, sealed } => {
-            assert!(
-                sealed.len() <= MAX_SEALED_RECORD_LEN,
-                "sealed profile exceeds {MAX_SEALED_RECORD_LEN} bytes"
-            );
+            check_sealed_profile(&sealed);
             response.send(self::effect(
                 record_address(program, &id),
                 program,
@@ -1007,6 +1042,21 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
                 program,
                 Effect::WritePage { sealed: Vec::new() },
             )),
+        Instruction::TransferSealed { id, new_owner, sealed } => {
+            check_sealed_profile(&sealed);
+            response
+                .event(event(Transferred::SELECTOR_NAME, &Transferred { id }))
+                .send(self::effect(
+                    record_address(program, &id),
+                    program,
+                    Effect::TransferSealed { signer: owner_tag(&id, signer), new_owner, sealed },
+                ))
+                .send(self::effect(
+                    page_address(program, &id),
+                    program,
+                    Effect::WritePage { sealed: Vec::new() },
+                ))
+        }
         Instruction::Release { id, refund } => {
             let response = response
                 .event(event(Released::SELECTOR_NAME, &Released { id }))
@@ -1076,10 +1126,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
             Effect::Commit { now },
         )),
         Instruction::Claim { id, sealed, now, proof } => {
-            assert!(
-                sealed.len() <= MAX_SEALED_RECORD_LEN,
-                "sealed profile exceeds {MAX_SEALED_RECORD_LEN} bytes"
-            );
+            check_sealed_profile(&sealed);
             let owner = owner_tag(&id, signer);
             bounded_window(response, now)
                 .event(event(Claimed::SELECTOR_NAME, &Claimed { id }))
@@ -1187,7 +1234,7 @@ fn deed_messages(effect: &Effect, input: &ReceiveInput) -> Vec<SyncMessage> {
             .and_then(|old| old.deed.map(|old_deed| burn_deed(program, &old_deed.definition, &old.owner)))
             .into_iter()
             .collect(),
-        Effect::Transfer { signer, new_owner } if signer != new_owner => held()
+        Effect::Transfer { signer, new_owner } | Effect::TransferSealed { signer, new_owner, .. } if signer != new_owner => held()
             .and_then(|record| record.deed)
             .map(|deed| move_deed(program, &deed.definition, signer, new_owner).to_vec())
             .unwrap_or_default(),
@@ -1347,7 +1394,7 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 None => assert!(by_program, "the first settings must be signed by the program's own account"),
             }
             Some(to_bytes(&Settings {
-                version: VERSION,
+                version: SETTINGS_VERSION,
                 admin,
                 treasury,
                 prices,
@@ -1392,6 +1439,12 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
             let mut record = load_owned(pre_data, &signer);
             record.owner = new_owner;
             record.sealed = Vec::new();
+            Some(encode_record(&record))
+        }
+        Effect::TransferSealed { signer, new_owner, sealed } => {
+            let mut record = load_owned(pre_data, &signer);
+            record.owner = new_owner;
+            record.sealed = sealed;
             Some(encode_record(&record))
         }
         Effect::Remove { signer } => {
@@ -1454,6 +1507,12 @@ fn load_commitment(pre_data: &[u8]) -> Option<Commitment> {
 
 #[cfg(test)]
 mod tests {
+    /// A stand-in sealed profile: `text`, padded to the least the program takes.
+    fn profile(text: &[u8]) -> Vec<u8> {
+        let mut sealed = text.to_vec();
+        sealed.resize(sealed.len().max(super::MIN_SEALED_RECORD_LEN), 0);
+        sealed
+    }
     use super::*;
 
     /// The tests' stand-in for the short-name list: two locked names and two
@@ -1697,7 +1756,7 @@ mod tests {
     fn register_at(id: NameId, sealed: Vec<u8>, term: u8, fee: u128, now: u64) -> Instruction {
         Instruction::Register {
             id,
-            sealed,
+            sealed: profile(&sealed),
             term,
             fee,
             treasury: None,
@@ -1816,7 +1875,7 @@ mod tests {
         fn register(&mut self, id: &NameId, owner: AccountId, sealed: &[u8]) {
             self.run(
                 on_registration(id, owner),
-                register(*id, sealed.to_vec()),
+                register(*id, profile(sealed)),
             );
         }
     }
@@ -1831,7 +1890,7 @@ mod tests {
                 version: 6,
                 owner: owner_tag(&JEF, &ALICE),
                 expires: NOW + TERM_LENGTHS_MS[1],
-                sealed: b"sealed profile".to_vec(),
+                sealed: profile(b"sealed profile"),
                 claimed: false,
                 deed: None,
             })
@@ -1867,11 +1926,11 @@ mod tests {
             on_record(&JEF, ALICE),
             Instruction::SetRecord {
                 id: JEF,
-                sealed: b"second".to_vec(),
+                sealed: profile(b"second"),
             },
         );
         let record = chain.record(&JEF).expect("registered");
-        assert_eq!(record.sealed, b"second");
+        assert_eq!(record.sealed, profile(b"second"));
         assert_eq!(record.owner, owner_tag(&JEF, &ALICE));
     }
 
@@ -1884,7 +1943,7 @@ mod tests {
             on_record(&JEF, BOB),
             Instruction::SetRecord {
                 id: JEF,
-                sealed: b"hijacked".to_vec(),
+                sealed: profile(b"hijacked"),
             },
         );
     }
@@ -1897,7 +1956,7 @@ mod tests {
             on_record(&JEF, ALICE),
             Instruction::SetRecord {
                 id: JEF,
-                sealed: b"x".to_vec(),
+                sealed: profile(b"x"),
             },
         );
     }
@@ -2001,10 +2060,132 @@ mod tests {
             on_record(&JEF, BOB),
             Instruction::SetRecord {
                 id: JEF,
-                sealed: b"bob's profile".to_vec(),
+                sealed: profile(b"bob's profile"),
             },
         );
-        assert_eq!(chain.record(&JEF).expect("registered").sealed, b"bob's profile");
+        assert_eq!(chain.record(&JEF).expect("registered").sealed, profile(b"bob's profile"));
+    }
+
+    /// Jef's rule (2026-11-21): a name is an address through a transfer too. `TransferSealed`
+    /// hands it over with the new holder's profile in the same write; the old holder's page
+    /// goes as with `Transfer`.
+    #[test]
+    fn a_sealed_transfer_hands_over_the_name_with_the_new_holders_profile() {
+        let mut chain = Chain::default();
+        chain.register(&JEF, ALICE, b"alice's profile");
+        chain.run(on_record_and_page(&JEF, ALICE), Instruction::SetPage { id: JEF, sealed: b"alice's page".to_vec() });
+        chain.run(
+            on_record_and_page(&JEF, ALICE),
+            Instruction::TransferSealed { id: JEF, new_owner: owner_tag(&JEF, &BOB), sealed: profile(b"points at bob") },
+        );
+        assert_eq!(
+            chain.record(&JEF),
+            Some(NameRecord {
+                version: 6,
+                owner: owner_tag(&JEF, &BOB),
+                expires: NOW + TERM_LENGTHS_MS[1],
+                sealed: profile(b"points at bob"),
+                claimed: false,
+                deed: None,
+            })
+        );
+        assert_eq!(chain.page(&JEF), None, "the last holder's page is gone");
+        // The new owner holds it; the old one no longer does.
+        chain.run(on_record(&JEF, BOB), Instruction::SetRecord { id: JEF, sealed: profile(b"bob again") });
+        assert_eq!(chain.record(&JEF).expect("registered").sealed, profile(b"bob again"));
+    }
+
+    #[test]
+    #[should_panic(expected = "signer does not own this name")]
+    fn someone_else_cannot_transfer_the_name_sealed() {
+        let mut chain = Chain::default();
+        chain.register(&JEF, ALICE, b"");
+        chain.run(
+            on_record_and_page(&JEF, BOB),
+            Instruction::TransferSealed { id: JEF, new_owner: owner_tag(&JEF, &BOB), sealed: profile(b"") },
+        );
+    }
+
+    /// Only the length can be checked: a sealed transfer, registration, profile change or
+    /// claim shorter than one padded profile is refused.
+    #[test]
+    #[should_panic(expected = "sealed profile is under 284 bytes")]
+    fn a_sealed_transfer_with_no_profile_is_refused() {
+        let mut chain = Chain::default();
+        chain.register(&JEF, ALICE, b"");
+        chain.run(
+            on_record_and_page(&JEF, ALICE),
+            Instruction::TransferSealed { id: JEF, new_owner: owner_tag(&JEF, &BOB), sealed: Vec::new() },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sealed profile is under 284 bytes")]
+    fn an_empty_profile_is_refused() {
+        let mut chain = Chain::default();
+        chain.register(&JEF, ALICE, b"");
+        chain.run(on_record(&JEF, ALICE), Instruction::SetRecord { id: JEF, sealed: vec![0; MIN_SEALED_RECORD_LEN - 1] });
+    }
+
+    #[test]
+    #[should_panic(expected = "sealed profile is under 284 bytes")]
+    fn a_registration_with_no_profile_is_refused() {
+        let instruction = Instruction::Register {
+            id: JEF,
+            sealed: Vec::new(),
+            term: 1,
+            fee: 0,
+            treasury: None,
+            now: NOW,
+            secret: SECRET,
+            deposit: false,
+            length: length_of(&JEF),
+        };
+        let _ = run_plan(on_registration(&JEF, ALICE), instruction);
+    }
+
+    /// The new variant goes after every older one, so an older client's bytes mean what they
+    /// did: `Transfer` is still variant 4, and `TransferSealed` is 11.
+    #[test]
+    fn the_sealed_transfer_is_a_new_variant_after_the_old_ones() {
+        let id = [7; 32];
+        let old = borsh::to_vec(&Message::Instruction(Instruction::Transfer { id, new_owner: [2; 32] })).unwrap();
+        assert_eq!(&old[..2], &[0, 4]);
+        let new = borsh::to_vec(&Message::Instruction(Instruction::TransferSealed { id, new_owner: [2; 32], sealed: vec![5; 3] })).unwrap();
+        assert_eq!(new, [&[0u8, 11][..], &[7; 32], &[2; 32], &[3, 0, 0, 0], &[5, 5, 5]].concat());
+    }
+
+    /// Records of every version the registry wrote still decode: v5 (LEZ 0.3, ends at
+    /// `sealed`), v6 (`claimed`), v7 (a deed).
+    #[test]
+    fn records_of_every_version_still_decode() {
+        let v5 = [&[5u8][..], &[1; 32], &u64::MAX.to_le_bytes(), &[2, 0, 0, 0], &[9, 9]].concat();
+        let five = decode_record(&v5).expect("v5");
+        assert_eq!((five.owner, five.expires, five.sealed, five.claimed, five.deed), ([1; 32], u64::MAX, vec![9, 9], false, None));
+        let v6 = [&v5[..], &[1]].concat();
+        let mut v6 = v6;
+        v6[0] = 6;
+        let six = decode_record(&v6).expect("v6");
+        assert!(six.claimed && six.deed.is_none());
+        let (v7, deed) = deeded(owner_tag(&JEF, &ALICE), [3; 32]);
+        assert_eq!(decode_record(&v7).expect("v7").deed, Some(deed));
+    }
+
+    /// A deed moves with a sealed transfer exactly as with `Transfer`.
+    #[test]
+    fn a_sealed_transfer_moves_the_deed_with_the_name() {
+        let (alice, bob) = (owner_tag(&JEF, &ALICE), owner_tag(&JEF, &BOB));
+        let (record, deed) = deeded(alice, [1; 32]);
+        let response = effect_at(
+            record_address(&PROGRAM, &JEF),
+            record,
+            Effect::TransferSealed { signer: alice, new_owner: bob, sealed: profile(b"bob") },
+        );
+        let stored = decode_record(response.post_state.as_ref().expect("written")).expect("a record");
+        assert_eq!((stored.owner, stored.deed, stored.sealed), (bob, Some(deed), profile(b"bob")));
+        let [open, send] = response.sync_messages.as_slice() else { panic!("two messages") };
+        assert_eq!(nft_message(open), deed::NftMessage::InitializeHolding { definition: deed.definition });
+        assert_eq!(nft_message(send), deed::NftMessage::Transfer { to: deed_holding_address(&PROGRAM, &deed.definition, &bob) });
     }
 
     #[test]
@@ -2037,7 +2218,7 @@ mod tests {
             on_record(&JEF, ALICE),
             Instruction::SetRecord {
                 id: JEF,
-                sealed: b"still mine".to_vec(),
+                sealed: profile(b"still mine"),
             },
         );
     }
@@ -2084,7 +2265,7 @@ mod tests {
         chain.register(&JEF, ALICE, b"jef");
         chain.register(&ADA, BOB, b"ada");
         chain.run(on_record_and_page(&JEF, ALICE), Instruction::Release { id: JEF, refund: 0 });
-        assert_eq!(chain.record(&ADA).expect("registered").sealed, b"ada");
+        assert_eq!(chain.record(&ADA).expect("registered").sealed, profile(b"ada"));
         assert_eq!(chain.actors.values().filter(|data| !data.is_empty()).count(), 1);
     }
 
@@ -2275,7 +2456,7 @@ mod tests {
         // Changing a profile or a page says nothing at all.
         assert!(run_plan_events(
             on_record(&JEF, ALICE),
-            Instruction::SetRecord { id: JEF, sealed: vec![1] },
+            Instruction::SetRecord { id: JEF, sealed: profile(&[1]) },
         )
         .is_empty());
     }
@@ -2288,7 +2469,7 @@ mod tests {
         let carries_holder = |bytes: &[u8]| bytes.windows(32).any(|window| window == holder);
         let instructions = [
             (on_registration(&JEF, ALICE), register(JEF, vec![9])),
-            (on_record(&JEF, ALICE), Instruction::SetRecord { id: JEF, sealed: vec![9] }),
+            (on_record(&JEF, ALICE), Instruction::SetRecord { id: JEF, sealed: profile(&[9]) }),
             (on_record_and_page(&JEF, ALICE), Instruction::SetPage { id: JEF, sealed: vec![9] }),
             (
                 on_record_and_page(&JEF, ALICE),
@@ -2332,7 +2513,7 @@ mod tests {
                 version: 6,
                 owner: owner_tag(&JEF, &BOB),
                 expires: later + MONTH,
-                sealed: b"bob's profile".to_vec(),
+                sealed: profile(b"bob's profile"),
                 claimed: false,
                 deed: None,
             })
@@ -2358,7 +2539,7 @@ mod tests {
         chain.renew(&JEF, ALICE, NOW + 1);
         let record = chain.record(&JEF).expect("registered");
         assert_eq!(record.expires, NOW + YEAR + MONTH);
-        assert_eq!(record.sealed, b"profile");
+        assert_eq!(record.sealed, profile(b"profile"));
 
         // In grace, and paid for by someone else: the name stays its owner's.
         let late = record.expires + GRACE_MS - 1;
@@ -2564,7 +2745,7 @@ mod tests {
         assert_eq!(
             chain.settings(),
             Some(Settings {
-                version: VERSION,
+                version: SETTINGS_VERSION,
                 admin: ALICE,
                 treasury: BOB,
                 prices: [1, 2, 3],
@@ -2661,7 +2842,7 @@ mod tests {
     fn deposit_registration(id: NameId, deposit: u128, now: u64) -> Instruction {
         Instruction::Register {
             id,
-            sealed: Vec::new(),
+            sealed: profile(b""),
             term: 0,
             fee: deposit,
             treasury: None,
@@ -2867,7 +3048,7 @@ mod tests {
     fn deposit_registration_with(id: NameId, deposit: u128, length: LengthProof) -> Instruction {
         Instruction::Register {
             id,
-            sealed: Vec::new(),
+            sealed: profile(b""),
             term: 0,
             fee: deposit,
             treasury: None,
@@ -3007,7 +3188,7 @@ mod tests {
                 vec![meta(holder, true)],
                 Instruction::Claim {
                     id: *id,
-                    sealed: sealed.to_vec(),
+                    sealed: profile(sealed),
                     now: NOW,
                     proof: claim_proof(leaves, index),
                 },
@@ -3036,14 +3217,14 @@ mod tests {
         let record = chain.record(&JEF).expect("claimed");
         assert_eq!(record.owner, owner_tag(&JEF, &ALICE));
         assert_eq!(record.expires, u64::MAX);
-        assert_eq!(record.sealed, b"sealed");
+        assert_eq!(record.sealed, profile(b"sealed"));
         assert!(record.claimed);
     }
 
     #[test]
     fn a_claim_moves_no_money() {
         let leaves = claims(&[(JEF, ALICE)]);
-        let instruction = Instruction::Claim { id: JEF, sealed: Vec::new(), now: NOW, proof: claim_proof(&leaves, 0) };
+        let instruction = Instruction::Claim { id: JEF, sealed: profile(b""), now: NOW, proof: claim_proof(&leaves, 0) };
         let planned = plan(&input(vec![meta(ALICE, true)], &instruction), instruction);
         assert!(planned.output().chained_calls.is_empty());
     }
@@ -3159,7 +3340,7 @@ mod tests {
             version: VERSION,
             owner,
             expires: u64::MAX,
-            sealed: b"profile".to_vec(),
+            sealed: profile(b"profile"),
             claimed: false,
             deed: Some(deed),
         };
