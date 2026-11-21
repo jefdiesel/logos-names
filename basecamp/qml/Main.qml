@@ -5437,7 +5437,7 @@ Item {
     property bool repairing: false
     property var repairUsed: ({})       // names whose one automatic repair was sent before
     /// Whether one of this wallet's public accounts holds `name` (the module can mend it).
-    function heldPublicly(name) {
+    function walletHoldsPublicly(name) {
         return myNames.some(function(n) { return n.name === name && n.owner })
             || cliNames.some(function(n) { return n.name === name && n["private"] === false })
     }
@@ -11368,7 +11368,7 @@ Item {
                     // A main name held by a public account gets the chat address by itself
                     // (repair_name), unless its one repair was already used.
                     visible: root.chatError === "" && root.chatMine !== "" && root.mainName !== "" && root.mainChat !== root.chatMine
-                             && !(root.addressRepair && root.heldPublicly(root.mainName) && !root.repairUsed[root.mainName])
+                             && !(root.addressRepair && root.walletHoldsPublicly(root.mainName) && !root.repairUsed[root.mainName])
                     Layout.fillWidth: true
                     implicitHeight: chatOff.implicitHeight + 24
                     radius: 8
