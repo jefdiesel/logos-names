@@ -759,7 +759,7 @@ impl Client {
             }
         };
         println!("step 2 of 3: moving {name}{NAME_SUFFIX} to it ({})", proving_words());
-        self.transfer(name, public).await.map_err(|error| {
+        self.transfer(name, public, Some(false)).await.map_err(|error| {
             error.context(format!(
                 "Public/{public} holds {name}{NAME_SUFFIX}'s gas, but the name was not handed to it; `names make-public {name}` tries again and uses that account"
             ))

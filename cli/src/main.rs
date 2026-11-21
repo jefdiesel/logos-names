@@ -633,9 +633,10 @@ enum Command {
     Transfer {
         #[arg(value_parser = parse_name)]
         name: String,
-        /// The new holder, public or private. Only a tag of it reaches the chain.
-        #[arg(value_parser = parse_new_owner)]
-        new_owner: AccountId },
+        /// The new holder, public or private (`Public/<id>` or `Private/<id>`). Only a tag
+        /// of it reaches the chain, and, for a public one, the name's new profile pointing at it.
+        #[arg(value_parser = parse_new_holder)]
+        new_owner: NewHolder },
     /// Show a name in your browser: a profile card made from its entries, linking to
     /// its page (served at `/page`) when it has one. It is read from the chain
     /// on this machine and served only to this machine (127.0.0.1); no server sees
@@ -1071,6 +1072,25 @@ fn parse_new_owner(input: &str) -> Result<AccountId, String> {
         ));
     }
     Ok(account)
+}
+
+/// Who a name is handed to, and whether the sender said it is a private account.
+#[derive(Clone, Copy, Debug)]
+struct NewHolder {
+    account: AccountId,
+    /// `Some(true)` for `Private/`, `Some(false)` for `Public/`, `None` for a bare ID.
+    private: Option<bool>,
+}
+
+fn parse_new_holder(input: &str) -> Result<NewHolder, String> {
+    let private = if input.starts_with("Private/") {
+        Some(true)
+    } else if input.starts_with("Public/") {
+        Some(false)
+    } else {
+        None
+    };
+    Ok(NewHolder { account: parse_new_owner(input)?, private })
 }
 
 fn parse_color(input: &str) -> Result<String, String> {
@@ -2202,8 +2222,14 @@ impl Client {
         self.send(self.on_record_and_page(&id, holder), &Instruction::SetPage { id, sealed }, 0).await
     }
 
-    /// Hands `name` to `new_owner`, clearing what the current owner set on it.
-    async fn transfer(&mut self, name: &str, new_owner: AccountId) -> Result<()> {
+    /// Hands `name` to `new_owner`, clearing what the current owner set on it. To a registry
+    /// that takes it (settings version 8), the transfer carries the new holder's first
+    /// profile, so the name points at them from that block (SPEC.md §6): its account when
+    /// the new holder is a public account, just the name when it is a private one (its
+    /// account is never published; its Names writes its keys). `private` is what the person
+    /// said (`Public/` or `Private/`); for a bare ID, an account this wallet holds privately,
+    /// or one the chain has never seen, counts as private.
+    async fn transfer(&mut self, name: &str, new_owner: AccountId, private: Option<bool>) -> Result<()> {
         if new_owner == self.program {
             bail!("that is the registry program's account, which can't hold a name");
         }
@@ -2221,7 +2247,35 @@ impl Client {
             println!("its deed moves with it, to the new holder's deed account {}", deed_holding_address(&self.program, &deed.definition, &new_tag));
             mentions.extend(self.deed_mentions(&id, &deed.nonce, &[record.owner, new_tag], false));
         }
-        self.send_with(mentions, &Instruction::Transfer { id, new_owner: new_tag }, 0, record.deed.is_some()).await
+        let sealed_ok = self.settings().await?.is_some_and(|settings| settings.version >= names_core::SETTINGS_VERSION);
+        let instruction = if sealed_ok {
+            let private = match private {
+                Some(private) => private,
+                None => self.is_private(new_owner) || !self.public_seen(new_owner).await?,
+            };
+            let profile = Profile {
+                name: name.to_owned(),
+                account: (!private).then(|| new_owner.into_value()),
+                ..Profile::default()
+            };
+            if private {
+                println!("{name}{NAME_SUFFIX} goes to a private account: its new holder's Names writes where it is paid");
+            } else {
+                println!("{name}{NAME_SUFFIX} will point at Public/{new_owner} from the transfer's block");
+            }
+            Instruction::TransferSealed { id, new_owner: new_tag, sealed: seal_profile(&derive(name).key, &profile) }
+        } else {
+            Instruction::Transfer { id, new_owner: new_tag }
+        };
+        self.send_with(mentions, &instruction, 0, record.deed.is_some()).await
+    }
+
+    /// Whether `account` has ever been used as a public account on this chain (a balance or
+    /// a nonce): an ID nobody used may be a private account's.
+    async fn public_seen(&self, account: AccountId) -> Result<bool> {
+        let balance = self.wallet.get_account_balance(account).await?;
+        let nonce = self.wallet.get_accounts_nonces(&[account]).await?.first().copied().unwrap_or_default();
+        Ok(balance > 0 || nonce != lee_core::account::Nonce::default())
     }
 
     /// Releases `name`, emptying its record and page.
@@ -4774,7 +4828,7 @@ async fn run() -> Result<()> {
                 })
                 .await
         }
-        Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
+        Command::Transfer { name, new_owner } => client.transfer(&name, new_owner.account, new_owner.private).await,
         Command::Deed(DeedCommand::Show { name }) => {
             println!("{}", serde_json::to_string_pretty(&client.deed_show(&name).await?)?);
             Ok(())

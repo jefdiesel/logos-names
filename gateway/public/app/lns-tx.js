@@ -167,6 +167,10 @@ export function renewInstruction({ id, term, fee, treasury = null, now }) {
 export const setRecordInstruction = ({ id, sealed }) => instruction(2).fixed(id, 32).vec(sealed).done();
 export const setPageInstruction = ({ id, sealed }) => instruction(3).fixed(id, 32).vec(sealed).done();
 export const transferInstruction = ({ id, newOwner }) => instruction(4).fixed(id, 32).fixed(newOwner, 32).done();
+/** A transfer that writes the new holder's first profile (`sealed`, at least 284 bytes) in the
+ *  same step, for registries whose settings version is 8 or later (SPEC.md §8). */
+export const transferSealedInstruction = ({ id, newOwner, sealed }) =>
+  instruction(11).fixed(id, 32).fixed(newOwner, 32).vec(sealed).done();
 export const releaseInstruction = ({ id, refund }) => instruction(5).fixed(id, 32).u128(refund).done();
 export const setPrimaryInstruction = ({ name }) => instruction(6).vec(utf8(name)).done();
 export const commitInstruction = ({ commitment, now }) => instruction(8).fixed(commitment, 32).u64(now).done();
@@ -262,6 +266,15 @@ export function transferMessage({ program, signer, nonce, gasLimit, id, newOwner
   return message({
     program, signer, nonce, gasLimit,
     data: transferInstruction({ id, newOwner }),
+    actors: nameActors(program, id),
+    evidence: nameEvidence(program, id),
+  });
+}
+
+export function transferSealedMessage({ program, signer, nonce, gasLimit, id, newOwner, sealed }) {
+  return message({
+    program, signer, nonce, gasLimit,
+    data: transferSealedInstruction({ id, newOwner, sealed }),
     actors: nameActors(program, id),
     evidence: nameEvidence(program, id),
   });
