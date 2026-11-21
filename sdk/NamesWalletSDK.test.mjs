@@ -272,6 +272,10 @@ test("request lines: every end state in plain words", () => {
   assert.equal(L("cancelled"), "You withdrew the payment. Nothing was sent.");
   assert.equal(L("failed", "out of LEZ"), "Names Wallet couldn't send the payment: out of LEZ.");
   assert.equal(SDK.requestLine({ state: "done" }), "");
+  // A reason about the wallet's own setup is said whole; anything else keeps the generic line.
+  assert.equal(SDK.requestLine({ state: "failed", error: "Names Wallet needs an update to send this" }, "the call"), "Names Wallet needs an update to send this.");
+  assert.equal(SDK.requestLine({ state: "failed", error: "Names Wallet isn't set up to send this yet" }, "the call"), "Names Wallet isn't set up to send this yet.");
+  assert.equal(SDK.requestLine({ state: "failed", error: "the wallet couldn't send it" }, "the call"), "Names Wallet couldn't send the call: the wallet couldn't send it.");
   assert.equal(SDK.requestOpen({ state: "running" }), true);
   assert.equal(SDK.requestOpen({ state: "done" }), false);
 });

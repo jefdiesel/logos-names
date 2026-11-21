@@ -166,6 +166,8 @@ export function requestLine(request, what) {
     if (r.state === "rejected") return "You declined " + thing + " in Names Wallet. Nothing was sent."
     if (r.state === "expired") return "Nobody approved " + thing + " within 10 minutes, so Names Wallet dropped it. Nothing was sent."
     if (r.state === "cancelled") return "You withdrew " + thing + ". Nothing was sent."
+    // A reason about the wallet's own setup comes whole ("Names Wallet needs an update to send this").
+    if (r.state === "failed" && /^Names Wallet /.test(String(r.error || ""))) return String(r.error).replace(/\.?$/, ".")
     if (r.state === "failed") return "Names Wallet couldn't send " + thing + (r.error ? ": " + r.error : "") + "."
     return ""
 }
