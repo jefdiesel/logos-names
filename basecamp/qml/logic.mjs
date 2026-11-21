@@ -204,14 +204,21 @@ export function preTicked(request, publisherFailed, hint) {
         return []
     var choices = request.choices || []
     var offered = function(account) { return choices.some(function(choice) { return choice.account === account }) }
+    var own = typeof hint === "string" && hint !== "" ? hint : ""
+    // An access request: nothing ticked unless an account was named for it; the person picks.
+    // Named by this app's own screen (the bridge's claim, `hint`): that box. Named by the app
+    // itself (`account_hint`): that box only when it is a public account; a private one is never
+    // ticked for another app. The person still decides.
+    if (request.kind === "connect") {
+        if (own !== "" && offered(own))
+            return [own]
+        var asked = typeof request.account_hint === "string" ? request.account_hint : ""
+        return /^Public\//.test(asked) && offered(asked) ? [asked] : []
+    }
     // The account the app asked about, when it named one and it is offered.
     if (typeof request.account === "string" && offered(request.account))
         return [request.account]
-    // An access request's hint (`account_hint`, or the claim this app's own screen is running for
-    // that app): only that box, when the wallet offers it. The person still decides.
-    var hinted = typeof request.account_hint === "string" ? request.account_hint : hint
-    if (request.kind === "connect" && typeof hinted === "string" && offered(hinted))
-        return [hinted]
+    var hinted = typeof request.account_hint === "string" ? request.account_hint : own
     var given = choices.filter(function(choice) { return choice.granted })
     if (request.kind === "programs" || request.kind === "token_source") {
         // The claim this app's own screen is running for: its account, when it is shared with the
@@ -282,16 +289,93 @@ export function sheetChoices(request, hint) {
     return only.length > 0 ? only : choices
 }
 
+// What the request sheet warns about, as a set (sorted, no repeats): its warnings' texts, and a
+// failed publisher check by its status. Compared as a set, so a warning that replaces another
+// at the same count is still new (M-2).
+export function requestWarnings(request, publisherFailed) {
+    if (!request)
+        return []
+    var out = []
+    var add = function(w) {
+        var text = typeof w === "string" ? w : JSON.stringify(w)
+        if (out.indexOf(text) < 0)
+            out.push(text)
+    }
+    ;((request.sheet && request.sheet.warnings) || []).forEach(add)
+    ;(request.warnings || []).forEach(add)
+    if (publisherFailed)
+        add("publisher failed: " + String(request.publisher && request.publisher.status || ""))
+    return out.sort()
+}
+
 // What the request sheet's ticks were set for: the request, and what the wallet knows about it
-// (the publisher check, whether the Program Registry is still being asked, how many warnings).
-// When any of it changes the ticks are set again, so an account ticked while "checking" is
-// unticked when the answer is a warning (M-2).
+// (the publisher check, whether the Program Registry is still being asked, its warnings). Any
+// change runs tickStep.
 export function requestTickKey(request) {
     if (!request)
         return ""
     var publisher = request.publisher && typeof request.publisher === "object" ? String(request.publisher.status || "") : ""
-    var warnings = (request.sheet && request.sheet.warnings ? request.sheet.warnings.length : 0) + (request.warnings ? request.warnings.length : 0)
-    return [request.id, publisher, request.checking === true ? "checking" : "", warnings].join("|")
+    var warnings = requestWarnings(request, false)
+    return [request.id, publisher, request.checking === true ? "checking" : "", warnings.length, warnings.join("\u241E")].join("|")
+}
+
+// What the sheet does with the ticks when a read of the requests comes back. `last`: what they
+// were set for ({key, id, warnings}, or null); `touched`: the person changed them since.
+// {action, key, id, warnings}, `action` one of:
+//   "same"  nothing the sheet knows changed;
+//   "keep"  the same request, ticked by the person, and nothing it warns about is new (the
+//           publisher check flipping "checking" ↔ "unavailable"): their ticks stay;
+//   "reset" a new request, untouched ticks, or anything new to warn about (a warning, a failed
+//           publisher check, one coming back): ticked again from preTicked, and the "I've read
+//           the warnings" box unticked (M-2).
+// The new warnings are always what the next step compares with, so a warning that goes and
+// comes back counts as new.
+export function tickStep(last, request, publisherFailed, touched) {
+    var key = requestTickKey(request)
+    var warnings = requestWarnings(request, publisherFailed)
+    var id = request ? String(request.id) : ""
+    if (last && last.key === key && last.id === id && sameList(last.warnings, warnings))
+        return { action: "same", key: key, id: id, warnings: warnings }
+    var sameRequest = !!last && last.id === id && id !== ""
+    var nothingNew = sameRequest && warnings.every(function(w) { return (last.warnings || []).indexOf(w) >= 0 })
+    return { action: sameRequest && touched && nothingNew ? "keep" : "reset", key: key, id: id, warnings: warnings }
+}
+
+function sameList(a, b) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every(function(x, i) { return x === b[i] })
+}
+
+// Whether an access sheet is the short one ("<app> asks to see an account", that account
+// ticked): only when an account was named for it, by the app (`account_hint`, `adding`) or by
+// this app's own screen (`hint`), and it was ticked when the sheet opened (`preTicked`). Fixed
+// for the request when the sheet opens: the person's own ticks never change which sheet it is.
+export function connectShort(request, hint, preTicked) {
+    if (!request || request.kind !== "connect")
+        return false
+    var named = typeof request.account_hint === "string" || request.adding === true || (typeof hint === "string" && hint !== "")
+    return named && Array.isArray(preTicked) && preTicked.length > 0
+}
+
+// The name to show for app `app` (its module name): the display name Basecamp has for it, from
+// the installed packages (`installedPackages`: `displayName`, or `display_name`), cleaned and
+// cut to 40 characters; else the module name itself. Both are chosen by the app, so the sheet
+// also says the module name where it says who asked.
+export function appLabel(list, app) {
+    var id = String(app || "")
+    var entry = id === "" ? null : installedEntry(list, id)
+    var raw = entry ? (typeof entry.displayName === "string" ? entry.displayName : typeof entry.display_name === "string" ? entry.display_name : "") : ""
+    var label = clean(raw.replace(/[\r\n\u000B\u000C\u0085\u2028\u2029]+/g, " ")).replace(/\s+/g, " ").trim()
+    if (label.length > 40)
+        label = label.substr(0, 39) + "…"
+    return label !== "" ? label : clean(id)
+}
+
+// Requests other than `answeredId` still waiting in a fresh read of pending_requests, or -1 when
+// the read failed (then the person stays in Names).
+export function othersWaiting(fresh, answeredId) {
+    if (!Array.isArray(fresh))
+        return -1
+    return fresh.filter(function(r) { return r && String(r.id) !== String(answeredId) }).length
 }
 
 // ── The Logos Blockchain (chain_* in the names module) ─────────────────
@@ -562,7 +646,7 @@ var BRIDGE_ARRIVES_MS = 12 * 3600 * 1000
 /// whose page shows the entry: the direction and amount are then that account's own
 /// (incoming-payment-shown-as-outgoing-on-receiving-accounts-page,
 /// claim-entry-not-on-credited-accounts-page-and-shown-as-credit-on-payer).
-export function activityLine(entry, now, account) {
+export function activityLine(entry, now, account, labelOf) {
     var e = entry || {}
     var page = String(account || "")
     var kind = String(e.kind || "")
@@ -579,7 +663,7 @@ export function activityLine(entry, now, account) {
     case "split": title = "Made a note of exactly " + amount; sub = "on " + whoShown(e.from) + (e.fee ? " · fee " + grouped(e.fee) : ""); sign = ""; break
     case "bridge": title = "Bridge to LEZ"; sub = "from " + whoShown(e.from) + " into " + whoShown(e.to); break
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
-    case "resign": title = "Signed again for " + clean(e.app || "an app"); sub = "on LEZ 0.4, without asking: only the payer's nonce had moved (payer nonce " + clean(e.payer_nonce) + ", re-sign " + clean(e.resigns) + " of 3)"; sign = ""; break
+    case "resign": title = "Signed again for " + (e.app ? (typeof labelOf === "function" ? labelOf(e.app) : clean(e.app)) : "an app"); sub = "on LEZ 0.4, without asking: only the payer's nonce had moved (payer nonce " + clean(e.payer_nonce) + ", re-sign " + clean(e.resigns) + " of 3)"; sign = ""; break
     case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
     case "receive": title = e.claimed === false ? "Nothing claimed" : landedIn(e) ? "Claimed waiting payments" : "Claim of waiting payments"; sub = e.claimed === false ? "on LEZ, what waits is worth less than claiming it costs" : "on LEZ, into your private accounts"; sign = "+"
@@ -786,8 +870,8 @@ export function claimFeeLine(plan) {
 // ── An app's inscription request (Wallet Provider SDK, LP-0022) ───────
 
 /// The heading of an inscription request's sheet.
-export function inscribeTitle(request) {
-    return request ? String(request.app || "An app") + " asks you to inscribe a testimonial on the Logos Blockchain" : ""
+export function inscribeTitle(request, label) {
+    return request ? (label || String(request.app || "An app")) + " asks you to inscribe a testimonial on the Logos Blockchain" : ""
 }
 
 /// One chain account offered for an inscription, in words: {title, sub}.
@@ -1373,10 +1457,10 @@ export function recipientApproved(approved, account, recipient) {
 }
 
 /// The tick of a burn that isn't this app's own send-back. `bridgeRecord`: as in burnDestination.
-export function burnTickText(request, bridgeRecord) {
+export function burnTickText(request, bridgeRecord, label) {
     if (bridgeRecord === true)
         return "The address above is the LEZ Bridge's record of this send-back; this wallet didn't read it back or tick it. Tick only if it is your address; the burn can't be undone."
-    var app = request && request.app === "lez_bridge" ? "the LEZ Bridge" : clean(request ? request.app : "")
+    var app = request && request.app === "lez_bridge" ? "the LEZ Bridge" : label || clean(request ? request.app : "")
     return "The wallet can't check the Ethereum address. Tick only if you started this send-back in " + app + " and checked the address there; the burn can't be undone."
 }
 
@@ -1802,6 +1886,22 @@ export function installedPackages(reply) {
 export function installedEntry(list, name) {
     var found = (list || []).filter(function(p) { return p && p.name === name })
     return found.length ? found[0] : null
+}
+
+/// The app to show again once the person has answered `request` (Approve or Reject): the app
+/// that asked, when it is an installed Basecamp app (`ui_qml`) other than this one; else "".
+/// A module (a backend, lez_bridge) has no screen to go back to, and a name Basecamp doesn't
+/// know would make it offer an install. `others`: how many other requests still wait, from a
+/// read made after the answer (othersWaiting); not 0, or not known (-1), and the person stays
+/// here, where the next sheet is.
+export function returnApp(list, request, others) {
+    if (!request || others !== 0 || !Array.isArray(list))
+        return ""
+    var app = String(request.app || "")
+    if (app === "" || app === "names_ui" || app === "host")
+        return ""
+    var entry = installedEntry(list, app)
+    return entry && entry.type === "ui_qml" ? app : ""
 }
 
 /// Where the shipped bridge files are: beside this app's view, `<installDir>/qml/bundled/`.

@@ -3,7 +3,7 @@
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote, deedCheckLine } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 import { SETTLE_CONSENT, settleNotOffered } from "./qml/logic.mjs";
-import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
+import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, requestWarnings, tickStep, connectShort, appLabel, othersWaiting, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
 import { bridgeReply, claimStage, claimAccountProblem, claimBridge, claimJobFor, runningClaimJob, claimPhases, claimFailure, claimErrorTitle, claimInput, otherDeployment } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
@@ -235,6 +235,66 @@ check("publisher checking", publisherLine({ status: "checking" }), { text: "Chec
   const warned = { id: "r1", publisher: { status: "verified" }, checking: false, sheet: { warnings: ["unverified"] } };
   check("tick key changes on status", [requestTickKey(checking) !== requestTickKey(fake), requestTickKey(fake) !== requestTickKey(warned), requestTickKey(fake) === requestTickKey({ ...fake })], [true, true, true]);
   check("tick key of nothing", requestTickKey(null), "");
+  check("tick key changes when a warning is replaced by another (same count)",
+    requestTickKey({ id: "r1", sheet: { warnings: ["A"] } }) !== requestTickKey({ id: "r1", sheet: { warnings: ["B"] } }), true);
+  check("warnings as a set: texts and a failed publisher by status",
+    [requestWarnings(warned, false), requestWarnings(fake, true), requestWarnings({ id: "r1", warnings: ["b", "a", "a"] }, false), requestWarnings(null, true)],
+    [["unverified"], ["publisher failed: mismatch"], ["a", "b"], []]);
+}
+{
+  // F1 (review hy4-1121): the person's ticks stay only while nothing the sheet warns about is
+  // new; a failed publisher check that comes back unticks again, as does warning A → B.
+  const at = (publisher, extra) => Object.assign({ id: "r1", publisher: { status: publisher }, checking: publisher === "checking" }, extra || {});
+  const failed = (r) => ["mismatch", "not_published", "no_such_name"].indexOf(r.publisher.status) >= 0;
+  const run = (states, touchedAt) => {
+    let last = null, out = [];
+    states.forEach((r, i) => {
+      const step = tickStep(last, r, failed(r), touchedAt.indexOf(i) >= 0);
+      out.push(step.action);
+      last = { key: step.key, id: step.id, warnings: step.warnings };
+    });
+    return out;
+  };
+  // 1 checking → 2 publisher fails → (3 the person ticks, and ticks "I've read") → 4 unavailable → 5 fails again.
+  check("F1: checking, fails, ticked, unavailable, fails again",
+    run([at("checking"), at("mismatch"), at("unavailable"), at("mismatch")], [2, 3]),
+    ["reset", "reset", "keep", "reset"]);
+  check("F1: checking ↔ unavailable flips keep the person's ticks", run([at("checking"), at("unavailable"), at("checking"), at("unavailable")], [1, 2, 3]),
+    ["reset", "keep", "keep", "keep"]);
+  check("F1: untouched ticks are set again on any change", run([at("checking"), at("unavailable")], []), ["reset", "reset"]);
+  check("F1: warning A replaced by B at the same count unticks", run([at("unavailable", { sheet: { warnings: ["A"] } }), at("unavailable", { sheet: { warnings: ["B"] } })], [1]),
+    ["reset", "reset"]);
+  check("F1: a warning going away keeps, coming back unticks",
+    run([at("unavailable", { sheet: { warnings: ["A"] } }), at("unavailable"), at("unavailable", { sheet: { warnings: ["A"] } })], [1, 2]), ["reset", "keep", "reset"]);
+  check("F1: nothing changed", tickStep({ key: requestTickKey(at("unavailable")), id: "r1", warnings: [] }, at("unavailable"), false, true).action, "same");
+  check("F1: another request always resets", tickStep({ key: requestTickKey(at("unavailable")), id: "r1", warnings: [] }, at("unavailable", { id: "r2" }), false, true).action, "reset");
+}
+{
+  // One access sheet for a plain request_access: nothing ticked, the full sheet, from start to end.
+  const choices = [{ account: "Public/46nzn" }, { account: "Private/8DdTr" }, { account: "Public/AxPX" }];
+  const plain = { kind: "connect", app: "vesting_ui", choices };
+  check("plain access: nothing ticked, checking or not, publisher unavailable or not",
+    [preTicked({ ...plain, checking: true }, false, ""), preTicked(plain, false, ""), preTicked({ ...plain, publisher: { status: "unavailable" } }, false, ""), preTicked(plain, false, undefined)],
+    [[], [], [], []]);
+  check("plain access: a granted private account isn't ticked either",
+    preTicked({ ...plain, choices: choices.map((c) => ({ ...c, granted: c.account === "Private/8DdTr" })) }, false, ""), []);
+  check("plain access: an account field on it ticks nothing", preTicked({ ...plain, account: "Private/8DdTr" }, false, ""), []);
+  check("app's hint: public ticked, private never",
+    [preTicked({ ...plain, account_hint: "Public/AxPX" }, false, ""), preTicked({ ...plain, account_hint: "Private/8DdTr" }, false, "")], [["Public/AxPX"], []]);
+  check("this app's own screen's hint (the bridge's private claim) still ticks", preTicked({ ...plain, app: "lez_bridge" }, false, "Private/8DdTr"), ["Private/8DdTr"]);
+  check("short access sheet only when an account was named and ticked",
+    [connectShort(plain, "", []), connectShort(plain, "", ["Public/AxPX"]), connectShort({ ...plain, account_hint: "Public/AxPX" }, "", ["Public/AxPX"]),
+     connectShort({ ...plain, account_hint: "Private/8DdTr" }, "", []), connectShort({ ...plain, app: "lez_bridge" }, "Public/AxPX", ["Public/AxPX"]), connectShort({ kind: "programs" }, "x", ["x"])],
+    [false, false, true, false, true, false]);
+}
+{
+  // The app's display name from the installed packages, else its module name.
+  const list = [{ name: "names_ui", type: "ui_qml" }, { name: "vesting_ui", type: "ui_qml", displayName: "Vest" }, { name: "old_ui", display_name: "Old" },
+    { name: "rtl_ui", displayName: "Wal\u202Elet\n" }, { name: "long_ui", displayName: "x".repeat(60) }, { name: "blank_ui", displayName: "  " }];
+  check("appLabel", [appLabel(list, "vesting_ui"), appLabel(list, "old_ui"), appLabel(list, "rtl_ui"), appLabel(list, "long_ui").length, appLabel(list, "blank_ui"), appLabel(list, "chat_ui"), appLabel(null, "vesting_ui"), appLabel(list, "")],
+    ["Vest", "Old", "Wallet", 40, "blank_ui", "chat_ui", "vesting_ui", ""]);
+  // F2: back to the app only after a fresh read shows nothing else waiting.
+  check("othersWaiting", [othersWaiting([], "a"), othersWaiting([{ id: "a" }], "a"), othersWaiting([{ id: "a" }, { id: "b" }], "a"), othersWaiting(null, "a")], [0, 0, 1, -1]);
 }
 check("publisher copy", publisherLine({ status: "mismatch", publisher: "forumer" }).tone, "warn");
 check("publisher unknown name", publisherLine({ status: "no_such_name", publisher: "x" }).text, "Claims x, which isn't a registered name.");
@@ -1515,7 +1575,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // 44 Timers in Main.qml at 0520887: none added (the box is checked once per change, never repeated).
   // +1 on names-nft: Collectibles' read, only while that page is open and in front, every 30 s (nft.test.mjs).
   // +1 on wallet-1121: deedRetry, one-shot, restarted only while the module answers a name NFT read as busy.
-  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 46);
+  // +1 on names-return: returnTimer, one-shot, started only after the person answers another app's request.
+  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 47);
   check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
   check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
   check("address step: the plan refuses an unticked or other value, and says so", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\) \{\s*\n\s*sbError = /.test(qml), true);
@@ -2070,6 +2131,18 @@ check("the deed retry has a 20-try cap and shows the failure line", [
   /Logic\.deedCheckLine\(myName\.modelData\.name/.test(deedQml),
   /\(None, Some\(why\)\) if !snap\.updating/.test(readFileSync(new URL("../basecamp-module/rust-lib/src/lib.rs", import.meta.url), "utf8")),
 ], [true, true, true]);
+
+{
+  // Back to the app that asked, once its request is answered (basecamp.apps.launch).
+  const { returnApp } = await import("./qml/logic.mjs");
+  const list = [{ name: "names_ui", type: "ui_qml" }, { name: "vesting_ui", type: "ui_qml" }, { name: "vesting", type: "core" }, { name: "lez_bridge", type: "core" }];
+  check("returnApp: an installed Basecamp app that asked", returnApp(list, { app: "vesting_ui" }, 0), "vesting_ui");
+  check("returnApp: stays when another request waits, or when that is not known", [returnApp(list, { app: "vesting_ui" }, 1), returnApp(list, { app: "vesting_ui" }, -1)], ["", ""]);
+  check("returnApp: a module, this app, the host, nobody, a name not installed: nowhere",
+    [returnApp(list, { app: "vesting" }, 0), returnApp(list, { app: "lez_bridge" }, 0), returnApp(list, { app: "names_ui" }, 0), returnApp(list, { app: "host" }, 0), returnApp(list, { app: "" }, 0), returnApp(list, { app: "chat_ui" }, 0)],
+    ["", "", "", "", "", ""]);
+  check("returnApp: the installed list unread, or no request: nowhere", [returnApp(null, { app: "vesting_ui" }, 0), returnApp(list, null, 0)], ["", ""]);
+}
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

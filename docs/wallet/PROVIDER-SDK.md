@@ -43,6 +43,24 @@ what the person sees in every prompt.
 The Names app must be installed and open to answer requests. A request that
 nobody answers expires after 10 minutes.
 
+**Taking the person to Names and back.** After a call that leaves a request
+`pending`, bring the Names app forward with Basecamp's own navigation intent,
+`basecamp.apps.launch` (Basecamp 0.3.2 and later; the shell answers it, so no
+chooser appears). Declare it in your `metadata.json`, as an object:
+`"uses": [{ "intent": "basecamp.apps.launch" }]`, or the request fails
+`not_declared`. Then:
+
+```qml
+if (logos.request) logos.request("basecamp.apps.launch", { app: "names_ui" }, function(res) {})
+```
+
+When the person approves or rejects, Names shows your app again by the same
+intent, if your app is an installed Basecamp app (`ui_qml`) and no other
+request is waiting (Names reads the queue again after the answer to know). Names
+calls your app by its `display_name`, with the module name beside it where the
+sheet says who asked. A request made by a module, not an app, stays in Names.
+Keep polling `request_status`: coming back is navigation only, not the answer.
+
 **Zones.** The wallet can hold several LEZ zones (chains) and uses one at a
 time. Balances are those of the zone in use. A transfer or a call is asked for
 the zone in use at that moment and can be approved only there: the person sees
@@ -77,8 +95,9 @@ Provider SDK. Every method returns JSON text:
 
 `request_access_with(reason, options_json)` is `request_access` with options, a JSON object.
 The only option is `{"account_hint": "Public/<id>"}` (or `Private/<id>`): the account the access
-is for, which the sheet ticks first when the wallet holds it. It only pre-ticks: the person still
-chooses, and nothing is given without their tick. A hint the wallet doesn't hold is dropped, and
+is for, which the sheet ticks first when the wallet holds it and it is a public account (a
+private one is shown, never ticked for you). It only pre-ticks: the person still chooses, and
+nothing is given without their tick. Without a hint nothing is ticked. A hint the wallet doesn't hold is dropped, and
 an unknown field or a malformed hint is refused. `"{}"` is the same as `request_access(reason)`.
 Check `get_config().features` for `"request_access_with"` first, and fall back to
 `request_access(reason)` on an older Names module. `features` is in the reply's `value`
