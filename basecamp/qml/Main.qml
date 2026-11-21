@@ -8390,6 +8390,8 @@ Item {
         onTriggered: {
             var app = root.returnTo
             root.returnTo = ""
+            if (app !== "" && root.appRequest !== null)
+                console.log("names_ui: staying here: another request came in")
             if (app !== "" && root.appRequest === null && root.bridgeReady && logos.request) {
                 console.log("names_ui: back to " + app)
                 logos.request("basecamp.apps.launch", { app: app }, function() {})
@@ -8401,12 +8403,16 @@ Item {
         if (!(bridgeReady && logos.request))
             return
         var others = Logic.othersWaiting(fresh, request.id)
-        if (others !== 0)
+        if (others !== 0) {
+            console.log("names_ui: staying here: " + (others < 0 ? "the requests couldn't be read" : others + " more waiting"))
             return
+        }
         loadInstalled(function() {
             var app = Logic.returnApp(installedList, request, others)
-            if (app === "")
+            if (app === "") {
+                console.log("names_ui: staying here: " + request.app + " isn't an installed app to go back to")
                 return
+            }
             returnTo = app
             returnTimer.restart()
         })
@@ -8462,11 +8468,53 @@ Item {
             })
             loadAppGrants()
         }, function(message) {
-            appBusy = false
-            appError = sentence(message)
-            appErrorKind = Logic.noticeKind(appError, true)
-            loadAppRequests()
+            // No answer (Basecamp gives a call 20 s, and a call waits for its block), or the
+            // wallet said no: how the request stands now tells which (followAnswer).
+            console.log("names_ui: answer for " + request.id + " came back as: " + message)
+            followAnswer({ request: request, approve: approve, message: message, drawnHere: drawnHere, since: Date.now() })
         }, approve && request.kind === "call" ? 180000 : 30000)
+    }
+
+    /// After an answer to an app's request that didn't come back as a success: reads how the
+    /// request stands (request_outcome), again every 3 s while the wallet is still busy with it
+    /// (a call is sent and waits for its block), for up to 3 minutes. Then it says the outcome
+    /// and, as after any answer, goes back to the app that asked; a call that failed keeps the
+    /// person here, where its whole reason is shown (Logic.answerOutcome).
+    function followAnswer(f) {
+        askLater("request_outcome", [f.request.id], function(outcome) {
+            var next = Logic.answerOutcome(outcome, f.approve, appShown(f.request.app))
+            appBusy = false
+            if (!next.settled) {
+                // Still pending: the answer didn't take. Said on the sheet, as before.
+                appError = sentence(f.message)
+                appErrorKind = Logic.noticeKind(appError, true)
+                console.log("names_ui: request " + f.request.id + " still waits")
+                loadAppRequests()
+                return
+            }
+            if (next.notice !== "")
+                say(next.notice, next.tone)
+            console.log("names_ui: request " + f.request.id + " ended " + outcome.state + (next.back ? "" : "; staying here"))
+            loadAppRequests(f.drawnHere || !next.back ? undefined : function(fresh) { returnAfterAnswer(f.request, fresh) })
+            loadAppGrants()
+        }, function(error) {
+            if (Date.now() - f.since < 180000) {
+                followTimer.follow = f
+                followTimer.restart()
+                return
+            }
+            appBusy = false
+            appError = sentence(f.message)
+            appErrorKind = Logic.noticeKind(appError, true)
+            console.log("names_ui: request " + f.request.id + " outcome unknown: " + error)
+            loadAppRequests()
+        }, 20000)
+    }
+    Timer {
+        id: followTimer
+        property var follow: null
+        interval: 3000
+        onTriggered: if (follow !== null) root.followAnswer(follow)
     }
 
     function revokeApp(app) {

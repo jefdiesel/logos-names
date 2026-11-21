@@ -370,6 +370,31 @@ export function appLabel(list, app) {
     return label !== "" ? label : clean(id)
 }
 
+// What to do once an approve or reject of an app's request has an outcome: `outcome` is
+// `request_outcome`'s value (null when it couldn't be read), `approve` whether the person
+// approved, `label` what the app is called. {settled, back, notice, tone}:
+//   settled  false: the wallet hasn't decided it yet (still `pending`: the approve didn't take);
+//   back     go back to the app that asked (it was sent, given, or rejected);
+//   notice   a line for the person, with tone false (done), "waiting" or true (a problem).
+// A call that failed keeps the person here, with the whole reason: it is said only in Names.
+export function answerOutcome(outcome, approve, label) {
+    var who = label || "the app"
+    if (!outcome || typeof outcome !== "object")
+        return { settled: false, back: false, notice: "", tone: true }
+    var state = String(outcome.state || "")
+    if (state === "pending")
+        return { settled: false, back: false, notice: "", tone: true }
+    if (state === "failed")
+        return { settled: true, back: false, tone: true,
+                 notice: "Couldn't send it for " + who + ": " + bridgeText(outcome.problem || outcome.error || "it wasn't sent", 300) }
+    if (state === "rejected" || state === "cancelled" || state === "expired")
+        return { settled: true, back: !approve || state === "rejected", notice: "", tone: false }
+    if (state === "done")
+        return { settled: true, back: true, tone: false, notice: (outcome.kind === "call" ? "Sent for " : "Done for ") + who + "." }
+    // approved (access), running (a payment under way): the app follows it itself.
+    return { settled: true, back: true, notice: "", tone: false }
+}
+
 // Requests other than `answeredId` still waiting in a fresh read of pending_requests, or -1 when
 // the read failed (then the person stays in Names).
 export function othersWaiting(fresh, answeredId) {
@@ -663,6 +688,8 @@ export function activityLine(entry, now, account, labelOf) {
     case "split": title = "Made a note of exactly " + amount; sub = "on " + whoShown(e.from) + (e.fee ? " · fee " + grouped(e.fee) : ""); sign = ""; break
     case "bridge": title = "Bridge to LEZ"; sub = "from " + whoShown(e.from) + " into " + whoShown(e.to); break
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
+    case "app_call": title = (e.state === "failed" ? "Couldn't send for " : "Sent for ") + (e.app ? (typeof labelOf === "function" ? labelOf(e.app) : clean(e.app)) : "an app")
+        sub = e.state === "failed" ? bridgeText(e.problem || "it wasn't sent", 240) : "on LEZ, signed by " + whoShown(e.from) + (e.tx ? " · " + idShort(clean(e.tx)) : ""); sign = ""; break
     case "resign": title = "Signed again for " + (e.app ? (typeof labelOf === "function" ? labelOf(e.app) : clean(e.app)) : "an app"); sub = "on LEZ 0.4, without asking: only the payer's nonce had moved (payer nonce " + clean(e.payer_nonce) + ", re-sign " + clean(e.resigns) + " of 3)"; sign = ""; break
     case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break

@@ -62,7 +62,8 @@ if (logos.request) logos.request("basecamp.apps.launch", { app: "names_ui" }, fu
 
 When the person approves or rejects, Names shows your app again by the same
 intent, if your app is an installed Basecamp app (`ui_qml`) and no other
-request is waiting (Names reads the queue again after the answer to know). Names
+request is waiting; for a call, once it is sent (a call that failed keeps the
+person in Names, where its whole reason is shown) (Names reads the queue again after the answer to know). Names
 calls your app by its `display_name`, with the module name beside it where the
 sheet says who asked. A request made by a module, not an app, stays in Names.
 Keep polling `request_status`: coming back is navigation only, not the answer.
@@ -225,7 +226,7 @@ of the person's, so it needs no access.
 | `approved` | Access given (`connect`) |
 | `running` | A transfer is being proven and sent: about 4 minutes from a private account, one block from a public one |
 | `done` | Included in a block and not reverted. A call also gives `tx`, its hash. An inscription is `done` when the person's node has taken it: `tx` is its hash, and it is final a few minutes later |
-| `failed` | `error` says why, in general terms. The wallet's own message, which may mention the person's balances, goes only to the Names app. For an inscription the error is always `the inscription may not have been sent`, and `account` is the key that was to pay: the node took it under another hash, or didn't answer after it was handed over, so it may still land. Don't ask again before the person has looked at their node's history |
+| `failed` | `error` says why, in general terms. The wallet's own message, which may mention the person's balances, goes only to the Names app, which shows it to the person (a notice, and a line in the History). For a call, `error` is one of: `Names Wallet needs an update to send this` (the person's names tool is too old for this call; nothing was sent), `Names Wallet isn't set up to send this yet` (its tool or wallet isn't ready; nothing was sent), or `the wallet couldn't send it` (anything else: the call, the chain, the person's accounts). Show it as it is. For an inscription the error is always `the inscription may not have been sent`, and `account` is the key that was to pay: the node took it under another hash, or didn't answer after it was handed over, so it may still land. Don't ask again before the person has looked at their node's history |
 | `rejected` / `expired` / `cancelled` | Nothing was signed or sent |
 
 Times are in milliseconds. A decided request stays readable for a day.
@@ -951,6 +952,7 @@ gets `only the Names app can do this`.
 | `pending_requests()` | the waiting connect, transfer and call requests (not inscriptions), oldest first, with everything the prompt shows and `choices`: `[{account, account_kind, pays, label, granted}]`. A transfer or a call also has `zone`, `zone_name`, `zone_in_use` (false: it can't be approved until the person switches to that zone) and `zone_removed`. A payment comes from the wallet's main public or private account (`pays`). A call can be signed by any of its public accounts; those beyond the main one are read in the background and can appear a few seconds later |
 | `approve_request(request_id, account)` | approves with one of the request's `choices` (for `connect`, one or more separated by commas). A transfer starts as a CLI job, and its `job` is in the value. If the wallet is busy, the request stays pending and the error says so |
 | `reject_request(request_id)` | the rejected request, of any kind |
+| `request_outcome(request_id)` | `{id, app, kind, state, tx, error, problem, decided, finished, account}` of any request: `error` is what the app was told, `problem` the whole reason a call or payment failed. Basecamp gives a call 20 s and an approved call waits for its block, so the Names app reads this when `approve_request`'s answer doesn't come back |
 | `pending_inscriptions()` | the waiting inscription requests, oldest first: `{id, app, publisher, says, submission, text, created, expires, choices}`. `choices` is `[{key, balance, label?, title?}]`, the accounts the person's node holds, named as the Blockchain tab names them and without an empty account they hid. If the node can't be asked, `choices` is empty and `node` says why |
 | `approve_inscription(request_id, from_key)` | inscribes it from that account and answers when the node has taken it (`done`) or may have (`failed`). Refused before anything is sent (the key isn't one the node holds, the node is stopped, the account can't pay the fee): the request stays pending and the error says why |
 | `chain_inscribe(from_key, text, send)` | with `send` false, the plan the sheet shows: `fee_estimate`, the node's own fee for this inscription from this account, asked in a way that holds none of the account's funds (`null` when the node can't say; an error when it is above the 100,000 a send pays) |

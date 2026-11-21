@@ -1181,7 +1181,15 @@ pub trait NamesModule: Send + 'static {
     /// call is tried, signed and sent by the names CLI (`names module send`)
     /// and the answer waits for its block (up to two minutes). If the wallet
     /// is busy the request stays pending and the error says so. Names app only.
+    /// Basecamp gives a call 20 s, so a call's answer may not reach the Names app: it then
+    /// reads `request_outcome`.
     fn approve_request(&mut self, request_id: String, account: String) -> String;
+
+    /// How request `request_id` stands, as the Names app sees it: `{id, app, kind, state, tx,
+    /// error, problem, decided}`. `error` is what the app that asked is told; `problem` is the
+    /// whole reason a call or payment failed, which may name the person's accounts and
+    /// balances, so it stays with the Names app. Names app only.
+    fn request_outcome(&mut self, request_id: String) -> String;
 
     /// Rejects request `request_id`. Names app only.
     fn reject_request(&mut self, request_id: String) -> String;
@@ -8416,6 +8424,21 @@ impl NamesModule for Names {
         })())
     }
 
+    fn request_outcome(&mut self, request_id: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        self.provider_refresh();
+        reply((|| {
+            let request = self.store().get_mut(request_id.trim()).ok_or("there is no such request")?.clone();
+            let mut view = json!({});
+            for key in ["id", "app", "kind", "state", "tx", "error", "problem", "decided", "finished", "account"] {
+                view[key] = request[key].clone();
+            }
+            Ok(view)
+        })())
+    }
+
     fn app_grants(&mut self) -> String {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
@@ -8928,6 +8951,46 @@ const FAUCET_GETTING_READY: &str = "Getting ready to ask the faucet… the walle
 /// `host` for the host itself (Basecamp, or `logosctl` driving the module).
 /// A caller that can't be named, or a module that calls itself `host`, can't
 /// ask the wallet for anything.
+/// Why an approved program call wasn't sent: `problem`, the whole of it (for the Names app
+/// only: it may name the person's accounts and balances), and where it came from.
+struct CallFailure {
+    problem: String,
+    fault: Fault,
+}
+
+/// Where a call's failure came from. Only a fault in this wallet's own setup is told to the
+/// app that asked, in words of its own; anything about the call or the person's money is not.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Fault {
+    /// The call, the chain, or the person's accounts: the app hears only that it wasn't sent.
+    Call,
+    /// The names tool is too old for this call.
+    Outdated,
+    /// The names tool or its wallet isn't set up (not found, not made, locked).
+    Setup,
+}
+
+/// What the app that asked is told when its call wasn't sent (`request_status` `error`).
+const CALL_NOT_SENT: &str = "the wallet couldn't send it";
+const CALL_NEEDS_UPDATE: &str = "Names Wallet needs an update to send this";
+const CALL_NOT_SET_UP: &str = "Names Wallet isn't set up to send this yet";
+
+impl CallFailure {
+    fn call(problem: String) -> Self {
+        CallFailure { problem, fault: Fault::Call }
+    }
+    fn setup(problem: String) -> Self {
+        CallFailure { problem, fault: Fault::Setup }
+    }
+    fn app_reason(&self) -> &'static str {
+        match self.fault {
+            Fault::Call => CALL_NOT_SENT,
+            Fault::Outdated => CALL_NEEDS_UPDATE,
+            Fault::Setup => CALL_NOT_SET_UP,
+        }
+    }
+}
+
 fn asking_app() -> Result<String, String> {
     match calling() {
         logos_rust_sdk::LogosCaller::Module { name, .. } if name != "host" => provider::app_name(&name),
@@ -9209,21 +9272,36 @@ impl Names {
                 outcome["job"] = job["id"].clone();
                 None
             }
-            provider::CALL => match self.provider_call(&request, &chosen[0]) {
-                Ok(tx) => {
-                    outcome["state"] = json!("done");
-                    outcome["tx"] = json!(tx);
-                    None
+            provider::CALL => {
+                let sent = self.provider_call(&request, &chosen[0]);
+                // The History shows each call sent for an app, and why one failed (Names only).
+                let mut line = json!({ "kind": "app_call", "chain": "lez", "app": app, "from": chosen[0], "program": request["program"] });
+                let failure = match sent {
+                    Ok(tx) => {
+                        outcome["state"] = json!("done");
+                        outcome["tx"] = json!(tx);
+                        line["state"] = json!("done");
+                        line["tx"] = json!(tx);
+                        None
+                    }
+                    // A send that failed may still have gone through, so it is
+                    // never offered again: the request ends failed. The app is told a reason
+                    // only when it is about this wallet's own setup (CallFailure::app_reason);
+                    // the whole of it, which may name balances, stays with the Names app.
+                    Err(failed) => {
+                        outcome["state"] = json!("failed");
+                        outcome["error"] = json!(failed.app_reason());
+                        outcome["problem"] = json!(failed.problem);
+                        line["state"] = json!("failed");
+                        line["problem"] = json!(failed.problem);
+                        Some(failed.problem)
+                    }
+                };
+                if let Some(dir) = config_dir() {
+                    activity::add(&dir, now, activity::in_zone(line, &self.zones.current_id()));
                 }
-                // A send that failed may still have gone through, so it is
-                // never offered again: the request ends failed.
-                Err(error) => {
-                    outcome["state"] = json!("failed");
-                    outcome["error"] = json!("the wallet couldn't send it");
-                    outcome["problem"] = json!(error);
-                    Some(error)
-                }
-            },
+                failure
+            }
             _ => return Err("this request can't be approved".to_owned()),
         };
         let store = self.store();
@@ -9285,27 +9363,28 @@ impl Names {
     /// against the chain first, sizes its gas, signs, sends and waits for its
     /// block. The signer's own actor of the program comes first, then the
     /// accounts the request reaches. Returns the transaction hash.
-    fn provider_call(&self, request: &Value, account: &str) -> Result<String, String> {
-        let (_, signer) = provider::account_ref(account)?;
-        let program = registry::parse_account(request["program"].as_str().unwrap_or_default())?;
-        let message = registry::unhex(request["instruction"].as_str().unwrap_or_default())?;
+    fn provider_call(&self, request: &Value, account: &str) -> Result<String, CallFailure> {
+        let call = CallFailure::call;
+        let (_, signer) = provider::account_ref(account).map_err(call)?;
+        let program = registry::parse_account(request["program"].as_str().unwrap_or_default()).map_err(call)?;
+        let message = registry::unhex(request["instruction"].as_str().unwrap_or_default()).map_err(call)?;
         if message.is_empty() {
-            return Err("this request has nothing to send".to_owned());
+            return Err(call("this request has nothing to send".to_owned()));
         }
         let mut mentions = vec![Mention { account: signer, program, seed: None, signs: true }];
         let mut reads_clock = false;
-        for reached in provider::stored_reached(request)? {
-            let account = if reached.account == provider::SIGNER { signer } else { registry::parse_account(&reached.account)? };
+        for reached in provider::stored_reached(request).map_err(call)? {
+            let account = if reached.account == provider::SIGNER { signer } else { registry::parse_account(&reached.account).map_err(call)? };
             // Another program's account (the network clock) is only read: never signed, and never
             // the chosen account, whose signature would authorize that program on it.
             if reached.reads && account == signer {
-                return Err("this call reads another program's data on the account you chose; nothing was sent".to_owned());
+                return Err(call("this call reads another program's data on the account you chose; nothing was sent".to_owned()));
             }
             // The chosen account's LEZ is given to a program only as `signer`, which the prompt
             // says: written as its ID it would be given too (the account signs, and LEZ 0.4
             // authorizes by account), under a prompt that said the call can't move it.
             if reached.balance && reached.account != provider::SIGNER && account == signer {
-                return Err("this call lists the account you chose by its ID for its LEZ, which the prompt didn't say it may move; reject it, and the app can ask again with \"signer\". Nothing was sent.".to_owned());
+                return Err(call("this call lists the account you chose by its ID for its LEZ, which the prompt didn't say it may move; reject it, and the app can ask again with \"signer\". Nothing was sent.".to_owned()));
             }
             reads_clock |= reached.reads;
             mentions.push(Mention {
@@ -9316,19 +9395,23 @@ impl Names {
             });
         }
         let change = Change { message, mentions, signer, needs: 0, extra: Value::Null };
-        let mut setup = self.cli_setup()?;
-        setup.wallet_ready()?;
+        // The wallet's own setup: the app may be told so (CallFailure::app_reason).
+        let mut setup = self.cli_setup().map_err(CallFailure::setup)?;
+        setup.wallet_ready().map_err(CallFailure::setup)?;
         if reads_clock {
             // A CLI before 0.18 can't try a call that reads the clock, so it would refuse it
             // with a bare "Program violated execution rules"; say what to do instead.
             if let Ok(line) = self.cli_line(&setup.program) {
                 if !cli_reads_clock(&line) {
-                    return Err(format!("this call reads the network clock, which needs the names tool 0.18 or later (this one says {line}); nothing was sent"));
+                    return Err(CallFailure {
+                        problem: format!("this call reads the network clock, which needs the names tool 0.18 or later (this one says {line}); nothing was sent"),
+                        fault: Fault::Outdated,
+                    });
                 }
             }
         }
         setup.registry = Some(registry::account_text(&program));
-        wallet::send(&setup, &change)
+        wallet::send(&setup, &change).map_err(call)
     }
 
     /// Ends the requests whose payment job has ended. The app that asked is
@@ -14876,6 +14959,15 @@ mod tests {
             } else {
                 let refused = sent.to_string();
                 assert!(refused.contains("0.18 or later") && !dir.join("sent.json").exists(), "{refused}");
+                // The app is told its wallet needs an update, never the tool's own line.
+                as_caller(app("vest_ui"));
+                let status = parsed(&names.request_status(id.clone()))["value"].clone();
+                assert_eq!((status["state"].as_str(), status["error"].as_str()), (Some("failed"), Some(CALL_NEEDS_UPDATE)), "{status}");
+                assert!(status.get("problem").is_none() && !status.to_string().contains("0.17.0"), "{status}");
+                // The Names app reads the whole reason.
+                as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+                let outcome = parsed(&names.request_outcome(id.clone()))["value"].clone();
+                assert!(outcome["problem"].as_str().unwrap().contains("0.18 or later"), "{outcome}");
             }
             as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
             let _ = std::fs::remove_dir_all(dir);
@@ -14930,6 +15022,8 @@ mod tests {
         let sent = approve(&mut names, &id, &format!("Public/{OTHER}"));
         assert_eq!(sent["value"]["state"], "done", "{sent}");
         assert_eq!(sent["value"]["tx"], "feedbeef");
+        let line = activity::all(&config_dir().unwrap()).into_iter().find(|e| e["kind"] == "app_call").expect("a History line");
+        assert_eq!((line["state"].as_str(), line["tx"].as_str(), line["app"].as_str()), (Some("done"), Some("feedbeef"), Some("tips_ui")), "{line}");
         // The CLI got the call's program in place of the registry, and the change.
         let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
         assert!(argv.contains(&format!("--program={program}\n")) && argv.ends_with("module\nsend\n"), "{argv}");
@@ -14990,7 +15084,19 @@ mod tests {
         assert!(dir.join("tried").exists());
         as_caller(app("tips_ui"));
         let status = parsed(&names.request_status(id.clone()))["value"].clone();
-        assert_eq!((status["state"].as_str(), status["error"].as_str()), (Some("failed"), Some("the wallet couldn't send it")), "{status}");
+        assert_eq!((status["state"].as_str(), status["error"].as_str()), (Some("failed"), Some(CALL_NOT_SENT)), "{status}");
+        // The balance in the reason stays with the Names app: its outcome, and its History.
+        assert!(!status.to_string().contains("insufficient"), "{status}");
+        assert!(parsed(&names.request_outcome(id.clone()))["error"].as_str().unwrap().contains("Names app"), "an app can't read the outcome");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let outcome = parsed(&names.request_outcome(id.clone()))["value"].clone();
+        assert_eq!((outcome["state"].as_str(), outcome["app"].as_str()), (Some("failed"), Some("tips_ui")), "{outcome}");
+        assert!(outcome["problem"].as_str().unwrap().contains("insufficient balance"), "{outcome}");
+        let line = activity::all(&config_dir().unwrap()).into_iter().find(|e| e["kind"] == "app_call").expect("a History line");
+        assert_eq!((line["state"].as_str(), line["app"].as_str()), (Some("failed"), Some("tips_ui")), "{line}");
+        assert!(line["problem"].as_str().unwrap().contains("insufficient balance"), "{line}");
+        assert!(parsed(&names.request_outcome("nope".into()))["error"].as_str().unwrap().contains("no such request"));
+        as_caller(app("tips_ui"));
         assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("failed already"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         let _ = std::fs::remove_dir_all(dir);

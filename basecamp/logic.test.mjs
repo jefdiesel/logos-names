@@ -1576,7 +1576,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // +1 on names-nft: Collectibles' read, only while that page is open and in front, every 30 s (nft.test.mjs).
   // +1 on wallet-1121: deedRetry, one-shot, restarted only while the module answers a name NFT read as busy.
   // +1 on names-return: returnTimer, one-shot, started only after the person answers another app's request.
-  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 47);
+  // +1 on names-fix2: followTimer, one-shot, only while an answer's outcome is being read.
+  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 48);
   check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
   check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
   check("address step: the plan refuses an unticked or other value, and says so", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\) \{\s*\n\s*sbError = /.test(qml), true);
@@ -2146,6 +2147,30 @@ check("the deed retry has a 20-try cap and shows the failure line", [
     [returnApp(list, { app: "vesting" }, 0), returnApp(list, { app: "lez_bridge" }, 0), returnApp(list, { app: "names_ui" }, 0), returnApp(list, { app: "host" }, 0), returnApp(list, { app: "" }, 0), returnApp(list, { app: "chat_ui" }, 0)],
     ["", "", "", "", "", ""]);
   check("returnApp: the installed list unread, or no request: nowhere", [returnApp(null, { app: "vesting_ui" }, 0), returnApp(list, null, 0)], ["", ""]);
+}
+
+{
+  // After an answer that didn't come back (a call's 20 s in Basecamp), or a refusal: the outcome.
+  const { answerOutcome, activityLine } = await import("./qml/logic.mjs");
+  const call = (state, extra) => Object.assign({ id: "r1", app: "vesting_ui", kind: "call", state }, extra || {});
+  check("outcome: a call sent after the host gave up → back, 'Sent for Vest.'",
+    answerOutcome(call("done", { tx: "5f1f" }), true, "Vest"), { settled: true, back: true, tone: false, notice: "Sent for Vest." });
+  check("outcome: a call that failed → stay, the whole reason",
+    answerOutcome(call("failed", { error: "Names Wallet needs an update to send this", problem: "this call reads the network clock, which needs the names tool 0.18 or later (this one says names 0.17.0); nothing was sent" }), true, "Vest"),
+    { settled: true, back: false, tone: true, notice: "Couldn't send it for Vest: this call reads the network clock, which needs the names tool 0.18 or later (this one says names 0.17.0); nothing was sent" });
+  check("outcome: rejected → back; still pending → not settled; unread → not settled",
+    [answerOutcome(call("rejected"), false, "Vest").back, answerOutcome(call("pending"), true, "Vest").settled, answerOutcome(null, true, "Vest").settled],
+    [true, false, false]);
+  check("outcome: access given, a payment running → back, no notice",
+    [answerOutcome({ kind: "connect", state: "approved" }, true, "Vest"), answerOutcome({ kind: "transfer", state: "running" }, true, "Vest")].map((o) => [o.settled, o.back, o.notice]),
+    [[true, true, ""], [true, true, ""]]);
+  const label = (app) => (app === "vesting_ui" ? "Vest" : app);
+  check("History: a call sent for an app",
+    ((l) => [l.title, /signed by .*46nzn/.test(l.sub), /dddd$/.test(l.sub)])(activityLine({ kind: "app_call", chain: "lez", app: "vesting_ui", from: "Public/46nznTKzGokjcH", state: "done", tx: "5f1fdfa2aaaabbbbccccdddd", at: 1 }, 2000, "", label)),
+    ["Sent for Vest", true, true]);
+  check("History: a call that failed says why",
+    ((l) => [l.title, l.sub])(activityLine({ kind: "app_call", chain: "lez", app: "vesting_ui", state: "failed", problem: "this call reads the network clock, which needs the names tool 0.18 or later; nothing was sent", at: 1 }, 2000, "", label)),
+    ["Couldn't send for Vest", "this call reads the network clock, which needs the names tool 0.18 or later; nothing was sent"]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
