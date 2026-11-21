@@ -1528,6 +1528,15 @@ struct Names {
 
 /// How long a cached read about a name is used before it is read again.
 const READ_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+/// Another app's reads of names and accounts (`app_read`): how many may be under way at once
+/// (one more is answered busy, nothing started), and how many are kept.
+const APP_READS_IN_FLIGHT: usize = 4;
+const APP_READS_KEPT: usize = 128;
+
+/// The keys another app's reads are kept under: never the Names app's, never another app's.
+fn app_reads_prefix(app: &str) -> String {
+    format!("app:{app}|")
+}
 
 /// A board read: the last result, and whether a newer one is being fetched.
 #[derive(Default)]
@@ -1776,7 +1785,7 @@ const MODULE_VERSION: &str = "0.18.0";
 /// vault releases by proof (`provider_public::burn_check`, privacy `bridge_public_burn`).
 /// `call_reads_clock` (0.18): `propose_call` takes the network clock as a read-only account,
 /// `{"account": <clock account>, "program": <clock program>}`.
-const MODULE_FEATURES: [&str; 13] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock"];
+const MODULE_FEATURES: [&str; 14] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "app_name_reads"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -3069,15 +3078,28 @@ impl Names {
         self.about(&name, avatar_answer)
     }
 
-    /// A read about a name for the Names app (`resolve`, `page`, `page_view`, `avatar`,
-    /// `deposit`): made on a thread of its own (the name's derivation too, Argon2, seconds of CPU)
-    /// and answered at once with the last one (served.rs), busy until the first is back; read again
-    /// after `READ_FRESH`, at once after a change to the name (`forget_reads`). None for another
-    /// app's read and in unit tests, which read on the spot (`cached_read`), as every app's did.
+    /// A read about a name (`resolve`, `recipient`, `page`, `page_view`, `avatar`, `deposit`):
+    /// made on a thread of its own (the name's derivation too, Argon2, seconds of CPU) and answered
+    /// at once with the last one (served.rs), busy until the first is back; read again after
+    /// `READ_FRESH`, at once after a change to the name (`forget_reads`). None in unit tests, which
+    /// read on the spot (`cached_read`).
+    ///
+    /// Another app's read (names 0.19, feature `app_name_reads`) goes the same way, apart from the
+    /// Names app's: its own keys (`app_reads_key`), its own lane, a derivation of its own (never
+    /// the wallet's kept ones), at most `APP_READS_IN_FLIGHT` at a time. Before, it was read on
+    /// the module's one thread, so a slow sequencer held every call (Names app's too) for up to
+    /// `READ_BUDGET`, and how fast an answer came said which names the wallet had looked up.
     fn name_read(&mut self, kind: &str, typed: &str, answer: fn(&Registry, &str, &Derived) -> Result<Value, String>) -> Option<String> {
-        if self.served.inline || only_the_names_app().is_err() {
+        if self.served.inline {
             return None;
         }
+        let app = match only_the_names_app() {
+            Ok(()) => None,
+            Err(_) => match asking_app() {
+                Ok(app) => Some(app),
+                Err(why) => return Some(reply(Err(why))),
+            },
+        };
         let name = match registry::parse_name(typed) {
             Ok(name) => name,
             Err(why) => return Some(reply(Err(why))),
@@ -3086,15 +3108,42 @@ impl Names {
             Ok(registry) => registry,
             Err(why) => return Some(reply(Err(why))),
         };
-        let known = self.derived.get(&name).cloned();
         let (sequencer, program) = (registry.sequencer.clone(), registry.program);
         let key = format!("name:{name}:{kind}:{sequencer}:{}", registry::account_text(&program));
-        let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
-        let snap = self.served.read(&key, READ_FRESH, lane, move || {
-            let derived = known.unwrap_or_else(|| derived_kept(&name));
-            answer(&Registry::new(&sequencer, program), &name, &derived)
-        });
-        Some(served::reply_of(&snap, "This name", |_| Value::Null))
+        let Some(app) = app else {
+            let known = self.derived.get(&name).cloned();
+            let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
+            let snap = self.served.read(&key, READ_FRESH, lane, move || {
+                let derived = known.unwrap_or_else(|| derived_kept(&name));
+                answer(&Registry::new(&sequencer, program), &name, &derived)
+            });
+            return Some(served::reply_of(&snap, "This name", |_| Value::Null));
+        };
+        let host = sequencer.clone();
+        Some(self.app_read(&app, &key, &host, move || answer(&Registry::new(&sequencer, program), &name, &registry::derive(&name))))
+    }
+
+    /// Another app's read of public LNS data (`name_read`, `reverse`) on a thread of its own, kept
+    /// under that app's keys only, in that app's lane, at most `APP_READS_IN_FLIGHT` at a time and
+    /// `APP_READS_KEPT` kept (the oldest idle ones are dropped past that).
+    fn app_read(&self, app: &str, key: &str, sequencer: &str, fetch: impl FnOnce() -> Result<Value, String> + Send + 'static) -> String {
+        let prefix = app_reads_prefix(app);
+        let key = format!("{prefix}{key}");
+        let (kept, reading) = self.served.count(&prefix);
+        let last = self.served.peek(&key);
+        if !last.updating && reading >= APP_READS_IN_FLIGHT {
+            // No new read while this app has its fill under way: the last answer as it is, or busy.
+            return match last.value {
+                Some(_) => served::reply_of(&last, "This name", |_| Value::Null),
+                None => served::still_reading("the names you asked about"),
+            };
+        }
+        if kept >= APP_READS_KEPT {
+            self.served.forget_idle(&prefix);
+        }
+        let lane = served::Lane::Own(format!("{prefix}names@{}", served::host_of(sequencer)));
+        let snap = self.served.read(&key, READ_FRESH, lane, fetch);
+        served::reply_of(&snap, "This name", |_| Value::Null)
     }
 
     /// Drops every answer read from the chain, after the chain or registry changed.
@@ -5389,8 +5438,16 @@ impl NamesModule for Names {
     }
 
     fn reverse(&mut self, account: String) -> String {
-        // The Names app (find): read on a thread of its own, busy until the first is back.
-        if !self.served.inline && only_the_names_app().is_ok() {
+        // Read on a thread of its own, busy until the first is back: the Names app's (find) in
+        // its lane, another app's under its own keys (`app_read`, feature `app_name_reads`).
+        if !self.served.inline {
+            let app = match only_the_names_app() {
+                Ok(()) => None,
+                Err(_) => match asking_app() {
+                    Ok(app) => Some(app),
+                    Err(why) => return reply(Err(why)),
+                },
+            };
             let read = (|| {
                 let account = registry::parse_account(&account)?;
                 let registry = self.registry()?;
@@ -5401,6 +5458,10 @@ impl NamesModule for Names {
                 Err(why) => return reply(Err(why)),
             };
             let key = format!("reverse:{}:{sequencer}:{}", registry::account_text(&account), registry::account_text(&program));
+            if let Some(app) = app {
+                let host = sequencer.clone();
+                return self.app_read(&app, &key, &host, move || reverse_answer(&Registry::new(&sequencer, program), &account));
+            }
             let lane = served::Lane::Own(format!("names@{}", served::host_of(&sequencer)));
             let snap = self.served.read(&key, READ_FRESH, lane, move || reverse_answer(&Registry::new(&sequencer, program), &account));
             return served::reply_of(&snap, "This account's name", |_| Value::Null);
@@ -12717,6 +12778,69 @@ mod tests {
         assert!(started.elapsed() < registry::READ_BUDGET + std::time::Duration::from_secs(3), "{:?}", started.elapsed());
         assert_eq!(slow["success"], false, "{slow}");
         assert!(slow["error"].as_str().unwrap().contains("didn't answer within"), "{slow}");
+    }
+
+    /// app-name-reads: another app's `resolve` and `reverse` are read on a thread of their own,
+    /// so a slow sequencer never holds the module's one thread; kept under that app's own keys,
+    /// never the Names app's (whose reads say which names the person looked up).
+    #[test]
+    fn another_apps_name_reads_never_hold_the_module() {
+        let mut names = fresh();
+        names.served = served::Served::threaded();
+        names.program = Some([7; 32]);
+        names.sequencer = registry::stub_rpc(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            registry::rpc_ok(Value::Null)
+        });
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "vesting_ui".into(), instance: None });
+        let answered = |names: &mut Names, call: &dyn Fn(&mut Names) -> String| {
+            let started = std::time::Instant::now();
+            let first = parsed(&call(names));
+            assert!(started.elapsed() < std::time::Duration::from_secs(2), "the call waited for the sequencer: {:?}", started.elapsed());
+            assert_eq!(first["busy"], true, "{first}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+            loop {
+                let again = parsed(&call(names));
+                if again["busy"] != true || std::time::Instant::now() > deadline {
+                    return again;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        let resolved = answered(&mut names, &|names| names.resolve("alice".into()));
+        assert!(resolved["busy"] != true && resolved.get("success").is_some(), "{resolved}");
+        let account = registry::account_text(&[9; 32]);
+        let reversed = answered(&mut names, &|names| names.reverse(account.clone()));
+        assert!(reversed["busy"] != true && reversed.get("success").is_some(), "{reversed}");
+        let (kept, _) = names.served.count(&app_reads_prefix("vesting_ui"));
+        assert_eq!(kept, 2, "both reads kept under the app's own keys");
+        assert_eq!(names.served.count("name:").0 + names.served.count("reverse:").0, 0, "nothing kept under the Names app's keys");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+    }
+
+    /// An app can't start more than `APP_READS_IN_FLIGHT` name reads at once: one more is busy,
+    /// with nothing started (a flood of names can't pile up threads or Argon2 runs).
+    #[test]
+    fn an_app_has_at_most_four_name_reads_under_way() {
+        let mut names = fresh();
+        names.served = served::Served::threaded();
+        names.program = Some([7; 32]);
+        names.sequencer = registry::stub_rpc(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            registry::rpc_ok(Value::Null)
+        });
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "flood_ui".into(), instance: None });
+        for name in ["one", "two", "three", "four", "five", "six"] {
+            let answer = parsed(&names.resolve(name.into()));
+            assert_eq!(answer["busy"], true, "{answer}");
+        }
+        let (kept, reading) = names.served.count(&app_reads_prefix("flood_ui"));
+        assert_eq!((kept, reading), (APP_READS_IN_FLIGHT, APP_READS_IN_FLIGHT));
+        // Another app has its own allowance.
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "other_ui".into(), instance: None });
+        let _ = names.resolve("seven".into());
+        assert_eq!(names.served.count(&app_reads_prefix("other_ui")).1, 1);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
     /// first-call-no-result-field-slow-cli-exceeds-host-timeout: on a wallet behind the chain
