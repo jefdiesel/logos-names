@@ -291,6 +291,9 @@ export async function setText({ privateKey, program = "38jEfVV1RCyMzu1FGbYcCn5Fq
   const plain = await openSealed(nameKey, rec.sealed, "record");
   const profile = plain ? decodeProfile(plain) : { name, account: null, npk: null, vpk: null, texts: {} };
   if (value) profile.texts[key] = value; else delete profile.texts[key];
+  // A name is an address (SPEC.md §6): a profile without an account (emptied by a transfer)
+  // gets its holder's back with this change.
+  if (!profile.account) profile.account = formatAccountId(signer);
   const sealed = await seal(nameKey, encodeProfile(profile), "record");
   const [nonce] = await getAccountsNonces(rpc, [signer]);
   const signed = signPublicTransaction(setRecordMessage({ program: prog, signer, nonce, gasLimit, id, sealed }), [privateKey]);

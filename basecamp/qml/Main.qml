@@ -796,6 +796,9 @@ Item {
             cliKnown = true
             // Each name's profile: its picture, and the npk that says which account it pays into.
             cliNames.forEach(function(entry) { boardLookUp(entry.name) })
+            // The module checks each and sends only for one held by a public account that lacks
+            // its account or chat address.
+            repairNames(cliNames.filter(function(entry) { return entry["private"] === false }).map(function(entry) { return entry.name }))
             if (savedMain === "" && mainName !== "")
                 setMain(mainName)
         }), function(message) {
@@ -5349,7 +5352,7 @@ Item {
             // public account gets its holder account published (the default; the person unticks
             // it on Register). The reveal answers "revealed", never "registered": the name shows
             // up here a block later, so this is where it is noticed.
-            if (root.namesNet === "0.4")
+            if (root.namesNet === "0.4" && !root.addressRepair)
                 before.forEach(function(p) {
                     if (pendingNames.some(function(q) { return q.name === p.name }))
                         return
@@ -5359,6 +5362,9 @@ Item {
                 })
             if (pendingNames.length > 0)
                 revealTimer.start()
+            // A name of this wallet that isn't an address as it should be (handed to it, or
+            // registered before Names wrote the account itself) is mended, with no step asked.
+            repairNames(myNames.filter(function(n) { return n.owner && n.address_ok === false && n.sealed !== "unreadable" }).map(function(n) { return n.name }))
         }), function(message) {
             console.log("names_ui: my names:", message)
             // Busy or unanswered: asked again, so the reveals don't stop (SF-D).
@@ -5396,7 +5402,7 @@ Item {
                 revealing = false
                 if (value && value.stage === "registered") {
                     say(item.name + " is yours.", false)
-                    if (root.namesNet === "0.4")
+                    if (root.namesNet === "0.4" && !root.addressRepair)
                         publishAfterRegister(item.name, item.owner)
                     loadMine()
                     if (record !== null && record.name === item.name)
@@ -5419,6 +5425,69 @@ Item {
         }
     }
     property real revealAskedAt: 0
+
+    // ── A name is an address (Jef, 2026-11-21): no step to publish it ──────
+    /// The module seals the holder's account and this installation's chat address into every
+    /// profile it writes, the first one included; `repair_name` mends a name that lacks them
+    /// (one change, once, in the history). Older modules lack it: the publish step below stays.
+    readonly property bool addressRepair: moduleFeatures.indexOf("address_repair") >= 0
+    property var repairAsked: ({})      // name|chat known → asked this session
+    property var repairQueue: []
+    property bool repairing: false
+    property var repairUsed: ({})       // names whose one automatic repair was sent before
+    /// Whether one of this wallet's public accounts holds `name` (the module can mend it).
+    function heldPublicly(name) {
+        return myNames.some(function(n) { return n.name === name && n.owner })
+            || cliNames.some(function(n) { return n.name === name && n["private"] === false })
+    }
+    function repairNames(names) {
+        if (!addressRepair)
+            return
+        var asked = repairAsked, queue = repairQueue
+        names.forEach(function(name) {
+            var key = name + "|" + (chatMine !== "")
+            if (asked[key] || queue.indexOf(name) >= 0)
+                return
+            asked[key] = true
+            queue.push(name)
+        })
+        repairAsked = asked
+        repairQueue = queue
+        repairNext()
+    }
+    function repairNext() {
+        if (repairing || repairQueue.length === 0)
+            return
+        var queue = repairQueue.slice()
+        var name = queue.shift()
+        repairQueue = queue
+        repairing = true
+        askLater("repair_name", [name], function(value) {
+            repairing = false
+            if (value && value.why === "tried") {
+                var used = repairUsed
+                used[name] = true
+                repairUsed = used
+            }
+            if (value && value.repaired) {
+                console.log("names_ui: " + name + " now points at its holder's account (tx " + value.tx + ")")
+                loadMine()
+                loadActivity()
+                if (record !== null && record.name === name)
+                    read(name)
+            }
+            repairNext()
+        }, function(message) {
+            repairing = false
+            console.log("names_ui: repair of " + name + ":", message)
+            repairNext()
+        }, 180000)
+    }
+    /// Tells the module this installation's chat address, so the profiles it writes carry it.
+    onChatMineChanged: {
+        if (chatMine !== "" && moduleFeatures.indexOf("app_note") >= 0)
+            askLater("app_note", ["chat", chatMine], function() {}, function() {}, 10000)
+    }
 
     /// LEZ 0.4, a name just registered: its holder account published as its public account, unless
     /// the person unticked that when registering (kept in the module: `publish:<name>`).
@@ -5819,7 +5888,7 @@ Item {
         var to = transferToField.text.trim()
         transferConfirm = false
         boardStart("cli_transfer", [name, to], "Transferring " + name, function() {
-            say(name + " now belongs to " + Logic.keyShown(to.replace(/^(Public|Private)\//, "")) + ". They set it up under Names, in Got a name from someone, or with names receive-privately.", false)
+            say(name + " now belongs to " + Logic.keyShown(to.replace(/^(Public|Private)\//, "")) + (addressRepair ? ". Once they add it in their Names, it points at their account by itself." : ". They set it up under Names, in Got a name from someone, or with names receive-privately."), false)
             transferTarget = ""
             loadCliMine()
             loadActivity()
@@ -5998,7 +6067,7 @@ Item {
         say("Asking the wallet to sign…", "working")
         // On LEZ 0.4 private payments are off: a name is registered public-only, with no private
         // receiving keys ("auto" would make a private account and publish its keys).
-        if (namesNet === "0.4" && moduleFeatures.indexOf("app_note") >= 0)
+        if (namesNet === "0.4" && moduleFeatures.indexOf("app_note") >= 0 && !addressRepair)
             askLater("app_note", ["publish:" + name, publishOnRegister ? "yes" : "no"], function() {}, function() {}, 10000)
         askLater("register_name", [name, owner, namesNet === "0.4" ? "" : "auto"], function(value) {
             pending = null
@@ -11275,7 +11344,10 @@ Item {
                 }
                 // Let people message your name.
                 Rectangle {
+                    // A main name held by a public account gets the chat address by itself
+                    // (repair_name), unless its one repair was already used.
                     visible: root.chatError === "" && root.chatMine !== "" && root.mainName !== "" && root.mainChat !== root.chatMine
+                             && !(root.addressRepair && root.heldPublicly(root.mainName) && !root.repairUsed[root.mainName])
                     Layout.fillWidth: true
                     implicitHeight: chatOff.implicitHeight + 24
                     radius: 8
@@ -12755,7 +12827,7 @@ Item {
                                     elide: Text.ElideRight
                                 }
                                 Link { visible: myName.modelData["private"] !== false && root.namesNet !== "0.4"; text: "Make public…"; font.pixelSize: root.px(15); onPressed: { root.go("settings"); root.loadAccounts() } }
-                                Link { visible: root.namesNet === "0.4" && !myName.modelData.account; text: root.publishAsk === myName.modelData.name ? "Publishing…" : "Let people pay it"; font.pixelSize: root.px(15); onPressed: { if (root.publishAsk === myName.modelData.name) return; root.publishAsk = myName.modelData.name; root.publishAccount(myName.modelData.name, myName.modelData.owner || "") } }
+                                Link { visible: root.namesNet === "0.4" && !root.addressRepair && !myName.modelData.account; text: root.publishAsk === myName.modelData.name ? "Publishing…" : "Let people pay it"; font.pixelSize: root.px(15); onPressed: { if (root.publishAsk === myName.modelData.name) return; root.publishAsk = myName.modelData.name; root.publishAccount(myName.modelData.name, myName.modelData.owner || "") } }
                                 Link { visible: myName.modelData.name !== root.mainName; text: "Make main"; font.pixelSize: root.px(15); onPressed: root.setMain(myName.modelData.name) }
                                 Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(myName.modelData.name) } }
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
@@ -16022,7 +16094,7 @@ Item {
                             text: "Anyone who knows the name can find this account, and so its balance and history." + (root.namesNet === "0.4" ? "" : (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account.")
                         }
                         RowLayout {
-                            visible: root.namesNet === "0.4"
+                            visible: root.namesNet === "0.4" && !root.addressRepair
                             Layout.fillWidth: true
                             spacing: 10
                             Rectangle {
@@ -16396,6 +16468,8 @@ Item {
                                 onPressed: root.receivePrivately()
                             }
                             Action {
+                                // A name always points at its holder now (the module refuses this).
+                                visible: !root.addressRepair
                                 label: "Stop taking payments"
                                 changes: true
                                 enabledNow: root.record !== null && (root.record.account !== null || root.record.npk !== null)

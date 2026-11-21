@@ -590,6 +590,9 @@ export function activityLine(entry, now, account) {
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
     case "deed_claim": title = "Claimed the NFT of " + (e.name || "a name"); sub = "on LEZ 0.4, free: its LNS name card"; sign = ""; break
+    // Names did this by itself: the name had no account to be paid at (handed to this wallet,
+    // or registered before Names wrote it), so its profile now points at its holder.
+    case "address_repair": title = (e.name || "A name") + " now points at your account"; sub = "on LEZ, done by Names: people can pay and message it" + (e.from ? ", from " + whoShown(e.from) : ""); sign = ""; break
     case "arrived":
         title = "Arrived"
         sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : e.chain === "lez-0.4" ? " on LEZ 0.4, the bridge test network" : " on LEZ")

@@ -2026,6 +2026,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("network name", [L.networkName("lez-0.4", null), L.networkName("custom", { name: "Reset chain" }), L.networkName("custom", null), L.networkName("lez-0.3", null)],
     ["the bridge test network", "Reset chain", "the bridge test network", "the Logos testnet"]);
   check("a claimed name NFT in the history", [L.activityLine({ kind: "deed_claim", name: "turing", state: "done", at: 1 }).title], ["Claimed the NFT of turing"]);
+  {
+    const line = L.activityLine({ kind: "address_repair", name: "jefdiesel", from: "Public/FLBC4VrQ12UDpbG2ArnRgcwrZTz5cabKbT9oY1M7BE2Z", state: "done", at: 1 });
+    check("a name Names pointed at its holder, in the history", [line.title, line.state, line.sign], ["jefdiesel now points at your account", "Done", ""]);
+  }
   check("runs on, LEZ 0.4", [L.net04Html("lez-0.4", null), L.net04Html("custom", { name: "<b>x</b> & y" })], ["<b>LEZ 0.4</b> · bridge test network", "<b>LEZ 0.4</b> · &lt;b&gt;x&lt;/b&gt; &amp; y"]);
   check("reset line", [L.networkResetLine(0, "x", (t) => "t" + t), L.networkResetLine(90, "", (t) => "t" + t)], ["", "The bridge test network was reset at t90. What was held there before is gone; everything shown was read again."]);
   const found = { chain_id: CHAIN, rpc: "https://lez.nameswallet.app/", height: 33727, file_url: "https://nameswallet.app/networks/" + CHAIN + ".json", file_missing: false,

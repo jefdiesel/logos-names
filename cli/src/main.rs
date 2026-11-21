@@ -269,6 +269,18 @@ enum DeedCommand {
     },
 }
 
+/// A public holder's account on its name's profile, when the profile has none: a name is an
+/// address (SPEC.md §5). A private holder is never written, which would unmask it; its
+/// receiving keys are its address. An account already there (a shop's) is kept. Returns
+/// whether it was added.
+fn complete_account(profile: &mut Profile, holder: AccountId, holder_private: bool) -> bool {
+    if holder_private || profile.account.is_some() {
+        return false;
+    }
+    profile.account = Some(holder.into_value());
+    true
+}
+
 fn length_proof(id: &NameId) -> Result<(LengthProof, u8)> {
     let list = short_list()?;
     let proof = list.prove(id).map_err(|reason| anyhow!("no length proof: {reason}"))?;
@@ -507,14 +519,23 @@ enum Command {
         #[arg(value_parser = parse_account)]
         account: AccountId,
     },
-    /// Remove the public account from the name; it stays payable privately.
+    /// Remove another public account set on the name (`set-account`); a name held by a
+    /// public account goes back to pointing at it.
     ClearAccount {
         #[arg(value_parser = parse_name)]
         name: String,
     },
     /// Give the name fresh private receiving keys, from a new private account in this
-    /// wallet. Registering does this already; use it after a transfer, or to rotate.
+    /// wallet. Registering does this already, and so does any change to a name that has
+    /// none (one handed to you); use it to rotate.
     ReceivePrivately {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+    /// Make sure a name you hold points at you: its account (when a public account holds
+    /// it) and receiving keys. Sends one change only when something is missing, as after a
+    /// transfer to you. Names and every other change to the name do this by themselves.
+    Repair {
         #[arg(value_parser = parse_name)]
         name: String,
     },
@@ -605,7 +626,9 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Hand the name to another account. Its receiving keys, text entries and page are cleared; the new holder runs `receive-privately`.
+    /// Hand the name to another account. Its receiving keys, text entries and page are cleared
+    /// (the registry empties them); the new holder's first change to it, or `names repair`,
+    /// writes its account and keys back.
     Transfer {
         #[arg(value_parser = parse_name)]
         name: String,
@@ -1793,12 +1816,15 @@ impl Client {
         // Every name can be paid from the start: the profile carries receiving
         // keys of a fresh private account.
         let (receiving, npk, vpk) = self.new_receiving_keys()?;
-        let profile = Profile {
+        let mut profile = Profile {
             name: name.to_owned(),
             npk: Some(npk),
             vpk,
             ..Profile::default()
         };
+        // A name is an address from its first block (SPEC.md §5): a public holder's account is
+        // in it too, so wallets that pay accounts can pay it. A private holder's never is.
+        complete_account(&mut profile, owner, self.is_private(owner));
         let sealed = seal_profile(&key, &profile);
         println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
         let promised = commitment(&id, &holder, &secret);
@@ -2039,7 +2065,7 @@ impl Client {
         if snapshot.program != settings.claims_program || snapshot.root() != settings.claims_root {
             bail!("that snapshot is not the one this registry's claims list was made from");
         }
-        let Derived { id, .. } = derive(name);
+        let Derived { id, key } = derive(name);
         let (proof, record) = snapshot
             .claim(&id)
             .ok_or_else(|| anyhow!("{name}{NAME_SUFFIX} is not in the snapshot"))?;
@@ -2071,7 +2097,16 @@ impl Client {
         if let Some((deed, owner)) = &replaced_deed {
             mentions.extend(self.deed_mentions(&id, &deed.nonce, &[*owner], false));
         }
-        self.send_with(mentions, &Instruction::Claim { id, sealed: record.sealed.clone(), now, proof }, 0, replaced_deed.is_some()).await?;
+        // The profile comes back as it was, made an address for this chain: the holder's account
+        // when it is public, and receiving keys when it had none (SPEC.md §5).
+        let mut profile = open_profile(&key, &record.sealed, name).unwrap_or_else(|| Profile { name: name.to_owned(), ..Profile::default() });
+        let sealed = if self.complete_profile(name, &mut profile, holder)? {
+            validate_profile(&profile).map_err(|reason| anyhow!(reason))?;
+            seal_profile(&key, &profile)
+        } else {
+            record.sealed.clone()
+        };
+        self.send_with(mentions, &Instruction::Claim { id, sealed, now, proof }, 0, replaced_deed.is_some()).await?;
         let mut defaults = load_defaults();
         if !defaults.names.contains(&name.to_owned()) {
             defaults.names.push(name.to_owned());
@@ -2092,12 +2127,50 @@ impl Client {
         Ok(())
     }
 
+    /// Fills in what `name`'s profile must always carry for `holder` (SPEC.md §5, A name is an
+    /// address): a public holder's account, and receiving keys from a new private account of
+    /// this wallet when it has none. Returns whether anything was added.
+    fn complete_profile(&mut self, name: &str, profile: &mut Profile, holder: AccountId) -> Result<bool> {
+        let mut added = complete_account(profile, holder, self.is_private(holder));
+        if profile.npk.is_none() {
+            let (receiving, npk, vpk) = self.new_receiving_keys()?;
+            println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
+            profile.npk = Some(npk);
+            profile.vpk = vpk;
+            added = true;
+        }
+        Ok(added)
+    }
+
+    /// Makes `name`, which this wallet holds, an address again when it isn't one: one profile
+    /// change adding what [`Self::complete_profile`] adds, and nothing sent when nothing is
+    /// missing. A profile that doesn't open with the name's key is left as it is.
+    async fn repair(&mut self, name: &str) -> Result<()> {
+        let (Derived { id, .. }, record, profile) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &id, &record)?;
+        if !record.sealed.is_empty() && open_profile(&derive(name).key, &record.sealed, name).is_none() {
+            bail!("{name}{NAME_SUFFIX}'s profile doesn't open with its name's key, so it is left as it is; nothing was sent");
+        }
+        let missing_account = !self.is_private(holder) && profile.account.is_none();
+        if !missing_account && profile.npk.is_some() {
+            println!("{name}{NAME_SUFFIX} already points at you; nothing was sent");
+            return Ok(());
+        }
+        self.edit(name, |_| Ok(())).await?;
+        println!("{name}{NAME_SUFFIX} now points at you");
+        Ok(())
+    }
+
     /// Changes the profile of `name`: reads and opens it, applies `change`, then
     /// seals the whole of it again and replaces the record's sealed bytes.
     async fn edit(&mut self, name: &str, change: impl FnOnce(&mut Profile) -> Result<()>) -> Result<()> {
         let (Derived { id, key }, record, mut profile) = self.lookup_held(name).await?;
         let holder = self.holder(name, &id, &record)?;
         change(&mut profile)?;
+        // Whatever the change, the profile sealed is an address (SPEC.md §5): a name left
+        // without its account or receiving keys (a transfer empties a profile) is mended by
+        // its holder's next change, with no step of its own.
+        self.complete_profile(name, &mut profile, holder)?;
         validate_profile(&profile).map_err(|reason| anyhow!(reason))?;
         let sealed = seal_profile(&key, &profile);
         let [record, ..] = name_seeds(&id);
@@ -4524,6 +4597,8 @@ async fn run() -> Result<()> {
                 .await
         }
         Command::ClearAccount { name } => {
+            // A public holder's name always points at it (SPEC.md §5): only another account set
+            // on it (a shop's) comes off, and the holder's goes back in its place.
             client
                 .edit(&name, |profile| {
                     profile.account = None;
@@ -4531,6 +4606,7 @@ async fn run() -> Result<()> {
                 })
                 .await
         }
+        Command::Repair { name } => client.repair(&name).await,
         Command::ReceivePrivately { name } => {
             // Checked first, so a name this wallet doesn't hold leaves no new account behind (SC-7).
             let (Derived { id, .. }, record, _) = client.lookup(&name).await?;
@@ -5545,5 +5621,26 @@ mod register_public_tests {
         assert!(queued.is_empty());
         queue_public(&mut queued, "plain", true, false);
         assert_eq!(queued, ["plain"]);
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    /// Jef's rule (2026-11-21): a registered name is an address. A public holder's account is
+    /// written into its profile when missing; a private holder's never is (it would unmask
+    /// it); an account already there is kept.
+    #[test]
+    fn a_public_holders_account_is_written_and_a_private_one_never() {
+        let holder = AccountId::new([0x61; 32]);
+        let mut profile = Profile { name: "jef".to_owned(), ..Profile::default() };
+        assert!(complete_account(&mut profile, holder, false));
+        assert_eq!(profile.account, Some([0x61; 32]));
+        assert!(!complete_account(&mut profile, AccountId::new([0x62; 32]), false), "an account already there stays");
+        assert_eq!(profile.account, Some([0x61; 32]));
+        let mut private = Profile { name: "anon".to_owned(), ..Profile::default() };
+        assert!(!complete_account(&mut private, holder, true));
+        assert_eq!(private.account, None, "a private holder is never published");
     }
 }
