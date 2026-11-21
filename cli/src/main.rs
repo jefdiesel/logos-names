@@ -4626,6 +4626,8 @@ async fn run() -> Result<()> {
         Command::Settings => {
             let settings = client.settings().await?.map(|settings| {
                 serde_json::json!({
+                    "version": settings.version,
+                    "transfers_sealed": settings.version >= names_core::SETTINGS_VERSION,
                     "admin": settings.admin.to_string(),
                     "mode": if settings.mode == MODE_DEPOSIT { "deposit" } else { "fee" },
                     "deposits": {
