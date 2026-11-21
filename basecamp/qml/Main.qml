@@ -8134,7 +8134,7 @@ Item {
             return appForClaim ? "Into your account " + Logic.idShort(claimAccount) + " · the bridge pays the fee"
                 : "Signs with your account " + Logic.idShort(request.account || (appChosen[0] || "")) + " · another account pays the fee"
         if (request.kind === "connect")
-            return "Account " + appChosen.map(function(a) { return Logic.namedAccount(a, root.accountNames) || Logic.idShort(a) }).join(", ") + " · asked by " + root.appShown(request.app)
+            return "Account " + appChosen.map(function(a) { return Logic.namedAccount(a, root.shownAccountNames) || Logic.idShort(a) }).join(", ") + " · asked by " + root.appShown(request.app)
         if (request.kind === "programs")
             return "So it can ask you to sign its claims · asked by " + root.appShown(request.app)
         if (request.kind === "secret")
@@ -8555,13 +8555,15 @@ Item {
     // ── LNS names for the accounts a request shows (Logic.reverseShown: confirmed only) ──
     property var accountNames: ({})      // account ID → its confirmed LNS name, "" for none
     property var accountNamesAsking: ({}) // account IDs whose name is being read
+    // What a sheet shows: the confirmed reverse names, and the names the wallet's accounts hold.
+    readonly property var shownAccountNames: Logic.accountNameMap(accountNames, myNames, mainName)
     /// An account as a request sheet shows it: "jefdiesel · Bawxwq…9mu7", else Public/Bawxwq…9mu7.
     function accountShown(account) {
-        return Logic.namedAccount(account, accountNames) || accountShort(account)
+        return Logic.namedAccount(account, shownAccountNames) || accountShort(account)
     }
     /// `text` with the accounts that have a confirmed name written by it (Logic.withAccountNames).
     function withNames(text) {
-        return Logic.withAccountNames(text, accountNames)
+        return Logic.withAccountNames(text, shownAccountNames)
     }
     /// Reads the names of the accounts in `request` (its choices, its account, the payee, the
     /// accounts its effects and warnings mention) not read yet. A busy module is asked again.
@@ -9559,7 +9561,7 @@ Item {
             Fact {
                 label: "To"
                 code: sheetBody.kind === "transfer" && sheetBody.request.destination_kind === "account"
-                value: sheetBody.kind !== "transfer" ? "" : sheetBody.request.destination_kind === "name" ? sheetBody.request.destination + " (a name)" : (Logic.namedAccount(sheetBody.request.destination, root.accountNames) || sheetBody.request.destination)
+                value: sheetBody.kind !== "transfer" ? "" : sheetBody.request.destination_kind === "name" ? sheetBody.request.destination + " (a name)" : (Logic.namedAccount(sheetBody.request.destination, root.shownAccountNames) || sheetBody.request.destination)
                 full: sheetBody.kind === "transfer" ? sheetBody.request.destination : ""
             }
             Fact {

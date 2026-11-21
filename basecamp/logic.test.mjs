@@ -2190,6 +2190,13 @@ check("the deed retry has a 20-try cap and shows the failure line", [
     withAccountNames(`Reads or writes 2kgxMA…HeM2's own account Public/${PDA}; pays Public/${JEF}.`, names),
     `Reads or writes 2kgxMA…HeM2's own account Public/${PDA}; pays jefdiesel · Bawxwq9o…9mu7.`);
 
+  const { accountNameMap } = await import("./qml/logic.mjs");
+  const mine = [{ name: "jef04", owner: "Public/" + JEF04 }, { name: "zed", owner: "Public/" + JEF }, { name: "jefdiesel", owner: "Public/" + JEF }, { name: "old", owner: "Public/" + PDA, lapsed: true }, { name: "Bad Name", owner: "Public/" + PDA }];
+  check("accountNameMap: the main name an account holds; else the first by name; lapsed and bad left out; a reverse name first",
+    [accountNameMap({}, mine, "jefdiesel"), accountNameMap({}, mine, ""), accountNameMap({ [JEF04]: "jef04x", [PDA]: "" }, mine, "jefdiesel")],
+    [{ [JEF04]: "jef04", [JEF]: "jefdiesel" }, { [JEF04]: "jef04", [JEF]: "jefdiesel" }, { [JEF04]: "jef04x", [JEF]: "jefdiesel" }]);
+  check("accountNameMap: another first by name when the main name is elsewhere", accountNameMap({}, [{ name: "zed", owner: "Public/" + JEF }, { name: "abe", owner: "Public/" + JEF }], "jef04"), { [JEF]: "abe" });
+
   // A refused call in plain words; the raw text kept for Details.
   const refusedRaw = "the names CLI failed: Error: refused: Program violated execution rules";
   check("program refused → plain, raw under Details", callProblemShown(refusedRaw),

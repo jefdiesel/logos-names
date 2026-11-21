@@ -408,6 +408,27 @@ export function reverseShown(value) {
     return /^[a-z0-9-]{1,32}$/.test(name) ? name : ""
 }
 
+/// The names to show for accounts: `reverse` ({id: name or ""}, from reverseShown), and for the
+/// wallet's own public accounts the name each holds (`mine`: [{name, owner, lapsed}], the chain
+/// read that the account is the name's holder) when it has no reverse name: the main name if it
+/// holds it, else the first by name. {id: name}, names that fail the grammar left out.
+export function accountNameMap(reverse, mine, mainName) {
+    var out = {}
+    var ok = function(name) { return /^[a-z0-9-]{1,32}$/.test(String(name || "")) }
+    ;(Array.isArray(mine) ? mine : []).forEach(function(entry) {
+        if (!entry || entry.lapsed === true || !ok(entry.name) || !/^Public\//.test(String(entry.owner || "")))
+            return
+        var id = String(entry.owner).replace(/^Public\//, "")
+        if (!out[id] || entry.name === mainName || (out[id] !== mainName && entry.name < out[id]))
+            out[id] = entry.name
+    })
+    Object.keys(reverse || {}).forEach(function(id) {
+        if (ok(reverse[id]))
+            out[id] = reverse[id]
+    })
+    return out
+}
+
 /// The account IDs (base58, 32-44 characters) in `text`, without their Public/ or Private/,
 /// each once.
 export function accountIdsIn(text) {
