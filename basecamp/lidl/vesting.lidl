@@ -1,0 +1,7 @@
+module vesting {
+  version "0.4.0"
+  depends []
+
+  method incoming(accounts_json: tstr) -> tstr description "For another app (Names Wallet): the schedules that pay the accounts in `accounts_json`, a\nJSON array of account IDs (base58 or hex), answered from the scan state (no new scanning):\n`{ok, to_block, tip, schedules: [{address, creator, beneficiary, total_display,\nclaimed_display, claimable_display, next_unlock_ms, status}]}`. `status` is `unvested`\n(nothing to claim now, more to come), `claimable` or `closed`."
+  method discover(max_blocks: tstr) -> tstr description "Reads at most `max_blocks` more blocks after the last one scanned (\"\" for the default),\npaced, and imports the schedules found that pay the wallet's accounts: `{ok, chain_id,\nfrom_block, to_block, tip, done, found: [schedule addresses new this call], incoming}`.\nCalled again until `done`, one call at a time."
+}

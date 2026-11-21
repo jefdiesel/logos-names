@@ -1577,7 +1577,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // +1 on wallet-1121: deedRetry, one-shot, restarted only while the module answers a name NFT read as busy.
   // +1 on names-return: returnTimer, one-shot, started only after the person answers another app's request.
   // +1 on names-fix2: followTimer, one-shot, only while an answer's outcome is being read.
-  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 48);
+  // +2 on names-vesting-menu: Vesting's read every 60 s only while that page is in view, and the
+  // menu count's every 5 min only while Names is in front (vesting.test.mjs).
+  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 50);
   check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
   check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
   check("address step: the plan refuses an unticked or other value, and says so", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\) \{\s*\n\s*sbError = /.test(qml), true);

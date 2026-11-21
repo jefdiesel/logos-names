@@ -49,7 +49,7 @@ PAGES = {
 }
 
 BRIDGE = r"""
-    width: 1180; height: %(height)s
+    width: %(width)s; height: %(height)s
     property string mockNet: ""
     property var mockCalls: ({})
     property var logos: QtObject {
@@ -68,6 +68,22 @@ BRIDGE = r"""
             }
             if (module === "names" && method === "file_sha256")
                 return ok(String(args[0]).indexOf("lez_bridge_ui") >= 0 ? "0d7e317c1fbef3e9c9d4155c10746256af8e9ed2b5a8156413823fbc568ea270" : "0a57e700a2a8aa0f94e6722def280d330d6dc59f8cc94199e4f9946802f62da5")
+            // Vest's module (Names' optional dependency, lidl/vesting.lidl): the mock's `vesting`, by
+            // call; none: the host's words for a module that isn't there. Its answers are JSON text
+            // `{ok, ...}`, encoded once more by Basecamp. A `__seq` list answers one per call.
+            if (module === "vesting") {
+                var vm = (%(mock)s).vesting
+                if (!vm) return "Module not connected"
+                var vv = vm[method]
+                if (vv && vv.__seq) {
+                    var vn = root.mockCalls["vesting." + method] || 0
+                    root.mockCalls["vesting." + method] = vn + 1
+                    vv = vv.__seq[Math.min(vn, vv.__seq.length - 1)]
+                }
+                if (vv === undefined) return JSON.stringify({ error: "Method not found" })
+                if (vv === "busy") return "Timed out waiting for the module"
+                return JSON.stringify(JSON.stringify(vv))
+            }
             if (module === "lez_bridge") {
                 var lb = (%(mock)s).bridge
                 if (!lb) return JSON.stringify({ error: "Method not found" })
@@ -1642,6 +1658,53 @@ for _name, _js, _mock in [
     HEIGHTS[_name] = 2200
 
 
+# ── Vesting (the left menu): schedules made in Vest that pay this wallet, from Vest's module ──
+import time as _vtime
+_NOW_MS = int(_vtime.time() * 1000)
+_V_PKGS = [{"name": "lez_bridge", "version": "0.1.0", "hashes": {"root": "e6ababdad401a2924312ac8b5ef1e285497fadbcd6c565f639548aab2444e848"}},
+           {"name": "lez_bridge_ui", "version": "0.1.0", "hashes": {"root": "ee7c5d59ac3a91ecaedb525f0c887e41b6737da5aeaff4de3ea44fed661d68d9"}},
+           {"name": "vesting", "version": "0.5.0", "type": "core"}, {"name": "vesting_ui", "version": "0.6.0", "type": "ui_qml"}]
+_V_OWN = "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"
+_V_SHOP = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"
+_V_STRANGER = "FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg"
+def _vrow(address, status, total, claimed, claimable, days, creator=BOB, beneficiary=_V_OWN):
+    return {"address": address, "creator": creator, "beneficiary": beneficiary, "total_display": total, "claimed_display": claimed,
+            "claimable_display": claimable, "next_unlock_ms": (_NOW_MS + int(days * 86400000)) if days else 0, "status": status}
+_V_ROWS = [
+    _vrow("9fPKWRnv8LVnMsJmHjLeN22bkf2Q4irjPcTra7c3y6ro", "claimable", "120,000 LEZ", "20,000 LEZ", "15,000 LEZ", 30),
+    _vrow("HA47ERcmfSbDChGcYfBcC4SKaPQ8pJJnv4wxCLu1ejL5", "unvested", "50,000 LEZ", "0 LEZ", "0 LEZ", 92, creator=_V_STRANGER),
+    _vrow("ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu", "unvested", "2,500 LEZ", "0 LEZ", "0 LEZ", 6.5, beneficiary=_V_SHOP),
+    _vrow("CjrUpegdA1RjqDN43T8P19kAkwnD1quAkNkER8k3dw9G", "closed", "10,000 LEZ", "10,000 LEZ", "0 LEZ", 0),
+]
+_V_ANSWER = {"ok": True, "to_block": 52310, "tip": 52310, "schedules": _V_ROWS}
+_V_REVERSE = {BOB: "linus"}
+_V_OPEN = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; Qt.callLater(function() { %s }) })'
+for _name, _js, _mock in [
+    # The menu with its count, on the Wallet: the read made when Names opens on LEZ 0.4.
+    ("vesting-menu", _V_OPEN % 'root.openWallet("home")', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": _V_ANSWER}}),
+    ("vesting-page", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": _V_ANSWER}, "reverse": _V_REVERSE}),
+    ("vesting-finished-open", _V_OPEN % 'root.openVesting(); root.vestFinishedOpen = true', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": _V_ANSWER}, "reverse": _V_REVERSE}),
+    ("vesting-no-vest", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4"}),
+    ("vesting-idle", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS}),
+    ("vesting-older", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"list": {"ok": True}}}),
+    # The scan behind the chain: discover is asked for more blocks while the page is open.
+    ("vesting-scanning", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "reverse": _V_REVERSE,
+        "vesting": {"incoming": dict(_V_ANSWER, to_block=41200, tip=52310, schedules=_V_ROWS[:2]), "discover": {"ok": True, "chain_id": "2da7", "from_block": 41201, "to_block": 41200, "tip": 52310, "done": False, "found": [], "incoming": 2}}}),
+    ("vesting-error", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": {"ok": False, "error": "the network didn't answer (https://lez.nameswallet.app/): connection refused"}}}),
+    ("vesting-busy", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": "busy"}}),
+    ("vesting-empty", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": dict(_V_ANSWER, schedules=[])}}),
+    ("vesting-net03", 'root.openVesting()', {"names_network": "lez-0.3", "packages": _V_PKGS, "vesting": {"incoming": _V_ANSWER}}),
+    ("vesting-narrow", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": _V_ANSWER}, "reverse": _V_REVERSE}),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+    HEIGHTS[_name] = 1500
+HEIGHTS["vesting-menu"] = 900
+HEIGHTS["vesting-finished-open"] = 1800
+HEIGHTS["vesting-narrow"] = 1900
+WIDTHS = {"vesting-narrow": 760}
+
+
 def main():
     qml, out_dir = sys.argv[1], sys.argv[2]
     wanted = sys.argv[3:] or list(SCENARIOS)
@@ -1666,6 +1729,7 @@ def main():
             "bridge_key": "" if scenario == "get-tokens" else "8e3b0f4a2c71d95e6a0b4c8d2f1e7a3954c6b0d8e2f4a6c8b0d2e4f6a8c0b2d4",
             "home_channel": HOME_CHANNEL, "shipped_build": SHIPPED_BUILD,
             "bridge_net": json.dumps(NET04),
+            "width": WIDTHS.get(scenario, 1180),
             "scenario": (SCENARIOS[scenario] % dict(filled, zone_request=zone_request(scenario == "approve-zone"))) if "%(zone" in SCENARIOS[scenario] else SCENARIOS[scenario], "out": out, "height": HEIGHTS[scenario] if scenario in HEIGHTS else 2700 if scenario in ("settings", "release", "page-all", "cli-settings", "cli-saving", "cli-failed", "cli-nowallet", "profile-tab", "start", "settings-tab", "register", "register-net04", "wallet-names-net04", "send-net04", "name", "settings-accounts", "settings-oldcli", "settings-account-new", "settings-network") or scenario.startswith("settings-zones") or scenario.startswith("settings-bridge") or scenario.startswith("backup") else 2000 if scenario.startswith("approve-private") or scenario.startswith("approve-relayed") else 1500 if scenario.startswith("card-sendback") or scenario.startswith("sendback-") else 1100 if scenario.startswith("approve-") and "zone" in scenario else 1500 if scenario.startswith("get-tokens") or scenario.startswith("wallet") or scenario.startswith("claim") or scenario.startswith("card-arriving") else 1100 if scenario.startswith("receive-") else 1700 if scenario.startswith("welcome") else 1000 if scenario.startswith("pay-account") else 1100 if scenario.startswith("inscribe") else 1300 if scenario in ("name", "profile", "source", "page-link", "page-text", "page-long", "nowallet") else 760,
         }
         # Beside Main.qml, so its relative imports (logic.mjs) resolve.

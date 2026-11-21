@@ -20,6 +20,7 @@ import "logic.mjs" as Logic
 import "claimdelay.mjs" as ClaimDelay
 import "relayline.mjs" as RelayLine
 import "nft.mjs" as Nft
+import "vesting.mjs" as Vesting
 
 Item {
     id: root
@@ -121,9 +122,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.18.0"
+    readonly property string neededModule: "0.18.1"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.18.0"
+    readonly property string appVersion: "0.18.1"
     property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
     property var moduleFeatures: []    // get_config features: what this build of the names module can do
     property real machineMemory: 0     // get_config memory_bytes: this computer's memory (0: unknown)
@@ -8232,6 +8233,243 @@ Item {
     }
     // ── end Collectibles
 
+    // ── Vesting ─────────────────────────────────────────────────────────
+    // Schedules made in Vest that pay this wallet's public accounts, read from the optional
+    // `vesting` module (Vest's own; lidl/vesting.lidl). Names only shows them: claiming happens
+    // in Vest. One call to the module at a time (it answers one at a time). Read once when Names is
+    // on LEZ 0.4 with its accounts known (for the menu's count), every 5 minutes while Names is in
+    // front, and every 60 s while the page is open and in front. While Vest's scan of the chain is
+    // behind, the open page asks `discover` for more blocks, one round at a time, 2 s apart.
+    property var vestAnswer: null          // incoming's last answer: {to_block, tip, schedules}
+    property string vestKind: ""           // the last incoming reply's kind (Vesting.reply), "" before any
+    property string vestError: ""
+    property bool vestAsking: false        // a call to the module on its way
+    property bool vestAgain: false         // a read asked for while a call was on its way
+    property bool vestScanning: false      // a discover round on its way, or the next one due
+    property bool vestScanHold: false      // no more rounds until the next 60 s beat (done, or stuck)
+    property string vestScanProblem: ""
+    property var vestSeen: []              // unvested schedules already seen on the page (memory only)
+    property bool vestFinishedOpen: false
+    property int vestNameTries: 0
+    property string vestOpenLine: ""
+    property real vestReadAt: 0            // ms
+    readonly property bool vestOnView: section === "vesting" && namesNet === "0.4" && Qt.application.state === Qt.ApplicationActive
+    readonly property var vestAccounts: Vesting.accountIds(Logic.publicAccounts(cliBalance, cliAccounts))
+    readonly property string vestAccountsKey: vestAccounts.join(",")
+    // Basecamp's installed list says (null: not read yet).
+    readonly property var vestInstalled: installedList === null ? null : Logic.installedEntry(installedList, "vesting") !== null
+    readonly property var vestUiInstalled: installedList === null ? null : Logic.installedEntry(installedList, "vesting_ui") !== null
+    readonly property bool vestReads: configKnown && namesNet === "0.4" && vestAccounts.length > 0 && vestInstalled !== false
+    readonly property var vestSchedules: vestAnswer !== null && Array.isArray(vestAnswer.schedules) ? vestAnswer.schedules : []
+    readonly property var vestGroups: Vesting.groups(vestSchedules)
+    readonly property int vestCount: vestReads ? Vesting.badgeCount(vestSchedules, vestSeen) : 0
+    readonly property string vestState: Vesting.pageState({ net: namesNet, installed: vestInstalled, kind: vestKind, answered: vestAnswer !== null, accounts: vestAccounts.length, accountsKnown: cliAccounts !== null || (cliBalance !== undefined && cliBalance !== null), count: vestSchedules.length })
+    readonly property string vestScanNow: Vesting.scanLine(vestAnswer)
+    onVestReadsChanged: if (vestReads) vestRead()
+    onVestAccountsKeyChanged: {
+        vestAnswer = null
+        vestKind = ""
+        if (vestReads) vestRead()
+    }
+    onVestOnViewChanged: if (vestOnView) { vestScanHold = false; vestSeeAll(); vestRead() }
+
+    /// A local date and time for a schedule's next unlock (`ms`, a real).
+    function vestDate(ms) {
+        return Qt.formatDateTime(new Date(ms), "d MMM yyyy, hh:mm")
+    }
+    /// One call of the vesting module; every argument is text. `done` gets Vesting.reply's
+    /// {kind, value, error} exactly once, a busy one when no answer came in time.
+    function vestCall(method, args, done, patience) {
+        if (!(bridgeReady && logos.callModuleAsync)) {
+            done({ kind: "missing", value: null, error: "This screen needs to run inside Basecamp." })
+            return
+        }
+        var over = false
+        var wait = patience || 30000
+        function settle(r) {
+            if (over) return
+            over = true
+            done(r)
+        }
+        againAfter(wait + 5000, function() { settle({ kind: "busy", value: null, error: "" }) })
+        logos.callModuleAsync("vesting", method, args, function(raw) { settle(Vesting.reply(raw)) }, wait)
+    }
+    /// Reads the schedules that pay the wallet's public accounts (`incoming`). An answer read for
+    /// another network or other accounts than now is dropped.
+    function vestRead() {
+        if (!vestReads)
+            return
+        if (vestAsking) {
+            vestAgain = true
+            return
+        }
+        var key = namesNet + "|" + vestAccountsKey
+        vestAsking = true
+        vestAgain = false
+        vestCall("incoming", [JSON.stringify(vestAccounts)], function(r) {
+            vestAsking = false
+            // Asked for while this one was on its way (other accounts, the page opened): again.
+            if (vestAgain || key !== namesNet + "|" + vestAccountsKey) {
+                vestAgain = false
+                Qt.callLater(vestRead)
+                return
+            }
+            vestReadAt = Date.now()
+            vestKind = r.kind
+            vestError = r.error
+            if (r.kind !== "ok")
+                return
+            vestAnswer = r.value
+            vestReadNames()
+            if (vestOnView) {
+                vestSeeAll()
+                if (Vesting.behind(r.value) && !vestScanHold && !vestScanning) {
+                    vestScanning = true
+                    againAfter(2000, vestDiscover)
+                }
+            }
+        }, 20000)
+    }
+    /// One `discover` round ("" for the module's default block count), then the list again. Stops
+    /// when the page leaves view, when the scan says it is done or didn't move, or on a refusal.
+    function vestDiscover() {
+        if (!vestOnView || vestAsking || vestScanHold) {
+            vestScanning = false
+            return
+        }
+        var key = namesNet + "|" + vestAccountsKey
+        var before = vestAnswer !== null ? Number(vestAnswer.to_block) : -1
+        vestAsking = true
+        vestCall("discover", [""], function(r) {
+            vestAsking = false
+            vestScanning = false
+            if (key !== namesNet + "|" + vestAccountsKey) {
+                vestRead()
+                return
+            }
+            if (r.kind !== "ok") {
+                vestScanHold = true
+                vestScanProblem = r.kind === "error" ? sentence(r.error) : ""
+                if (vestAgain) vestRead()
+                return
+            }
+            vestScanProblem = ""
+            var v = r.value
+            if (v.done === true || !(Number(v.to_block) > before))
+                vestScanHold = true
+            if (vestAnswer !== null)
+                vestAnswer = Object.assign({}, vestAnswer, { to_block: v.to_block, tip: v.tip })
+            vestRead()
+        }, 120000)
+    }
+    function vestScanAgain() {
+        vestScanHold = false
+        vestScanProblem = ""
+        vestScanning = true
+        vestDiscover()
+    }
+    /// The page is in view: the unvested schedules listed are no longer new for the menu's count.
+    function vestSeeAll() {
+        var next = Vesting.seenWith(vestSeen, vestSchedules)
+        if (next.length !== vestSeen.length)
+            vestSeen = next
+    }
+    /// The creators' LNS names (`reverse`, kept in accountNames), asked again a few times while
+    /// the module is busy; until then the short address is shown.
+    function vestReadNames() {
+        var ids = vestSchedules.map(function(s) { return String(s.creator || "") }).filter(function(id) {
+            return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id) && !Object.prototype.hasOwnProperty.call(accountNames, id)
+        })
+        if (ids.length === 0 || vestNameTries >= 8)
+            return
+        vestNameTries++
+        readAccountNames(ids)
+        againAfter(4000, vestReadNames)
+    }
+    function openVesting() {
+        go("vesting")
+        vestScanHold = false
+        vestScanProblem = ""
+        vestNameTries = 0
+        loadInstalled(function() { root.vestRead() })
+    }
+    /// "Try again" after a refusal or no answer: the list read now.
+    function vestTryAgain() {
+        vestKind = vestAnswer !== null ? "ok" : ""
+        vestError = ""
+        loadInstalled(function() { root.vestRead() })
+    }
+    /// Opens Vest (basecamp.apps.launch, as Names opens other apps), where claims are made.
+    function vestOpenApp() {
+        if (!(bridgeReady && logos.request)) {
+            vestOpenLine = "This screen needs to run inside Basecamp."
+            return
+        }
+        vestOpenLine = "Opening Vest…"
+        logos.request("basecamp.apps.launch", { app: "vesting_ui" }, function() {})
+        againAfter(4000, function() { if (root.vestOpenLine === "Opening Vest…") root.vestOpenLine = "" })
+    }
+    Timer {
+        interval: 60000
+        repeat: true
+        running: root.vestOnView
+        onTriggered: { root.vestScanHold = false; root.vestRead() }
+    }
+    // The menu's count, while Names is in front with the page closed: incoming answers from what
+    // Vest has already found, so this asks nothing of the chain.
+    Timer {
+        interval: 300000
+        repeat: true
+        running: root.vestReads && !root.vestOnView && Qt.application.state === Qt.ApplicationActive
+        onTriggered: root.vestRead()
+    }
+
+    /// One schedule on the Vesting page: its total, what it says now, who it is from (their LNS
+    /// name, else the short address with Show and Copy), and Open in Vest.
+    component VestRow: Rectangle {
+        id: vestRow
+        property var schedule: ({})
+        readonly property var lines: Vesting.rowLines(schedule, root.vestDate)
+        readonly property string creator: String(schedule.creator || "")
+        readonly property string creatorName: root.accountNames[creator] || ""
+        readonly property string beneficiary: String(schedule.beneficiary || "")
+        Layout.fillWidth: true
+        implicitHeight: vestRowColumn.implicitHeight + 36
+        radius: 10
+        color: root.card
+        border.width: 1
+        border.color: root.line
+        ColumnLayout {
+            id: vestRowColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 18
+            spacing: 8
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: vestRow.lines.amount
+                color: root.ink
+                font.family: root.sans
+                font.pixelSize: root.px(22)
+                font.weight: Font.DemiBold
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+            }
+            Hint { color: Vesting.groupOf(vestRow.schedule) === "claimable" ? root.ink : root.dim; text: vestRow.lines.line }
+            Fact { label: "From"; value: vestRow.creatorName !== "" ? vestRow.creatorName : root.shorten(vestRow.creator); full: vestRow.creator; code: vestRow.creatorName === ""; showable: true }
+            Fact { visible: root.vestAccounts.length > 1 && vestRow.beneficiary !== ""; label: "To"; value: Logic.namedAccount(vestRow.beneficiary, root.shownAccountNames) || root.shorten(vestRow.beneficiary); full: vestRow.beneficiary; code: Logic.namedAccount(vestRow.beneficiary, root.shownAccountNames) === ""; showable: true }
+            Action {
+                Layout.topMargin: 4
+                label: "Open in Vest"
+                enabledNow: root.vestUiInstalled !== false
+                onPressed: root.vestOpenApp()
+            }
+            WhyLine { text: root.vestUiInstalled === false ? "Install the Vest app from the app catalog to open it." : "" }
+        }
+    }
+    // ── end Vesting
+
     // ── Apps asking the wallet (Wallet Provider SDK) ────────────────────
     //
     // Other apps ask the names module for access, payments and program calls
@@ -10154,6 +10392,8 @@ Item {
     component Tab: Rectangle {
         id: tab
         property string label: ""
+        /// A count at the right end of a sidebar tab ("" for none): neutral, never a status colour.
+        property string badge: ""
         property bool current: false
         /// Labels sit at the left in a tab that fills its row (the sidebar).
         property bool alignLeft: false
@@ -10174,6 +10414,26 @@ Item {
             font.family: root.sans
             font.pixelSize: root.px(17)
             font.weight: tab.current ? Font.DemiBold : Font.Normal
+        }
+        Rectangle {
+            visible: tab.badge !== ""
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.right: parent.right
+            anchors.rightMargin: 12
+            implicitWidth: Math.max(height, tabBadge.implicitWidth + 14)
+            implicitHeight: root.px(22)
+            radius: height / 2
+            color: root.ink
+            Text {
+                id: tabBadge
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: tab.badge
+                color: root.slate
+                font.family: root.sans
+                font.pixelSize: root.px(14)
+                font.weight: Font.DemiBold
+            }
         }
         MouseArea {
             id: tabArea
@@ -10948,6 +11208,7 @@ Item {
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Wallet"; current: root.section === "wallet" && root.walletView !== "names"; onPressed: root.openWallet("home") }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Activity"; current: root.section === "activity"; onPressed: { root.go("activity"); root.loadActivity() } }
                 Tab { visible: root.namesNet === "0.4"; Layout.fillWidth: true; alignLeft: true; label: root.nftAppRequests.length > 0 ? "Collectibles · " + root.nftAppRequests.length + " waiting" : "Collectibles"; current: root.section === "collectibles"; onPressed: root.openCollectibles() }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Vesting"; badge: Vesting.badgeText(root.vestCount); current: root.section === "vesting"; onPressed: root.openVesting() }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Names"; current: root.section === "wallet" && root.walletView === "names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
@@ -11802,6 +12063,90 @@ Item {
             }
         }
         // ── end Collectibles page
+
+        // ── Vesting page: schedules made in Vest that pay you (Claimable now, Unvested, Finished)
+        Flickable {
+            visible: root.section === "vesting" && !root.needsWelcome
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentHeight: vestPage.implicitHeight + 72
+            clip: true
+            ColumnLayout {
+                id: vestPage
+                x: 32
+                y: 32
+                width: Math.min(parent.width - 64, root.pageWidth)
+                spacing: 10
+                PageHeader { title: "Vesting"; net: root.namesNet; onBack: root.openWallet("home") }
+                Hint { text: "Schedules made in Vest that pay your accounts. They show here by themselves; claiming happens in Vest." }
+                StatusLine {
+                    visible: ["network", "missing", "idle", "older", "noaccounts", "empty"].indexOf(root.vestState) >= 0
+                    kind: ""
+                    text: Vesting.stateText(root.vestState)
+                }
+                StatusLine { visible: root.vestState === "looking"; kind: "working"; text: Vesting.stateText("looking") }
+                StatusLine {
+                    visible: root.vestState === "problem"
+                    kind: "problem"
+                    text: "Vest answered: " + root.sentence(root.vestError)
+                    actionLabel: root.vestAsking ? "Checking…" : "Try again"
+                    actionEnabled: !root.vestAsking
+                    onAct: root.vestTryAgain()
+                }
+                StatusLine {
+                    visible: root.vestKind === "busy" && ["busy", "list", "empty"].indexOf(root.vestState) >= 0
+                    kind: "waiting"
+                    text: Vesting.stateText("busy")
+                    actionLabel: root.vestAsking ? "Checking…" : "Try again"
+                    actionEnabled: !root.vestAsking
+                    onAct: root.vestTryAgain()
+                }
+                StatusLine {
+                    visible: (root.vestState === "list" || root.vestState === "empty") && root.vestScanNow !== "" && root.vestScanProblem === ""
+                    kind: "working"
+                    text: root.vestScanNow
+                }
+                StatusLine {
+                    visible: root.vestScanProblem !== "" && root.vestState !== "problem"
+                    kind: "problem"
+                    text: "Vest couldn't read more of the chain: " + root.vestScanProblem
+                    actionLabel: root.vestAsking ? "Checking…" : "Try again"
+                    actionEnabled: !root.vestAsking
+                    onAct: root.vestScanAgain()
+                }
+
+                ListHead { visible: root.vestState === "list" && root.vestGroups.claimable.length > 0; Layout.topMargin: 12; label: "Claimable now"; count: String(root.vestGroups.claimable.length) }
+                Repeater {
+                    model: root.vestState === "list" ? root.vestGroups.claimable : []
+                    VestRow { required property var modelData; schedule: modelData }
+                }
+                ListHead { visible: root.vestState === "list" && root.vestGroups.unvested.length > 0; Layout.topMargin: 12; label: "Unvested"; count: String(root.vestGroups.unvested.length) }
+                Repeater {
+                    model: root.vestState === "list" ? root.vestGroups.unvested : []
+                    VestRow { required property var modelData; schedule: modelData }
+                }
+                ListHead { visible: root.vestState === "list" && root.vestGroups.finished.length > 0; Layout.topMargin: 12; label: "Finished"; count: String(root.vestGroups.finished.length) }
+                Link {
+                    visible: root.vestState === "list" && root.vestGroups.finished.length > 0
+                    text: root.vestFinishedOpen ? "Hide finished" : root.vestGroups.finished.length === 1 ? "Show the finished schedule" : "Show the " + root.vestGroups.finished.length + " finished schedules"
+                    font.pixelSize: root.px(15)
+                    onPressed: root.vestFinishedOpen = !root.vestFinishedOpen
+                }
+                Repeater {
+                    model: root.vestState === "list" && root.vestFinishedOpen ? root.vestGroups.finished : []
+                    VestRow { required property var modelData; schedule: modelData }
+                }
+                Action {
+                    visible: root.vestState === "idle" || root.vestState === "older" || root.vestState === "empty"
+                    Layout.topMargin: 6
+                    label: "Open Vest"
+                    enabledNow: root.vestUiInstalled !== false
+                    onPressed: root.vestOpenApp()
+                }
+                StatusLine { visible: root.vestOpenLine !== ""; kind: root.vestOpenLine === "Opening Vest…" ? "working" : "problem"; text: root.vestOpenLine }
+            }
+        }
+        // ── end Vesting page
 
         // Activity: everything the Wallet sent or saw arrive.
         Flickable {
@@ -15359,7 +15704,7 @@ Item {
                         visible: root.whatsNewShown
                         Layout.fillWidth: true
                         spacing: 6
-                        Part { text: "What's new in Names 0.18.0" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
+                        Part { text: "What's new in Names 0.18.1" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
                         Repeater {
                             model: Logic.WHATS_NEW
                             Hint { required property var modelData; color: root.ink; text: "· " + modelData }

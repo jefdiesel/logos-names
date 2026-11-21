@@ -1803,7 +1803,7 @@ const WALLET_SDK_VERSION: &str = "1.0";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.18.0";
+const MODULE_VERSION: &str = "0.18.1";
 /// get_config's `features`: what an app may need beyond the version (`reveal_name`;
 /// `request_access_with` and its `account_hint`; `grant_add_account`: a hint for an account
 /// the app wasn't given is a request to add it to the app's grant, not "approved").

@@ -1,7 +1,7 @@
 {
   "name": "names_ui",
   "display_name": "Names",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "type": "ui_qml",
   "category": "identity",
   "description": "Your name on Logos: register it, post as it, edit its profile",
@@ -10,15 +10,19 @@
   "dependencies": [
     {
       "name": "names",
-      "version": ">=0.18.0"
+      "version": ">=0.18.1"
     }
   ],
   "optional_dependencies": [
-    "lez_bridge"
+    "lez_bridge",
+    "vesting"
   ],
   "dependency_overrides": {
     "lez_bridge": {
       "file": "lidl/lez_bridge.lidl"
+    },
+    "vesting": {
+      "file": "lidl/vesting.lidl"
     }
   },
   "provides": [
