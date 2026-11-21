@@ -532,8 +532,9 @@ enum Command {
         #[arg(value_parser = parse_name)]
         name: String,
     },
-    /// Make sure a name you hold points at you: its account (when a public account holds
-    /// it) and receiving keys. Sends one change only when something is missing, as after a
+    /// Make sure a name you hold points at you: its account when a public account holds it,
+    /// its receiving keys when a private one does. Sends one change only when something is
+    /// missing, as after a
     /// transfer to you. Names and every other change to the name do this by themselves.
     Repair {
         #[arg(value_parser = parse_name)]
@@ -2127,12 +2128,16 @@ impl Client {
         Ok(())
     }
 
-    /// Fills in what `name`'s profile must always carry for `holder` (SPEC.md §5, A name is an
-    /// address): a public holder's account, and receiving keys from a new private account of
-    /// this wallet when it has none. Returns whether anything was added.
+    /// Fills in what `name`'s profile must always carry for `holder` (SPEC.md §6, A name is an
+    /// address): a public holder's account; for a private holder, whose account is never
+    /// written, receiving keys from a new private account of this wallet when it has none.
+    /// A public holder's keys are kept when there, never made here: the Names app can't claim
+    /// private payments on LEZ 0.4, and a new account per edit would be left behind by a
+    /// change that fails. Returns whether anything was added.
     fn complete_profile(&mut self, name: &str, profile: &mut Profile, holder: AccountId) -> Result<bool> {
-        let mut added = complete_account(profile, holder, self.is_private(holder));
-        if profile.npk.is_none() {
+        let private = self.is_private(holder);
+        let mut added = complete_account(profile, holder, private);
+        if private && profile.npk.is_none() {
             let (receiving, npk, vpk) = self.new_receiving_keys()?;
             println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
             profile.npk = Some(npk);
@@ -2151,8 +2156,9 @@ impl Client {
         if !record.sealed.is_empty() && open_profile(&derive(name).key, &record.sealed, name).is_none() {
             bail!("{name}{NAME_SUFFIX}'s profile doesn't open with its name's key, so it is left as it is; nothing was sent");
         }
-        let missing_account = !self.is_private(holder) && profile.account.is_none();
-        if !missing_account && profile.npk.is_some() {
+        let private = self.is_private(holder);
+        let missing = if private { profile.npk.is_none() } else { profile.account.is_none() };
+        if !missing {
             println!("{name}{NAME_SUFFIX} already points at you; nothing was sent");
             return Ok(());
         }

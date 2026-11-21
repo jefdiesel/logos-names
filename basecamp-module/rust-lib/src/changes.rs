@@ -979,4 +979,69 @@ mod tests {
         assert!(registry.repair(name, &derived, &[holder]).unwrap_err().contains("doesn't open"));
         crate::registry::RECORDS.with(|records| records.borrow_mut().clear());
     }
+
+    /// The module's own path on a live chain (rc3): `LIVE_RPC`, `LIVE_PROGRAM`, the names CLI at
+    /// `LIVE_CLI` with the wallet at `LIVE_WALLET`, a public `LIVE_HOLDER` of that wallet.
+    fn live() -> (Registry, crate::cli::Setup, AccountId) {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name}"));
+        let program = crate::registry::parse_account(&var("LIVE_PROGRAM")).unwrap();
+        let deadline = crate::registry::Deadline::after(std::time::Duration::from_secs(600));
+        let mut registry = Registry::by(&var("LIVE_RPC"), program, deadline);
+        registry.chat = Some(CHAT.to_owned());
+        let setup = crate::cli::Setup {
+            program: var("LIVE_CLI").into(),
+            wallet: var("LIVE_WALLET").into(),
+            registry: Some(var("LIVE_PROGRAM")),
+            sequencer: var("LIVE_RPC"),
+        };
+        (registry, setup, crate::registry::parse_account(&var("LIVE_HOLDER")).unwrap())
+    }
+
+    /// `LIVE_NAME`, held by `LIVE_HOLDER` with its profile emptied (a transfer): the module's
+    /// repair sends one SetRecord, after which it points at its holder and carries the chat
+    /// address, and a second repair has nothing to send.
+    #[test]
+    #[ignore = "sends to a live chain"]
+    fn live_module_repair() {
+        let (registry, setup, holder) = live();
+        let name = std::env::var("LIVE_NAME").unwrap();
+        let derived = derive(&name);
+        let change = registry.repair(&name, &derived, &[holder]).expect("a repair").expect("something to mend");
+        let tx = crate::wallet::send(&setup, &change).expect("sent");
+        println!("repair tx {tx}");
+        let record = registry.record(&name, &derived).unwrap().unwrap();
+        println!("after: account {:?} texts {:?}", record.profile.account.map(|a| account_text(&a)), record.profile.texts);
+        assert_eq!(record.profile.account, Some(holder));
+        assert!(record.profile.texts.iter().any(|(k, v)| k == "chat" && v == CHAT));
+        assert_eq!(registry.repair(&name, &derived, &[holder]), Ok(None));
+    }
+
+    /// `LIVE_NEW_NAME`, unregistered: the module commits, waits, reveals; the name resolves to
+    /// its holder's account and the chat address from its first block, with nothing after.
+    #[test]
+    #[ignore = "sends to a live chain and waits 15 minutes"]
+    fn live_module_register() {
+        let (registry, setup, holder) = live();
+        let name = std::env::var("LIVE_NEW_NAME").unwrap();
+        let derived = derive(&name);
+        let secret: [u8; 32] = crate::registry::fresh_bytes().unwrap();
+        let (commit, made) = registry.commit(&name, &derived, &holder, &secret).expect("a commit");
+        println!("commit tx {}", crate::wallet::send(&setup, &commit).expect("commit sent"));
+        loop {
+            let now = Registry::new(&registry.sequencer, registry.program).now().unwrap();
+            if now >= made + crate::registry::MIN_COMMIT_AGE_MS {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        let fresh = Registry { deadline: crate::registry::Deadline::after(std::time::Duration::from_secs(600)), ..registry.clone() };
+        let reveal = fresh.reveal(&name, &derived, &holder, &secret, None).expect("a reveal");
+        println!("reveal tx {}", crate::wallet::send(&setup, &reveal).expect("reveal sent"));
+        let record = fresh.record(&name, &derived).unwrap().expect("registered");
+        println!("after: account {:?} texts {:?}", record.profile.account.map(|a| account_text(&a)), record.profile.texts);
+        assert!(record.is_held_by(&derived.id, &holder));
+        assert_eq!(record.profile.account, Some(holder), "an address from its first block");
+        assert!(record.profile.texts.iter().any(|(k, v)| k == "chat" && v == CHAT));
+        assert_eq!(fresh.repair(&name, &derived, &[holder]), Ok(None), "nothing left to publish");
+    }
 }

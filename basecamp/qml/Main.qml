@@ -485,6 +485,7 @@ Item {
             var loaded = config.module_version ? String(config.module_version) : ""
             buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
             moduleFeatures = Array.isArray(config.features) ? config.features : []
+            noteChatAddress()
             readBridgeNote()
             readWhatsNew()
             machineMemory = Number(config.memory_bytes) || 0
@@ -5456,7 +5457,7 @@ Item {
         repairNext()
     }
     function repairNext() {
-        if (repairing || repairQueue.length === 0)
+        if (repairing || repairQueue.length === 0 || !chatAddressAsked)
             return
         var queue = repairQueue.slice()
         var name = queue.shift()
@@ -5484,9 +5485,29 @@ Item {
         }, 180000)
     }
     /// Tells the module this installation's chat address, so the profiles it writes carry it.
-    onChatMineChanged: {
-        if (chatMine !== "" && moduleFeatures.indexOf("app_note") >= 0)
+    /// Its notes live in memory: told again whenever the module's features are read (a module
+    /// restart), and the address is asked of the chat module once, before any repair is sent,
+    /// so a repair carries it rather than using up the name's one repair without it.
+    property bool chatAddressAsked: false
+    onChatMineChanged: noteChatAddress()
+    function noteChatAddress() {
+        if (!addressRepair)
+            return
+        if (chatMine !== "")
             askLater("app_note", ["chat", chatMine], function() {}, function() {}, 10000)
+        if (!chatAddressAsked && chatMine === "")
+            chatAsk("get_address", [], function(address) {
+                chatMine = chatText(address)
+                chatAddressAsked = true
+                repairNext()
+            }, function() {
+                chatAddressAsked = true
+                repairNext()
+            })
+        else if (!chatAddressAsked) {
+            chatAddressAsked = true
+            repairNext()
+        }
     }
 
     /// LEZ 0.4, a name just registered: its holder account published as its public account, unless

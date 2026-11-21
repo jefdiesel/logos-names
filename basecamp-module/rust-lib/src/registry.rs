@@ -484,9 +484,10 @@ impl Writer {
     }
 }
 
-/// Whether `text` is a chat address as the chat module gives one: 64 lowercase hex characters.
+/// Whether `text` is a chat address as the Names app reads one from the chat module
+/// (`chatText` in Main.qml): 16 to 200 characters of letters, digits and `_:+/=.-`.
 pub fn is_chat_address(text: &str) -> bool {
-    text.len() == 64 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    (16..=200).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphanumeric() || b"_:+/=.-".contains(&b))
 }
 
 /// What a name resolves to, as its holder sealed it.
