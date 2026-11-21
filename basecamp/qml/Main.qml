@@ -7752,7 +7752,7 @@ Item {
     }
     function nftRevokeCapability(app, capability) {
         askLater("revoke_nft_capability", [app, capability], function() {
-            nftResult = "Revoked. " + app + " can no longer " + Nft.capabilityVerb(capability) + "."
+            nftResult = "Revoked. " + appShown(app) + " can no longer " + Nft.capabilityVerb(capability) + "."
             nftResultKind = "done"
             loadNftGrants()
         }, function(message) { nftResult = sentence(message); nftResultKind = "problem" })
@@ -7985,14 +7985,15 @@ Item {
     property var appChosen: []            // the accounts ticked on the sheet
     property string appChosenFor: ""      // which request, in which state, those ticks are for (Logic.requestTickKey)
     property bool appTicksTouched: false  // the person changed the ticks on this request's sheet
-    property int appTickSeverity: 0       // Logic.requestTickSeverity when the ticks were last set
+    property var appTickWarnings: []      // what the sheet warned about when the ticks were last set (Logic.tickStep)
+    property bool appConnectShort: false  // this access request's sheet is the short one (Logic.connectShort), set when it opens
     property bool appUnderstood: false    // an unverified program's warning was read
     property bool appSheetDetails: false  // the short sheet's Details open
     // The short sheet: what is approved in a few words, one line of who and which account, one
     // warning line with its tick when one is required, Approve / Not now; every other fact the
     // sheet has stays under Details. For the bridge's claim flow and the other one-step asks.
     readonly property bool appSheetCompact: appRequest !== null && ["relayed_call", "programs", "secret", "connect"].indexOf(appRequest.kind) >= 0
-        && (appRequest.kind !== "connect" || appChosen.length > 0) && appRequest.zone_in_use !== false
+        && (appRequest.kind !== "connect" || appConnectShort) && appRequest.zone_in_use !== false
     // This app's own claim screen is what asked (the bridge, for the file being claimed).
     readonly property bool appForClaim: appRequest !== null && appRequest.app === "lez_bridge" && walletView === "claim" && claimCheck !== null && claimCheck.ok === true
     // This app's own Claim or Receive screen is what asked (the bridge, inside its flow): the
@@ -8014,19 +8015,19 @@ Item {
         if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
             return "Bridge " + request.sheet.burn.amount_text + " " + request.sheet.burn.symbol + " to Ethereum?"
         if (request.kind === "relayed_call")
-            return appForClaim && claimCheck.deposit ? "Claim " + claimCheck.deposit.amount_text + " from the bridge?" : request.app + " asks you to sign"
+            return appForClaim && claimCheck.deposit ? "Claim " + claimCheck.deposit.amount_text + " from the bridge?" : root.appShown(request.app) + " asks you to sign"
         // Adding one account to what the app already sees (grant_add_account): the others stay.
         if (request.kind === "connect" && request.adding === true)
-            return bridge ? "Let the bridge see this account too?" : request.app + " also wants to see " + String(request.account_hint || "").split("/")[0] + "/" + Logic.idShort(request.account_hint || "")
+            return bridge ? "Let the bridge see this account too?" : root.appShown(request.app) + " also wants to see " + String(request.account_hint || "").split("/")[0] + "/" + Logic.idShort(request.account_hint || "")
         if (request.kind === "connect")
-            return bridge ? "Let the bridge see this account?" : request.app + " asks to see an account"
+            return bridge ? "Let the bridge see this account?" : root.appShown(request.app) + " asks to see an account"
         if (request.kind === "programs")
-            return bridge ? "Allow the bridge's programs?" : request.app + " asks to allow its programs"
+            return bridge ? "Allow the bridge's programs?" : root.appShown(request.app) + " asks to allow its programs"
         // Exit keys for an Ethereum address not approved yet: the address is the question.
         if (Logic.isExitAsk(request))
-            return bridge ? "Let the bridge send back to this Ethereum address?" : request.app + " asks to send back to this Ethereum address"
+            return bridge ? "Let the bridge send back to this Ethereum address?" : root.appShown(request.app) + " asks to send back to this Ethereum address"
         if (request.kind === "secret")
-            return bridge ? (String(request.scope || "") === "RFP022/exit" ? "Allow the bridge's exit keys?" : "Allow the bridge's deposit keys?") : request.app + " asks for keys of its own"
+            return bridge ? (String(request.scope || "") === "RFP022/exit" ? "Allow the bridge's exit keys?" : "Allow the bridge's deposit keys?") : root.appShown(request.app) + " asks for keys of its own"
         return appRequestTitle(request)
     }
     function appSheetLine(request) {
@@ -8038,11 +8039,11 @@ Item {
             return appForClaim ? "Into your account " + Logic.idShort(claimAccount) + " · the bridge pays the fee"
                 : "Signs with your account " + Logic.idShort(request.account || (appChosen[0] || "")) + " · another account pays the fee"
         if (request.kind === "connect")
-            return "Account " + appChosen.map(Logic.idShort).join(", ") + " · asked by " + request.app
+            return "Account " + appChosen.map(Logic.idShort).join(", ") + " · asked by " + root.appShown(request.app)
         if (request.kind === "programs")
-            return "So it can ask you to sign its claims · asked by " + request.app
+            return "So it can ask you to sign its claims · asked by " + root.appShown(request.app)
         if (request.kind === "secret")
-            return "From your account " + Logic.idShort(request.account || "") + " · asked by " + request.app
+            return "From your account " + Logic.idShort(request.account || "") + " · asked by " + root.appShown(request.app)
         return ""
     }
     /// The short sheet's tick is an ordinary one (brass) for a declaration; red only when the app
@@ -8072,11 +8073,11 @@ Item {
         // warning is that the Program Registry can't vouch for the programs, not that a call is
         // unreadable.
         if (request.kind === "programs")
-            return "Allow " + (request.app === "lez_bridge" ? "the LEZ Bridge's" : request.app + "'s") + " programs to ask this wallet to sign claims. Only allow programs you trust."
+            return "Allow " + (request.app === "lez_bridge" ? "the LEZ Bridge's" : root.appShown(request.app) + "'s") + " programs to ask this wallet to sign claims. Only allow programs you trust."
         // A burn the wallet decoded that isn't this app's own send-back: the address can't be checked.
         // One the wallet refuses keeps the sheet's own warning (Approve stays dim anyway).
         if (request.kind === "relayed_call" && request.sheet && request.sheet.burn)
-            return request.sheet.refused !== true ? Logic.burnTickText(request, appBurnUnderRecord(request)) : (request.sheet.warnings || []).length > 0 ? String(request.sheet.warnings[0]) : ""
+            return request.sheet.refused !== true ? Logic.burnTickText(request, appBurnUnderRecord(request), appShown(request.app)) : (request.sheet.warnings || []).length > 0 ? String(request.sheet.warnings[0]) : ""
         // Exit keys for an address not approved yet: the person says it is theirs.
         if (Logic.isExitAsk(request))
             return Logic.exitTickText(request)
@@ -8125,9 +8126,15 @@ Item {
 
     /// Reads the requests waiting for the person. On the first sight of a
     /// request, the account it already has (or the first offered) is ticked.
-    function loadAppRequests() {
+    /// `done` (optional): called with the fresh list once read, or null when the read failed.
+    function loadAppRequests(done) {
         askLater("pending_requests", [], function(value) {
             appRequests = Array.isArray(value) ? value : []
+            // The apps' names as Basecamp shows them (appShown) come from the installed packages.
+            if (appRequests.length > 0 && installedList === null && !installedAskedForLabels) {
+                installedAskedForLabels = true
+                loadInstalled()
+            }
             // A burn's sheet reads which addresses are this wallet's own (kept by the module).
             if (appRequests.some(function(r) { return Logic.isDecodedBurn(r) }))
                 loadExitRecipients()
@@ -8139,38 +8146,45 @@ Item {
             if (request === null) {
                 appChosenFor = ""
                 appChosen = []
+                appTickWarnings = []
+                appConnectShort = false
+                if (done) done(appRequests)
                 return
             }
-            // Ticked again (and the warning's tick undone) on a new request and on any change of
-            // what the sheet knows about it: the publisher check or a program label coming back
-            // turns "checking" into a warning or not (M-2).
-            var key = Logic.requestTickKey(request)
-            // The same request, ticked by the person, and nothing new to warn about: their ticks
-            // stay (the publisher check flipping between "checking" and "unavailable" used to
-            // untick them under the cursor, so an Approve click missed).
-            var sameRequest = appChosenFor !== "" && appChosenFor.split("|")[0] === String(request.id)
-            var severity = Logic.requestTickSeverity(request, appPublisherFailed(request))
-            if (appChosenFor !== key && sameRequest && appTicksTouched && severity <= appTickSeverity) {
-                appChosenFor = key
-            } else if (appChosenFor !== key) {
+            // Ticked again (and the warning's tick undone) on a new request, and whenever the sheet
+            // has something new to warn about (M-2); the person's own ticks stay while the
+            // publisher check only flips between "checking" and "unavailable" (Logic.tickStep).
+            var step = Logic.tickStep(appChosenFor === "" ? null : { key: appChosenFor, id: appChosenFor.split("|")[0], warnings: appTickWarnings },
+                                      request, appPublisherFailed(request), appTicksTouched)
+            if (step.action !== "same")
+                appTickWarnings = step.warnings
+            if (step.action === "keep") {
+                appChosenFor = step.key
+            } else if (step.action === "reset") {
                 if (appChosenFor !== "")
-                    console.log("names_ui: request " + request.id + " sheet changed: " + key)
-                appChosenFor = key
+                    console.log("names_ui: request " + request.id + " sheet changed: " + step.key.split("|").slice(0, 4).join("|"))
+                var hint = request.app === "lez_bridge" ? bridgeHintAccount : ""
+                var newRequest = appChosenFor.split("|")[0] !== String(request.id)
+                appChosenFor = step.key
                 appTicksTouched = false
-                appTickSeverity = severity
                 appUnderstood = false
                 appSheetDetails = false
                 appError = ""
                 // Access for the bridge while this app's claim screen has its file: that account only.
-                appChosen = Logic.preTicked(request, appPublisherFailed(request), request.app === "lez_bridge" ? bridgeHintAccount : "")
+                appChosen = Logic.preTicked(request, appPublisherFailed(request), hint)
+                // Which access sheet it is, short or full, is set once, when the request first shows.
+                if (newRequest)
+                    appConnectShort = Logic.connectShort(request, hint, appChosen)
                 // Nothing could be ticked for the person: the accounts show on the short sheet
                 // itself, so Approve never waits on a choice hidden under Details.
                 appNeedsChoice = appChosen.length === 0 && (request.choices || []).length > 0
             }
             if (request.kind === "transfer")
                 loadFee()
+            if (done) done(appRequests)
         }, function(message) {
             console.log("names_ui: pending_requests:", message)
+            if (done) done(null)
         }, 20000)
     }
 
@@ -8257,23 +8271,42 @@ Item {
     //
     // Once the person answers another app's request here (Approve or Reject), Basecamp shows
     // that app again, through the shell's own navigation (basecamp.apps.launch: no chooser,
-    // the app as it was). Only for an installed Basecamp app (Logic.returnApp), and not while
-    // another request waits. The short wait lets the answer show before the switch.
+    // the app as it was). Only for an installed Basecamp app (Logic.returnApp), decided on a
+    // read of the requests made after the answer: if another one waits (or the read failed), the
+    // person stays here, where its sheet is. The short wait lets the answer show before the
+    // switch, and a request that shows up during it keeps the person here too.
     property string returnTo: ""
+    property bool installedAskedForLabels: false  // the installed list was read once for app names
+
+    /// The name to show for the app with module name `app`: its display name in Basecamp (the
+    /// installed packages' metadata, read locally), else the module name (Logic.appLabel).
+    function appShown(app) {
+        return Logic.appLabel(installedList, app)
+    }
+    /// Who asked, for the line that says so: “Vest” (vesting_ui), or “app” when they're the same.
+    function appWho(app) {
+        var shown = appShown(app)
+        var id = Logic.clean(app)
+        return shown === id ? "“" + id + "”" : "“" + shown + "” (" + id + ")"
+    }
     Timer {
         id: returnTimer
         interval: 700
         onTriggered: {
             var app = root.returnTo
             root.returnTo = ""
-            if (app !== "" && root.bridgeReady && logos.request) {
+            if (app !== "" && root.appRequest === null && root.bridgeReady && logos.request) {
                 console.log("names_ui: back to " + app)
                 logos.request("basecamp.apps.launch", { app: app }, function() {})
             }
         }
     }
-    function returnAfterAnswer(request, others) {
+    /// After `request` was answered: `fresh`, the requests read since (null if the read failed).
+    function returnAfterAnswer(request, fresh) {
         if (!(bridgeReady && logos.request))
+            return
+        var others = Logic.othersWaiting(fresh, request.id)
+        if (others !== 0)
             return
         loadInstalled(function() {
             var app = Logic.returnApp(installedList, request, others)
@@ -8297,7 +8330,6 @@ Item {
         var mine = privateRequestHere(request)
         // Drawn inside this app's own screen (the bridge's claim): the person stays there.
         var drawnHere = appInline
-        var others = appRequests.length - 1
         askLater(method, args, function(value) {
             appBusy = false
             if (mine !== "") {
@@ -8306,28 +8338,33 @@ Item {
                 loadAppGrants()
                 return
             }
-            if (!drawnHere)
-                returnAfterAnswer(request, others)
             if (approve && appIsToken(request))
-                say("Sending " + appSends(request) + " to " + request.destination + " for " + request.app + ". "
+                say("Sending " + appSends(request) + " to " + request.destination + " for " + root.appShown(request.app) + ". "
                     + (Logic.tokenSendProves(/^Private\//.test(chosen[0] || ""), request.destination) ? "It's proven on this computer first: 7-12 minutes." : "One block, about 30 seconds."), "waiting")
             else if (approve && request.kind === "transfer")
-                say("Sending " + grouped(request.amount) + " " + request.asset + " to " + request.destination + " for " + request.app + ". It takes a few minutes.", "waiting")
+                say("Sending " + grouped(request.amount) + " " + request.asset + " to " + request.destination + " for " + root.appShown(request.app) + ". It takes a few minutes.", "waiting")
             else if (approve && request.kind === "call")
-                say("Sent for " + request.app + ".", false)
+                say("Sent for " + root.appShown(request.app) + ".", false)
             else if (approve && request.kind === "private_call")
-                say("Proving it for " + request.app + " on this computer: about 11 minutes.", "waiting")
+                say("Proving it for " + root.appShown(request.app) + " on this computer: about 11 minutes.", "waiting")
             else if (approve && request.kind === "secret")
-                say(request.app + " can now get its own values from " + accountShort(request.account) + ".", false)
+                say(root.appShown(request.app) + " can now get its own values from " + accountShort(request.account) + ".", false)
             else if (approve && request.kind === "token_source")
                 say("Its tokens now show in your holdings.", false)
             else if (approve && request.kind === "relayed_call")
-                say("Signed for " + request.app + ". Its relay sends it and pays the fee.", false)
+                say("Signed for " + root.appShown(request.app) + ". Its relay sends it and pays the fee.", false)
             else if (approve && request.kind === "programs")
-                say(request.app + " may now ask you to sign calls to these programs; you approve each call.", false)
+                say(root.appShown(request.app) + " may now ask you to sign calls to these programs; you approve each call.", false)
             else if (approve)
-                say(request.app + " can now see the accounts you chose.", false)
-            loadAppRequests()
+                say(root.appShown(request.app) + " can now see the accounts you chose.", false)
+            // Back to the app that asked, once a fresh read shows nothing else waiting.
+            // (A read that failed, the module busy, is tried once more before staying here.)
+            loadAppRequests(drawnHere ? undefined : function(fresh) {
+                if (fresh !== null)
+                    returnAfterAnswer(request, fresh)
+                else
+                    loadAppRequests(function(again) { returnAfterAnswer(request, again) })
+            })
             loadAppGrants()
         }, function(message) {
             appBusy = false
@@ -8339,7 +8376,7 @@ Item {
 
     function revokeApp(app) {
         askLater("revoke_app", [app], function() {
-            say(app + " no longer has access to your accounts.", false)
+            say(appShown(app) + " no longer has access to your accounts.", false)
             loadAppGrants()
         }, function(message) { say(message, true) })
     }
@@ -8349,20 +8386,20 @@ Item {
         if (request === null)
             return ""
         if (request.kind === "connect")
-            return request.app + " wants to see your accounts"
+            return root.appShown(request.app) + " wants to see your accounts"
         if (request.kind === "transfer")
-            return request.app + " asks you to send " + appSends(request)
+            return root.appShown(request.app) + " asks you to send " + appSends(request)
         if (request.kind === "private_call")
-            return request.app + " asks for a private transaction from " + accountShort(request.account)
+            return root.appShown(request.app) + " asks for a private transaction from " + accountShort(request.account)
         if (request.kind === "secret")
-            return request.app + " asks for secret values of its own"
+            return root.appShown(request.app) + " asks for secret values of its own"
         if (request.kind === "token_source")
-            return request.app + " asks to show its tokens in your holdings"
+            return root.appShown(request.app) + " asks to show its tokens in your holdings"
         if (request.kind === "relayed_call")
-            return request.app + " asks you to sign a call another account pays for"
+            return root.appShown(request.app) + " asks you to sign a call another account pays for"
         if (request.kind === "programs")
-            return request.app + " names the programs it will ask you to sign for"
-        return request.app + " asks you to sign a program call"
+            return root.appShown(request.app) + " names the programs it will ask you to sign for"
+        return root.appShown(request.app) + " asks you to sign a program call"
     }
 
     /// An account as `Public/CCVd76Tk…sapKnk`: its kind in full, its ID shortened.
@@ -8507,9 +8544,9 @@ Item {
         askLater(approve ? "approve_inscription" : "reject_request", approve ? [request.id, from] : [request.id], function(value) {
             inscribeBusy = false
             if (approve && value && value.state === "done")
-                say("Inscribed for " + request.app + ", from " + Logic.keyShown(from) + ". It paid a fee of " + grouped(value.fee) + ". It's final in a few minutes.", false)
+                say("Inscribed for " + root.appShown(request.app) + ", from " + Logic.keyShown(from) + ". It paid a fee of " + grouped(value.fee) + ". It's final in a few minutes.", false)
             else if (approve)
-                say("The inscription for " + request.app + " may not have been sent. Your node's history shows whether it was.", true)
+                say("The inscription for " + root.appShown(request.app) + " may not have been sent. Your node's history shows whether it was.", true)
             loadInscribeRequests()
             loadChain()
             loadActivity()
@@ -9023,7 +9060,7 @@ Item {
         property bool small: false
         // The account whose page shows the row, if any: its own direction and amount.
         property string account: ""
-        readonly property var line: Logic.activityLine(act.entry, Math.max(root.clockTick, Date.now()), act.account)
+        readonly property var line: Logic.activityLine(act.entry, Math.max(root.clockTick, Date.now()), act.account, root.appShown)
         Layout.fillWidth: true
         Layout.leftMargin: act.small ? 0 : root.px(6)
         Layout.rightMargin: act.small ? 0 : root.px(6)
@@ -9186,7 +9223,7 @@ Item {
             checked: root.appUnderstood
             caution: root.appSheetCaution(sheetBody.request)
             text: root.appSheetWarning(sheetBody.request)
-            onToggled: root.appUnderstood = !root.appUnderstood
+            onToggled: { root.appUnderstood = !root.appUnderstood; root.appTicksTouched = true }
         }
         // No account could be ticked for the person: the choice is here, not only under Details.
         ColumnLayout {
@@ -9242,7 +9279,7 @@ Item {
         }
         Hint {
             font.pixelSize: root.px(15)
-            text: sheetBody.request === null ? "" : "Asked by the app “" + sheetBody.request.app + "”, as Basecamp names it. "
+            text: sheetBody.request === null ? "" : "Asked by the app " + root.appWho(sheetBody.request.app) + ", as Basecamp names it. "
                 + root.appExpiresIn(sheetBody.request) + (root.appRequests.length > 1 ? " " + (root.appRequests.length - 1) + " more waiting." : "")
         }
         // Who publishes the app, checked against its LNS name by the Program Registry.
@@ -9554,8 +9591,8 @@ Item {
             checked: root.appUnderstood
             caution: root.appSheetCaution(sheetBody.request)
             text: root.appIsToken(sheetBody.request) ? "I've read the warnings above and still want to send this token."
-                : "I've read the warnings above and trust " + (sheetBody.request !== null ? sheetBody.request.app : "this app") + " with this account."
-            onToggled: root.appUnderstood = !root.appUnderstood
+                : "I've read the warnings above and trust " + (sheetBody.request !== null ? root.appShown(sheetBody.request.app) : "this app") + " with this account."
+            onToggled: { root.appUnderstood = !root.appUnderstood; root.appTicksTouched = true }
         }
 
         ColumnLayout {
@@ -10877,7 +10914,7 @@ Item {
                         // This request's own ticks: never another request's (review finding 6).
                         readonly property var ticked: Nft.tickedFor(root.nftListTicks, modelData.id, Nft.listAccounts(root.nftRead ? root.nftRead.programs : []))
                         readonly property bool held: !!modelData.checking || (root.appPublisherFailed(modelData) && !root.nftUnderstood[modelData.id])
-                        title: modelData.kind === "nft_list" ? modelData.app + " asks to see your NFTs" : modelData.kind === "nft_transfers" ? modelData.app + " asks to be able to propose NFT transfers" : modelData.kind === "membership_proof" ? modelData.app + " asks you to prove you hold an NFT" : modelData.app + " asks to send one of your NFTs"
+                        title: modelData.kind === "nft_list" ? root.appShown(modelData.app) + " asks to see your NFTs" : modelData.kind === "nft_transfers" ? root.appShown(modelData.app) + " asks to be able to propose NFT transfers" : modelData.kind === "membership_proof" ? root.appShown(modelData.app) + " asks you to prove you hold an NFT" : root.appShown(modelData.app) + " asks to send one of your NFTs"
                             Hint { visible: Logic.publisherLine(modelData.publisher) !== null; color: root.appPublisherFailed(modelData) ? root.waitTone : root.ink; text: Logic.publisherLine(modelData.publisher) !== null ? Logic.publisherLine(modelData.publisher).text : "" }
                             Tick { visible: root.appPublisherFailed(modelData); checked: !!root.nftUnderstood[modelData.id]; text: "I understand this app may not be who it says it is, and still want to answer it."; onToggled: { var u = Object.assign({}, root.nftUnderstood); u[modelData.id] = !checked; root.nftUnderstood = u } }
                             Hint { visible: (modelData.reason || modelData.summary || "") !== ""; textFormat: Text.PlainText; text: "The app describes it as: “" + (modelData.reason || modelData.summary || "") + "” (its own words, not checked)" }
@@ -10905,11 +10942,11 @@ Item {
                                     label: modelData.kind === "nft_list" ? "Give access" : modelData.kind === "nft_transfers" ? "Allow" : "Open"
                                     strong: true
                                     enabledNow: !nftAskPanel.held && (modelData.kind !== "nft_list" || nftAskPanel.ticked.length > 0)
-                                    onPressed: modelData.kind === "nft_list" ? root.nftApproveList(modelData.id, false, nftAskPanel.ticked) : modelData.kind === "nft_transfers" ? root.nftApproveList(modelData.id, true, []) : modelData.kind === "membership_proof" ? root.openProofSheet(modelData.id) : root.nftOpenSheet("Sending an NFT for " + modelData.app, modelData.program, JSON.parse(modelData.action), modelData, null)
+                                    onPressed: modelData.kind === "nft_list" ? root.nftApproveList(modelData.id, false, nftAskPanel.ticked) : modelData.kind === "nft_transfers" ? root.nftApproveList(modelData.id, true, []) : modelData.kind === "membership_proof" ? root.openProofSheet(modelData.id) : root.nftOpenSheet("Sending an NFT for " + root.appShown(modelData.app), modelData.program, JSON.parse(modelData.action), modelData, null)
                                 }
                                 Action { label: "Reject"; onPressed: root.nftRejectRequest(modelData.id) }
                             }
-                            WhyLine { text: modelData.checking ? "Checking who publishes " + modelData.app + "… a few seconds." : root.appPublisherFailed(modelData) && !root.nftUnderstood[modelData.id] ? "Tick the box above to answer it." : modelData.kind === "nft_list" && nftAskPanel.ticked.length === 0 ? "Tick at least one account above." : "" }
+                            WhyLine { text: modelData.checking ? "Checking who publishes " + root.appShown(modelData.app) + "… a few seconds." : root.appPublisherFailed(modelData) && !root.nftUnderstood[modelData.id] ? "Tick the box above to answer it." : modelData.kind === "nft_list" && nftAskPanel.ticked.length === 0 ? "Tick at least one account above." : "" }
                     }
                 }
 
@@ -11192,7 +11229,7 @@ Item {
                 Part { visible: root.nftPasses.length > 0; text: "Passes" }
                 Repeater {
                     model: root.nftPasses
-                    StatusLine { required property var modelData; kind: Nft.proofKind(modelData.status); text: modelData.app + ": " + Nft.proofLine(modelData.status, root.clockTick) }
+                    StatusLine { required property var modelData; kind: Nft.proofKind(modelData.status); text: root.appShown(modelData.app) + ": " + Nft.proofLine(modelData.status, root.clockTick) }
                 }
 
                 // What each app may do with your NFTs, taken back one capability at a time.
@@ -11203,7 +11240,7 @@ Item {
                         required property var modelData
                         Layout.fillWidth: true
                         spacing: 10
-                        Text { Layout.fillWidth: true; text: modelData.app + (modelData.capability === "nft_list" ? " can see " : " ") + modelData.discloses + (modelData.accounts ? " (" + modelData.accounts.map(Nft.accountShown).join(", ") + ")" : "") + "."; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); wrapMode: Text.Wrap }
+                        Text { Layout.fillWidth: true; text: root.appShown(modelData.app) + (modelData.capability === "nft_list" ? " can see " : " ") + modelData.discloses + (modelData.accounts ? " (" + modelData.accounts.map(Nft.accountShown).join(", ") + ")" : "") + "."; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); wrapMode: Text.Wrap }
                         Link { text: "Revoke"; onPressed: root.nftRevokeCapability(modelData.app, modelData.capability) }
                     }
                 }
@@ -15602,7 +15639,7 @@ Item {
                             required property var modelData
                             Layout.fillWidth: true
                             spacing: 12
-                            Text { textFormat: Text.PlainText; Layout.preferredWidth: 200; text: grantRow.modelData.app; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                            Text { textFormat: Text.PlainText; Layout.preferredWidth: 200; text: root.appShown(grantRow.modelData.app); color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
                             Text {
                                 textFormat: Text.PlainText
                                 Layout.fillWidth: true
@@ -15623,7 +15660,7 @@ Item {
                             required property var modelData
                             Layout.fillWidth: true
                             spacing: 12
-                            Text { Layout.preferredWidth: 200; text: nftGrantRow.modelData.app; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
+                            Text { Layout.preferredWidth: 200; text: root.appShown(nftGrantRow.modelData.app); textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); elide: Text.ElideRight }
                             Text { Layout.fillWidth: true; text: Nft.capabilityTitle(nftGrantRow.modelData); textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14); wrapMode: Text.Wrap }
                             Action { label: "Remove"; onPressed: root.nftRevokeCapability(nftGrantRow.modelData.app, nftGrantRow.modelData.capability) }
                         }
@@ -17100,7 +17137,7 @@ Item {
                 y: Math.max(root.px(32), (inscribeSheet.height - implicitHeight) / 2)
                 Text {
                     Layout.fillWidth: true
-                    text: Logic.inscribeTitle(inscribeSheet.request)
+                    text: Logic.inscribeTitle(inscribeSheet.request, inscribeSheet.request !== null ? root.appShown(inscribeSheet.request.app) : "")
                     textFormat: Text.PlainText
                     color: root.ink
                     font.family: root.sans
@@ -17110,7 +17147,7 @@ Item {
                 }
                 Hint {
                     font.pixelSize: root.px(15)
-                    text: inscribeSheet.request === null ? "" : "Asked by the app “" + inscribeSheet.request.app + "”, as Basecamp names it. "
+                    text: inscribeSheet.request === null ? "" : "Asked by the app " + root.appWho(inscribeSheet.request.app) + ", as Basecamp names it. "
                         + root.appExpiresIn(inscribeSheet.request) + (root.inscribeRequests.length > 1 ? " " + (root.inscribeRequests.length - 1) + " more waiting." : "")
                 }
                 // Who publishes the app, checked against its LNS name by the Program Registry.
