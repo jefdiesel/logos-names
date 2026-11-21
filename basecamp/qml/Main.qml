@@ -7984,6 +7984,8 @@ Item {
     property var appRequests: []          // pending_requests: the oldest first
     property var appChosen: []            // the accounts ticked on the sheet
     property string appChosenFor: ""      // which request, in which state, those ticks are for (Logic.requestTickKey)
+    property bool appTicksTouched: false  // the person changed the ticks on this request's sheet
+    property int appTickSeverity: 0       // Logic.requestTickSeverity when the ticks were last set
     property bool appUnderstood: false    // an unverified program's warning was read
     property bool appSheetDetails: false  // the short sheet's Details open
     // The short sheet: what is approved in a few words, one line of who and which account, one
@@ -8143,10 +8145,19 @@ Item {
             // what the sheet knows about it: the publisher check or a program label coming back
             // turns "checking" into a warning or not (M-2).
             var key = Logic.requestTickKey(request)
-            if (appChosenFor !== key) {
+            // The same request, ticked by the person, and nothing new to warn about: their ticks
+            // stay (the publisher check flipping between "checking" and "unavailable" used to
+            // untick them under the cursor, so an Approve click missed).
+            var sameRequest = appChosenFor !== "" && appChosenFor.split("|")[0] === String(request.id)
+            var severity = Logic.requestTickSeverity(request, appPublisherFailed(request))
+            if (appChosenFor !== key && sameRequest && appTicksTouched && severity <= appTickSeverity) {
+                appChosenFor = key
+            } else if (appChosenFor !== key) {
                 if (appChosenFor !== "")
                     console.log("names_ui: request " + request.id + " sheet changed: " + key)
                 appChosenFor = key
+                appTicksTouched = false
+                appTickSeverity = severity
                 appUnderstood = false
                 appSheetDetails = false
                 appError = ""
@@ -8180,6 +8191,7 @@ Item {
     function chooseAppAccount(account) {
         if (appRequest === null)
             return
+        appTicksTouched = true
         if (appRequest.kind !== "connect") {
             appChosen = [account]
             return

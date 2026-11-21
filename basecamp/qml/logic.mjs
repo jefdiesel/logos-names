@@ -294,6 +294,16 @@ export function requestTickKey(request) {
     return [request.id, publisher, request.checking === true ? "checking" : "", warnings].join("|")
 }
 
+// How much the request sheet warns about: its warnings, plus one for a failed publisher check.
+// The ticks the person set are kept while the sheet's state flips ("checking" ↔ "unavailable" as
+// the Program Registry is polled) and reset only when this grows (M-2: a new warning unticks).
+export function requestTickSeverity(request, publisherFailed) {
+    if (!request)
+        return 0
+    var warnings = (request.sheet && request.sheet.warnings ? request.sheet.warnings.length : 0) + (request.warnings ? request.warnings.length : 0)
+    return warnings + (publisherFailed ? 1 : 0)
+}
+
 // ── The Logos Blockchain (chain_* in the names module) ─────────────────
 
 /// About how long `seconds` is, in words.

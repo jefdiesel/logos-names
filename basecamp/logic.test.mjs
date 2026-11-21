@@ -3,7 +3,7 @@
 import { atLeast, someAmount, entryShown, amountRead, amountProblem, amountDigits, AMOUNT_MAX, CHAIN_AMOUNT_MAX, jobProblem, tokenToProblem, tokenSendProves, tokenShown, feeEstimate, feePaid, accountTitle, accountsShown, publisherLine, durationWords, keyShown, chainToProblem, stakeLines, rewardsLine, grouped, addDigits, walletAssets, subDigits, walletGroups, stakeTable, activityLine, activityFor, agoShown, readNote, chainKeyTitle, chainKeySub, chainUsable, chainLaterNote, deedCheckLine } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 import { SETTLE_CONSENT, settleNotOffered } from "./qml/logic.mjs";
-import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
+import { cliOutdatedLine, replyKind, revealNext, revealLine, mergeCliStatus, requestTickKey, requestTickSeverity, normalizedReply, noWalletSaid, onNet, preTicked, sameNetAnswer, askAgainAfter, REVEAL_REFUSED_RETRY_MS } from "./qml/logic.mjs";
 import { bridgeReply, claimStage, claimAccountProblem, claimBridge, claimJobFor, runningClaimJob, claimPhases, claimFailure, claimErrorTitle, claimInput, otherDeployment } from "./qml/logic.mjs";
 import { publicAccounts, decimalShown, bridgeNetStatus, bridgeNetRows, bridgeNetShown, publicIdProblem, NET_03, NET_04, mergedAccounts } from "./qml/logic.mjs";
 
@@ -235,6 +235,9 @@ check("publisher checking", publisherLine({ status: "checking" }), { text: "Chec
   const warned = { id: "r1", publisher: { status: "verified" }, checking: false, sheet: { warnings: ["unverified"] } };
   check("tick key changes on status", [requestTickKey(checking) !== requestTickKey(fake), requestTickKey(fake) !== requestTickKey(warned), requestTickKey(fake) === requestTickKey({ ...fake })], [true, true, true]);
   check("tick key of nothing", requestTickKey(null), "");
+  check("tick severity: checking/unavailable alike, a warning or a failed publisher more",
+    [requestTickSeverity({ id: "r1", checking: true }, false), requestTickSeverity({ id: "r1", publisher: { status: "unavailable" } }, false), requestTickSeverity(warned, false), requestTickSeverity(fake, true), requestTickSeverity(null, false)],
+    [0, 0, 1, 1, 0]);
 }
 check("publisher copy", publisherLine({ status: "mismatch", publisher: "forumer" }).tone, "warn");
 check("publisher unknown name", publisherLine({ status: "no_such_name", publisher: "x" }).text, "Claims x, which isn't a registered name.");
