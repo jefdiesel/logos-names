@@ -43,6 +43,22 @@ what the person sees in every prompt.
 The Names app must be installed and open to answer requests. A request that
 nobody answers expires after 10 minutes.
 
+**Taking the person to Names and back.** After a call that leaves a request
+`pending`, bring the Names app forward with Basecamp's own navigation intent,
+`basecamp.apps.launch` (Basecamp 0.3.2 and later; the shell answers it, so no
+chooser appears). Declare it in your `metadata.json`, as an object:
+`"uses": [{ "intent": "basecamp.apps.launch" }]`, or the request fails
+`not_declared`. Then:
+
+```qml
+if (logos.request) logos.request("basecamp.apps.launch", { app: "names_ui" }, function(res) {})
+```
+
+When the person approves or rejects, Names shows your app again by the same
+intent, if your app is an installed Basecamp app (`ui_qml`) and no other
+request is waiting. A request made by a module, not an app, stays in Names.
+Keep polling `request_status`: coming back is navigation only, not the answer.
+
 **Zones.** The wallet can hold several LEZ zones (chains) and uses one at a
 time. Balances are those of the zone in use. A transfer or a call is asked for
 the zone in use at that moment and can be approved only there: the person sees

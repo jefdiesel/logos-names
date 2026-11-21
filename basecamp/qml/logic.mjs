@@ -1804,6 +1804,21 @@ export function installedEntry(list, name) {
     return found.length ? found[0] : null
 }
 
+/// The app to show again once the person has answered `request` (Approve or Reject): the app
+/// that asked, when it is an installed Basecamp app (`ui_qml`) other than this one; else "".
+/// A module (a backend, lez_bridge) has no screen to go back to, and a name Basecamp doesn't
+/// know would make it offer an install. `others`: how many other requests still wait; their
+/// sheet is the next thing to see, so the person stays here.
+export function returnApp(list, request, others) {
+    if (!request || others > 0 || !Array.isArray(list))
+        return ""
+    var app = String(request.app || "")
+    if (app === "" || app === "names_ui" || app === "host")
+        return ""
+    var entry = installedEntry(list, app)
+    return entry && entry.type === "ui_qml" ? app : ""
+}
+
 /// Where the shipped bridge files are: beside this app's view, `<installDir>/qml/bundled/`.
 /// "" when the app's own folder isn't known.
 export function bundledPath(list, file) {

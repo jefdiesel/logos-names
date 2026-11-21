@@ -1515,7 +1515,8 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   // 44 Timers in Main.qml at 0520887: none added (the box is checked once per change, never repeated).
   // +1 on names-nft: Collectibles' read, only while that page is open and in front, every 30 s (nft.test.mjs).
   // +1 on wallet-1121: deedRetry, one-shot, restarted only while the module answers a name NFT read as busy.
-  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 46);
+  // +1 on names-return: returnTimer, one-shot, started only after the person answers another app's request.
+  check("wallet-next: no new timer", (qml.match(/^\s*Timer \{/gm) || []).length, 47);
   check("address step: the box is always shown, nothing pre-filled", [/Field \{ id: sbCodeField; Layout\.fillWidth: true; size: 15; code: true;/.test(qml), /Send to " \+ root\.sbSaved/.test(qml), /\(used before\)/.test(qml)], [true, false, false]);
   check("address step: the button is the tick's", /Action \{ label: root\.sbAsking \? "Getting it ready…" : Logic\.ADDRESS_CONTINUE; strong: true; enabledNow: sbAddressStep\.a\.canContinue; onPressed: root\.sbContinue\(\) \}/.test(qml), true);
   check("address step: the plan refuses an unticked or other value, and says so", /if \(!sbTicked \|\| sbCheck\.key !== Logic\.addressBoxKey\(sbCodeInput\)\) \{\s*\n\s*sbError = /.test(qml), true);
@@ -2070,6 +2071,18 @@ check("the deed retry has a 20-try cap and shows the failure line", [
   /Logic\.deedCheckLine\(myName\.modelData\.name/.test(deedQml),
   /\(None, Some\(why\)\) if !snap\.updating/.test(readFileSync(new URL("../basecamp-module/rust-lib/src/lib.rs", import.meta.url), "utf8")),
 ], [true, true, true]);
+
+{
+  // Back to the app that asked, once its request is answered (basecamp.apps.launch).
+  const { returnApp } = await import("./qml/logic.mjs");
+  const list = [{ name: "names_ui", type: "ui_qml" }, { name: "vesting_ui", type: "ui_qml" }, { name: "vesting", type: "core" }, { name: "lez_bridge", type: "core" }];
+  check("returnApp: an installed Basecamp app that asked", returnApp(list, { app: "vesting_ui" }, 0), "vesting_ui");
+  check("returnApp: stays when another request waits", returnApp(list, { app: "vesting_ui" }, 1), "");
+  check("returnApp: a module, this app, the host, nobody, a name not installed: nowhere",
+    [returnApp(list, { app: "vesting" }, 0), returnApp(list, { app: "lez_bridge" }, 0), returnApp(list, { app: "names_ui" }, 0), returnApp(list, { app: "host" }, 0), returnApp(list, { app: "" }, 0), returnApp(list, { app: "chat_ui" }, 0)],
+    ["", "", "", "", "", ""]);
+  check("returnApp: the installed list unread, or no request: nowhere", [returnApp(null, { app: "vesting_ui" }, 0), returnApp(list, null, 0)], ["", ""]);
+}
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

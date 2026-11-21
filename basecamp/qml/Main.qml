@@ -8241,6 +8241,37 @@ Item {
         return "Send " + appSends(request) + " from " + from + " to " + (request.destination_kind === "name" ? request.destination : accountShort(request.destination))
     }
 
+    // ── Back to the app that asked ──
+    //
+    // Once the person answers another app's request here (Approve or Reject), Basecamp shows
+    // that app again, through the shell's own navigation (basecamp.apps.launch: no chooser,
+    // the app as it was). Only for an installed Basecamp app (Logic.returnApp), and not while
+    // another request waits. The short wait lets the answer show before the switch.
+    property string returnTo: ""
+    Timer {
+        id: returnTimer
+        interval: 700
+        onTriggered: {
+            var app = root.returnTo
+            root.returnTo = ""
+            if (app !== "" && root.bridgeReady && logos.request) {
+                console.log("names_ui: back to " + app)
+                logos.request("basecamp.apps.launch", { app: app }, function() {})
+            }
+        }
+    }
+    function returnAfterAnswer(request, others) {
+        if (!(bridgeReady && logos.request))
+            return
+        loadInstalled(function() {
+            var app = Logic.returnApp(installedList, request, others)
+            if (app === "")
+                return
+            returnTo = app
+            returnTimer.restart()
+        })
+    }
+
     function answerAppRequest(approve) {
         var request = appRequest
         if (request === null || appBusy)
@@ -8252,6 +8283,9 @@ Item {
         var args = approve ? [request.id, chosen.join(",")] : [request.id]
         // Asked for this app's own private claim or send-back: that screen goes on (no notice).
         var mine = privateRequestHere(request)
+        // Drawn inside this app's own screen (the bridge's claim): the person stays there.
+        var drawnHere = appInline
+        var others = appRequests.length - 1
         askLater(method, args, function(value) {
             appBusy = false
             if (mine !== "") {
@@ -8260,6 +8294,8 @@ Item {
                 loadAppGrants()
                 return
             }
+            if (!drawnHere)
+                returnAfterAnswer(request, others)
             if (approve && appIsToken(request))
                 say("Sending " + appSends(request) + " to " + request.destination + " for " + request.app + ". "
                     + (Logic.tokenSendProves(/^Private\//.test(chosen[0] || ""), request.destination) ? "It's proven on this computer first: 7-12 minutes." : "One block, about 30 seconds."), "waiting")
