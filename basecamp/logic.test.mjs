@@ -2170,7 +2170,39 @@ check("the deed retry has a 20-try cap and shows the failure line", [
     ["Sent for Vest", true, true]);
   check("History: a call that failed says why",
     ((l) => [l.title, l.sub])(activityLine({ kind: "app_call", chain: "lez", app: "vesting_ui", state: "failed", problem: "this call reads the network clock, which needs the names tool 0.18 or later; nothing was sent", at: 1 }, 2000, "", label)),
-    ["Couldn't send for Vest", "this call reads the network clock, which needs the names tool 0.18 or later; nothing was sent"]);
+    ["Couldn't send for Vest", "This call reads the network clock, which needs the names tool 0.18 or later; nothing was sent."]);
+}
+
+{
+  // LNS names for the accounts a request shows: confirmed (reverse) names only, never ".lez".
+  const { reverseShown, accountIdsIn, namedAccount, withAccountNames, callProblemShown, activityLine } = await import("./qml/logic.mjs");
+  const JEF = "Bawxwq9oWvP4n8L2TzK3RcY7Hd5Fs1gJm6aEkNq9mu7", JEF04 = "CCVd76TkQ2wXnL8pR4sY9bH3jF6mZ1cA7dE5gKpKnk", PDA = "Br87Hh5PNBmY15RirvPb22RUtyMjfWaC12ARTnobKpjU";
+  check("reverseShown: a name, its .lez dropped; nothing, a bad name or nothing at all: none",
+    [reverseShown({ name: "jefdiesel", display: "jefdiesel.lez" }), reverseShown({ name: "jef04.lez" }), reverseShown(null), reverseShown({ name: "Jef Diesel" }), reverseShown({ name: "x".repeat(33) }), reverseShown({ name: "a\u202Eb" })],
+    ["jefdiesel", "jef04", "", "", "", ""]);
+  check("accountIdsIn: each ID once, without its kind",
+    accountIdsIn(`["Public/${JEF}","Private/${JEF04}"] Reads ${PDA} and Public/${JEF} again; 2kgxMA…HeM2 is short`), [JEF, JEF04, PDA]);
+  const names = { [JEF]: "jefdiesel", [JEF04]: "jef04", [PDA]: "" };
+  check("namedAccount: name · short ID, whatever its kind; no name, nothing",
+    [namedAccount("Public/" + JEF, names), namedAccount(JEF04, names), namedAccount("Public/" + PDA, names), namedAccount("Public/Zzz", names), namedAccount("Public/" + JEF, null)],
+    ["jefdiesel · Bawxwq9o…9mu7", "jef04 · CCVd76Tk…pKnk".replace("pKnk", JEF04.slice(-4)), "", "", ""]);
+  check("withAccountNames: only accounts with a name are written by it",
+    withAccountNames(`Reads or writes 2kgxMA…HeM2's own account Public/${PDA}; pays Public/${JEF}.`, names),
+    `Reads or writes 2kgxMA…HeM2's own account Public/${PDA}; pays jefdiesel · Bawxwq9o…9mu7.`);
+
+  // A refused call in plain words; the raw text kept for Details.
+  const refusedRaw = "the names CLI failed: Error: refused: Program violated execution rules";
+  check("program refused → plain, raw under Details", callProblemShown(refusedRaw),
+    { plain: "The program refused it when the wallet tried it first: usually the account doesn't hold enough LEZ for the amount and the fee. Nothing was sent; no fee was paid.", raw: refusedRaw });
+  check("short of the fee reserve → plain",
+    callProblemShown(`the names CLI failed: Error: Public/${JEF} holds 107000; this takes 1111000, and about 5000 more is held for the fee while it runs`).plain,
+    "The account doesn't hold enough LEZ for this and the fee held while it runs. Nothing was sent; no fee was paid.");
+  check("another trial-run refusal → plain", callProblemShown("Error: refused: something else").plain, "The wallet's trial run of this call failed, so it wasn't sent. Nothing was sent; no fee was paid.");
+  check("already plain words stay, as a sentence; nothing → a line",
+    [callProblemShown("this call reads the network clock, which needs the names tool 0.18 or later; nothing was sent"), callProblemShown("")],
+    [{ plain: "This call reads the network clock, which needs the names tool 0.18 or later; nothing was sent.", raw: "" }, { plain: "It wasn't sent.", raw: "" }]);
+  check("History: a refused call in plain words",
+    activityLine({ kind: "app_call", app: "vesting_ui", state: "failed", problem: refusedRaw, at: 1 }, 2000, "", (a) => "Vest").sub.indexOf("The program refused it") === 0, true);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

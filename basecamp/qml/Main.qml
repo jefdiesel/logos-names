@@ -8134,7 +8134,7 @@ Item {
             return appForClaim ? "Into your account " + Logic.idShort(claimAccount) + " · the bridge pays the fee"
                 : "Signs with your account " + Logic.idShort(request.account || (appChosen[0] || "")) + " · another account pays the fee"
         if (request.kind === "connect")
-            return "Account " + appChosen.map(Logic.idShort).join(", ") + " · asked by " + root.appShown(request.app)
+            return "Account " + appChosen.map(function(a) { return Logic.namedAccount(a, root.accountNames) || Logic.idShort(a) }).join(", ") + " · asked by " + root.appShown(request.app)
         if (request.kind === "programs")
             return "So it can ask you to sign its claims · asked by " + root.appShown(request.app)
         if (request.kind === "secret")
@@ -8276,6 +8276,7 @@ Item {
             }
             if (request.kind === "transfer")
                 loadFee()
+            readRequestNames(request)
             if (done) done(appRequests)
         }, function(message) {
             console.log("names_ui: pending_requests:", message)
@@ -8359,7 +8360,7 @@ Item {
         if (!appIsToken(request))
             return ""
         var from = appChosen.length > 0 ? accountShort(appChosen[0]) : "the account you choose below"
-        return "Send " + appSends(request) + " from " + from + " to " + (request.destination_kind === "name" ? request.destination : accountShort(request.destination))
+        return "Send " + appSends(request) + " from " + from + " to " + (request.destination_kind === "name" ? request.destination : accountShown(request.destination))
     }
 
     // ── Back to the app that asked ──
@@ -8551,6 +8552,44 @@ Item {
     }
 
     /// An account as `Public/CCVd76Tk…sapKnk`: its kind in full, its ID shortened.
+    // ── LNS names for the accounts a request shows (Logic.reverseShown: confirmed only) ──
+    property var accountNames: ({})      // account ID → its confirmed LNS name, "" for none
+    property var accountNamesAsking: ({}) // account IDs whose name is being read
+    /// An account as a request sheet shows it: "jefdiesel · Bawxwq…9mu7", else Public/Bawxwq…9mu7.
+    function accountShown(account) {
+        return Logic.namedAccount(account, accountNames) || accountShort(account)
+    }
+    /// `text` with the accounts that have a confirmed name written by it (Logic.withAccountNames).
+    function withNames(text) {
+        return Logic.withAccountNames(text, accountNames)
+    }
+    /// Reads the names of the accounts in `request` (its choices, its account, the payee, the
+    /// accounts its effects and warnings mention) not read yet. A busy module is asked again.
+    function readRequestNames(request) {
+        if (request === null || request === undefined)
+            return
+        var text = JSON.stringify([(request.choices || []).map(function(c) { return c.account }), request.account || "", request.destination_kind === "account" ? request.destination : "", request.effects || [], request.warnings || []])
+        readAccountNames(Logic.accountIdsIn(text))
+    }
+    function readAccountNames(ids) {
+        ids.forEach(function(id) {
+            if (Object.prototype.hasOwnProperty.call(accountNames, id) || accountNamesAsking[id])
+                return
+            var asking = Object.assign({}, accountNamesAsking); asking[id] = true; accountNamesAsking = asking
+            askLater("reverse", [id], function(value) {
+                var known = Object.assign({}, accountNames); known[id] = Logic.reverseShown(value); accountNames = known
+                var left = Object.assign({}, accountNamesAsking); delete left[id]; accountNamesAsking = left
+            }, function(message) {
+                var left = Object.assign({}, accountNamesAsking); delete left[id]; accountNamesAsking = left
+                // Still being read on the module's own thread: the next read of the requests asks
+                // again. Any other answer: shown without a name.
+                if (!Logic.askAgainAfter(message, moduleBusy, moduleNoAnswer)) {
+                    var none = Object.assign({}, accountNames); none[id] = ""; accountNames = none
+                }
+            }, 20000)
+        })
+    }
+
     function accountShort(account) {
         var slash = String(account).indexOf("/")
         return slash < 0 ? shorten(String(account)) : account.substr(0, slash + 1) + shorten(account.substr(slash + 1))
@@ -9309,7 +9348,7 @@ Item {
                             border.width: 2
                             border.color: choiceRow.ticked ? root.brass : root.dim
                         }
-                        Text { textFormat: Text.PlainText; text: root.accountShort(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
+                        Text { textFormat: Text.PlainText; text: root.accountShown(choiceRow.modelData.account); color: root.ink; font.family: root.mono; font.pixelSize: root.px(16) }
                         Text { textFormat: Text.PlainText; text: choiceRow.modelData.label; color: root.dim; font.family: root.sans; font.pixelSize: root.px(15); elide: Text.ElideRight; Layout.fillWidth: true }
                         Text { textFormat: Text.PlainText; visible: !!choiceRow.modelData.granted; text: "Shared with this app"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(14) }
                     }
@@ -9520,7 +9559,7 @@ Item {
             Fact {
                 label: "To"
                 code: sheetBody.kind === "transfer" && sheetBody.request.destination_kind === "account"
-                value: sheetBody.kind !== "transfer" ? "" : sheetBody.request.destination_kind === "name" ? sheetBody.request.destination + " (a name)" : sheetBody.request.destination
+                value: sheetBody.kind !== "transfer" ? "" : sheetBody.request.destination_kind === "name" ? sheetBody.request.destination + " (a name)" : (Logic.namedAccount(sheetBody.request.destination, root.accountNames) || sheetBody.request.destination)
                 full: sheetBody.kind === "transfer" ? sheetBody.request.destination : ""
             }
             Fact {
@@ -9562,7 +9601,7 @@ Item {
                     required property string modelData
                     textFormat: Text.PlainText
                     color: root.ink
-                    text: "•  " + modelData
+                    text: "•  " + root.withNames(modelData)
                 }
             }
             Repeater {
@@ -17278,6 +17317,8 @@ Item {
                 Layout.fillWidth: true
                 spacing: 14
                 readonly property string who: root.appFailure !== null ? root.appShown(root.appFailure.request.app) : ""
+                readonly property var shown: Logic.callProblemShown(root.appFailure !== null ? root.appFailure.problem : "")
+                property bool details: false
                 Text {
                     Layout.fillWidth: true
                     text: "Couldn't send it for " + failureBody.who
@@ -17288,7 +17329,21 @@ Item {
                     font.weight: Font.DemiBold
                     wrapMode: Text.WordWrap
                 }
-                StatusLine { kind: "problem"; text: root.appFailure !== null ? Logic.bridgeText(root.appFailure.problem || "it wasn't sent", 600) : "" }
+                StatusLine { kind: "problem"; text: Logic.bridgeText(root.withNames(failureBody.shown.plain), 600) }
+                Link {
+                    visible: failureBody.shown.raw !== ""
+                    text: failureBody.details ? "Details ▾" : "Details ▸"
+                    color: root.dim
+                    font.pixelSize: root.px(15)
+                    onPressed: failureBody.details = !failureBody.details
+                }
+                Hint {
+                    visible: failureBody.details && failureBody.shown.raw !== ""
+                    textFormat: Text.PlainText
+                    font.family: root.mono
+                    font.pixelSize: root.px(14)
+                    text: Logic.bridgeText(root.withNames(failureBody.shown.raw), 600)
+                }
                 Hint {
                     visible: root.appFailure !== null && root.appFailure.told !== ""
                     textFormat: Text.PlainText

@@ -395,6 +395,70 @@ export function answerOutcome(outcome, approve, label) {
     return { settled: true, back: true, notice: "", tone: false }
 }
 
+// ── LNS names for accounts on a request sheet ──
+//
+// An account is shown by its LNS name only when the names module's `reverse` gives one: the
+// name the account published for itself, checked against that name's own record (so it can't
+// be spoofed). Never with ".lez", never a name that fails the name grammar.
+
+/// The name to show from a `reverse` answer (`{name, display}` or null), or "".
+export function reverseShown(value) {
+    var name = value && typeof value === "object" ? String(value.name || "") : ""
+    name = name.replace(/\.lez$/i, "")
+    return /^[a-z0-9-]{1,32}$/.test(name) ? name : ""
+}
+
+/// The account IDs (base58, 32-44 characters) in `text`, without their Public/ or Private/,
+/// each once.
+export function accountIdsIn(text) {
+    var out = []
+    var re = /(?:Public\/|Private\/)?([1-9A-HJ-NP-Za-km-z]{32,44})/g
+    var m
+    while ((m = re.exec(String(text || ""))) !== null)
+        if (out.indexOf(m[1]) < 0)
+            out.push(m[1])
+    return out
+}
+
+/// "jefdiesel · Bawxwq…9mu7" for an account (`Public/<id>`, `Private/<id>` or bare) whose name
+/// is in `names` ({id: name}, names from reverseShown), else "".
+export function namedAccount(account, names) {
+    var id = String(account || "").replace(/^(Public|Private)\//, "")
+    var name = names && Object.prototype.hasOwnProperty.call(names, id) ? String(names[id] || "") : ""
+    return name !== "" ? name + " · " + keyShown(id) : ""
+}
+
+/// `text` with each full account ID that has a name in `names` written "name · Bawxwq…9mu7"
+/// (its Public/ or Private/ dropped); every other ID as it was.
+export function withAccountNames(text, names) {
+    return String(text || "").replace(/(?:Public\/|Private\/)?([1-9A-HJ-NP-Za-km-z]{32,44})/g, function(whole, id) {
+        var shown = namedAccount(id, names)
+        return shown !== "" ? shown : whole
+    })
+}
+
+// ── Why an app's call wasn't sent, in plain words ──
+
+/// `problem` (the names CLI's or the wallet's own words, Names only) as the person reads it:
+/// {plain, raw}. `raw` is the text as it came, for a folded Details ("" when `plain` is it).
+/// A call the program refuses is refused by the wallet's own trial run (`names module send`
+/// simulates before sending), so nothing was sent and no fee was paid; an account short of its
+/// fee reserve is refused before sending too.
+export function callProblemShown(problem) {
+    var raw = String(problem || "").trim()
+    var tail = " Nothing was sent; no fee was paid."
+    if (/refused:\s*Program violated execution rules/i.test(raw))
+        return { plain: "The program refused it when the wallet tried it first: usually the account doesn't hold enough LEZ for the amount and the fee." + tail, raw: raw }
+    if (/Public\/[1-9A-HJ-NP-Za-km-z]{32,44} holds \d+;/.test(raw))
+        return { plain: "The account doesn't hold enough LEZ for this and the fee held while it runs." + tail, raw: raw }
+    if (/the chain's fees are too high right now/i.test(raw))
+        return { plain: "The network's fees are above what this wallet pays for one call right now; try again later." + tail, raw: raw }
+    var refused = /(?:^|:\s*)refused:\s*(.+)$/i.exec(raw)
+    if (refused)
+        return { plain: "The wallet's trial run of this call failed, so it wasn't sent." + tail, raw: raw }
+    return { plain: raw === "" ? "It wasn't sent." : sentenceOf(raw), raw: "" }
+}
+
 // Requests other than `answeredId` still waiting in a fresh read of pending_requests, or -1 when
 // the read failed (then the person stays in Names).
 export function othersWaiting(fresh, answeredId) {
@@ -689,7 +753,7 @@ export function activityLine(entry, now, account, labelOf) {
     case "bridge": title = "Bridge to LEZ"; sub = "from " + whoShown(e.from) + " into " + whoShown(e.to); break
     case "pay": title = "Paid " + (e.name || "a name"); sub = "on LEZ"; break
     case "app_call": title = (e.state === "failed" ? "Couldn't send for " : "Sent for ") + (e.app ? (typeof labelOf === "function" ? labelOf(e.app) : clean(e.app)) : "an app")
-        sub = e.state === "failed" ? bridgeText(e.problem || "it wasn't sent", 240) : "on LEZ, signed by " + whoShown(e.from) + (e.tx ? " · " + idShort(clean(e.tx)) : ""); sign = ""; break
+        sub = e.state === "failed" ? bridgeText(callProblemShown(e.problem).plain, 240) : "on LEZ, signed by " + whoShown(e.from) + (e.tx ? " · " + idShort(clean(e.tx)) : ""); sign = ""; break
     case "resign": title = "Signed again for " + (e.app ? (typeof labelOf === "function" ? labelOf(e.app) : clean(e.app)) : "an app"); sub = "on LEZ 0.4, without asking: only the payer's nonce had moved (payer nonce " + clean(e.payer_nonce) + ", re-sign " + clean(e.resigns) + " of 3)"; sign = ""; break
     case "pay_account": title = "Paid " + whoShown(e.to); sub = e["private"] ? "on LEZ, from your private account" : "on LEZ, from your public account"; break
     case "shield": title = "Moved to private"; sub = "on LEZ, from your public account"; sign = ""; break
