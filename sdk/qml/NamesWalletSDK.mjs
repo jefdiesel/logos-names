@@ -1,10 +1,13 @@
-// The Names Wallet SDK: the connector a Basecamp ui_qml app copies in to use the person's Names
-// Wallet (the `names` module's Wallet Provider SDK, docs/wallet/PROVIDER-SDK.md).
+// The Names Wallet SDK: the connector a Basecamp ui_qml app copies in to use the person's
+// wallet: Names Wallet, or any wallet that implements this SDK (docs/wallet/PROVIDER-SDK.md,
+// "Implementing the SDK in another wallet"). The app never names a wallet: `getWallet` finds
+// the one it uses among the installed packages, and every call goes there.
 //
-// Copy this file and NamesWallet.qml (the small QML side: Basecamp's bridge and one timer per
-// wait) into your app's qml/ folder, unchanged, as the design kit is copied. Then:
+// Copy this file and NamesWallet.qml (the small QML side: Basecamp's bridge, one timer per
+// wait, the remembered choice) into your app's qml/ folder, unchanged, as the design kit is
+// copied. Then:
 //
-//     NamesWallet { id: names; bridge: typeof logos !== "undefined" ? logos : null }
+//     NamesWallet { id: names; app: "my_app_ui"; bridge: typeof logos !== "undefined" ? logos : null }
 //     names.check({}, function(w) { ... w.state, w.accounts ... })
 //     names.connect("Why your app asks", {}, { done: function(request) { ... } })
 //     names.proposeCall(program, accountsJson, instructionHex, summary, { done: ..., failed: ... })
@@ -16,15 +19,26 @@
 // checker refuses a QML number for an integer parameter.
 
 export const VERSION = "1.0.0"
+/// The SDK's calls and reply shapes, as a wallet declares it implements them
+/// (`get_config().wallet_sdk.version`). A wallet speaking the same major version works.
+export const SDK_NAME = "names-wallet"
+export const SDK_VERSION = "1.0"
+/// The wallet used when it is installed and nothing else is chosen; also the one assumed when
+/// Basecamp's package list can't be read. Names 0.18 predates the declaration.
+export const DEFAULT_WALLET = { module: "names", app: "names_ui", display_name: "Names" }
 
-/// Where Names Wallet stands for this app (`wallet.state`):
-/// checking: not known yet · missing: Names isn't installed or open · otherZone: Names is on
-/// another network than the app's · disconnected: no access yet · asking: a connect request
-/// waits in Names · connected: the app was given accounts.
-export const STATES = ["checking", "missing", "otherZone", "disconnected", "asking", "connected"]
+/// Where the wallet stands for this app (`wallet.state`):
+/// checking: not known yet · none: no wallet installed · choose: several are, and the person
+/// hasn't picked one for this app (`wallets`, then `chooseWallet`) · missing: the wallet is
+/// installed but not running (or there is no Basecamp bridge) · otherZone: it is on another
+/// network than the app's · disconnected: no access yet · asking: a connect request waits in
+/// the wallet · connected: the app was given accounts.
+export const STATES = ["checking", "none", "choose", "missing", "otherZone", "disconnected", "asking", "connected"]
 
 /// The shared plain words. An app may show its own instead; these are the defaults.
 export const WORDS = {
+    none: "No wallet installed: install Names from Basecamp's app list.",
+    choose: "More than one wallet is installed. Choose the one this app uses.",
     missing: "Names Wallet isn't installed, or isn't open. Install Names from Basecamp's app list, open it once, then come back here.",
     otherZone: "Names Wallet is on another network. Switch it in Names (Settings, Network), then come back.",
     busy: "Names Wallet is busy.",
@@ -59,6 +73,59 @@ export function textArgs(args) {
         if (typeof a === "number" || typeof a === "boolean") return String(a)
         return JSON.stringify(a)
     })
+}
+
+/// Basecamp's installed packages (package_manager `getInstalledPackages`), out of whatever the
+/// host wrapped them in (JSON text, perhaps twice; `{success, value}`), or null when the answer
+/// isn't a list.
+export function installedRows(raw) {
+    var r = raw
+    for (var depth = 0; depth < 4; depth++) {
+        if (typeof r === "string") {
+            try { r = JSON.parse(r) } catch (e) { return null }
+        } else if (isObject(r) && !Array.isArray(r) && "value" in r) {
+            r = r.value
+        } else break
+    }
+    return Array.isArray(r) ? r : null
+}
+
+function rowName(row) { return String((row && (row.moduleName || row.name)) || "") }
+function rowLabel(row) {
+    var t = row ? (typeof row.displayName === "string" ? row.displayName : typeof row.display_name === "string" ? row.display_name : "") : ""
+    t = String(t).replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim()
+    return t.length > 40 ? t.substr(0, 39) + "…" : t
+}
+
+/// The wallets among the installed packages: core modules whose metadata.json says
+/// `"category": "wallet"`, and Names (`names`) itself. `[{module, display_name, app}]`, Names
+/// first; `app` is known for Names only until the wallet's `get_config` says it.
+export function walletRows(rows) {
+    var out = []
+    ;(rows || []).forEach(function(row) {
+        var name = rowName(row)
+        if (!name || (row.type && row.type !== "core")) return
+        if (name !== DEFAULT_WALLET.module && String(row.category || "").toLowerCase() !== "wallet") return
+        if (out.some(function(w) { return w.module === name })) return
+        var isNames = name === DEFAULT_WALLET.module
+        out.push({ module: name, display_name: rowLabel(row) || (isNames ? DEFAULT_WALLET.display_name : name), app: isNames ? DEFAULT_WALLET.app : "" })
+    })
+    out.sort(function(a, b) { return (a.module === DEFAULT_WALLET.module ? 0 : 1) - (b.module === DEFAULT_WALLET.module ? 0 : 1) })
+    return out
+}
+
+/// What a wallet's `get_config` says of the SDK: `{version, app}`, or null when it doesn't
+/// implement it. Names 0.18 (before the declaration) counts as SDK 1.0.
+export function declared(module, config) {
+    var d = config && isObject(config.wallet_sdk) ? config.wallet_sdk : null
+    if (d && d.name === SDK_NAME && d.version) return { version: String(d.version), app: d.app ? String(d.app) : "" }
+    if (module === DEFAULT_WALLET.module && config && Array.isArray(config.features)) return { version: "1.0", app: DEFAULT_WALLET.app }
+    return null
+}
+
+/// Whether a wallet's SDK version works with this file: the same major version.
+export function speaks(version) {
+    return String(version || "").split(".")[0] === SDK_VERSION.split(".")[0]
 }
 
 /// One answer of the names module as `{ok, value}` or `{ok: false, error, ...}`:
@@ -133,16 +200,19 @@ export function nameRecord(value) {
 }
 
 /// The SDK for one app. `host` gives what only QML has (NamesWallet.qml makes it):
-///   call(method, args, callback(raw), timeoutMs) → false when there is no Basecamp bridge;
-///   later(f, ms) runs f once after ms (one timer each); open() brings Names forward;
-///   changed(wallet) after wallet.state, .accounts, .lastBalances, .features or .config change.
+///   call(module, method, args, callback(raw), timeoutMs) → false when there is no Basecamp bridge;
+///   later(f, ms) runs f once after ms (one timer each); open(app) brings that app forward;
+///   recall(key) → text and remember(key, text): this app's own memory (the chosen wallet);
+///   changed(wallet) after wallet.state, .current, .wallets, .accounts, .lastBalances, .features
+///   or .config change.
 export function create(host) {
     var h = host || {}
     var wallet = {
         version: VERSION,
         state: "checking", problem: "", config: null, features: [], accounts: [], lastBalances: [],
-        chain: ""
+        chain: "", current: null, wallets: []
     }
+    var choosing = []
     function changed() { if (h.changed) h.changed(wallet) }
     function setState(state, problem) {
         wallet.state = state
@@ -151,40 +221,138 @@ export function create(host) {
     }
     function later(f, ms) { if (h.later) h.later(f, ms); else f() }
 
-    /// One call of the names module. `done(value)` on success; `failed(r)` otherwise, with
-    /// `r.error` in plain words and `r.busy`, `r.missing`, `r.unclear` or `r.uncertain` saying
-    /// which. Busy is asked again (nothing happened); an unclear answer only for READS.
+    // ── Which wallet ───────────────────────────────────────────────────────────
+
+    /// The installed wallets: `done([{module, display_name, sdk_version, app}])`, each asked
+    /// what it implements (`get_config().wallet_sdk`); `sdk_version` is null for one that
+    /// didn't answer (installed, not running) or doesn't implement the SDK. When Basecamp's
+    /// package list can't be read, Names is assumed installed.
+    wallet.listWallets = function(done) {
+        installed(function(list) {
+            var left = list.length
+            if (!left) { done([]); return }
+            list.forEach(function(w) {
+                wallet.call("get_config", [], function(config) {
+                    var d = declared(w.module, config)
+                    w.sdk_version = d ? d.version : null
+                    if (d && d.app) w.app = d.app
+                    if (--left === 0) done(list)
+                }, function() {
+                    w.sdk_version = null
+                    if (--left === 0) done(list)
+                }, { module: w.module, quiet: true })
+            })
+        })
+    }
+
+    function installed(done) {
+        var asked = h.call ? h.call("package_manager", "getInstalledPackages", [], function(raw) {
+            var rows = installedRows(raw)
+            done(rows === null ? [copy(DEFAULT_WALLET)] : walletRows(rows))
+        }, 15000) : false
+        if (asked === false) done([copy(DEFAULT_WALLET)])
+    }
+
+    function copy(w) { return { module: w.module, display_name: w.display_name, app: w.app, sdk_version: w.sdk_version === undefined ? null : w.sdk_version } }
+
+    /// The wallet this app uses: `done(wallet)` (`{module, display_name, app, sdk_version}`), or
+    /// `done(null)` with state `none` (no wallet installed). With several and none chosen for
+    /// this app yet, the state is `choose` (`wallets` lists them) and `done` runs once the person
+    /// picks one (`chooseWallet`). One installed:
+    /// it. Several: the one chosen for this app before (remembered), else ask.
+    wallet.getWallet = function(done) {
+        var end = done || function() {}
+        if (wallet.current) { end(wallet.current); return }
+        installed(function(list) {
+            wallet.wallets = list
+            if (!list.length) { setState("none", WORDS.none); end(null); return }
+            var kept = h.recall ? String(h.recall("wallet") || "") : ""
+            var pick = list.length === 1 ? list[0] : list.filter(function(w) { return w.module === kept })[0]
+            if (pick) { use(pick); end(pick); return }
+            choosing.push(end)
+            setState("choose", WORDS.choose)
+        })
+    }
+
+    function use(w) {
+        wallet.current = w
+        changed()
+    }
+
+    /// The person picked `module` (one of `wallet.wallets`) for this app: remembered, and the
+    /// waiting `getWallet`/`check` go on with it.
+    wallet.chooseWallet = function(module) {
+        var w = (wallet.wallets || []).filter(function(x) { return x.module === module })[0]
+        if (!w) return false
+        if (h.remember) h.remember("wallet", w.module)
+        use(w)
+        setState("checking")
+        var waiting = choosing
+        choosing = []
+        waiting.forEach(function(f) { f(w) })
+        return true
+    }
+
+    /// Forget the choice: the next `check` finds the wallet again (and asks when there are
+    /// several).
+    wallet.forgetWallet = function() {
+        if (h.remember) h.remember("wallet", "")
+        wallet.current = null
+        wallet.accounts = []
+        setState("checking")
+    }
+
+    /// One call of the wallet this app uses. `done(value)` on success; `failed(r)` otherwise,
+    /// with `r.error` in plain words and `r.busy`, `r.missing`, `r.unclear`, `r.uncertain` or
+    /// `r.none` saying which. Busy is asked again (nothing happened); an unclear answer only for
+    /// READS.
     wallet.call = function(method, args, done, failed, options) {
         var o = options || {}
         var no = failed || function() {}
+        if (!o.module && !wallet.current) {
+            wallet.getWallet(function(w) {
+                if (w) wallet.call(method, args, done, failed, o)
+                else if (wallet.state === "none") no({ ok: false, none: true, error: WORDS.none })
+            })
+            return
+        }
+        var module = o.module || wallet.current.module
         var tries = o.tries || 0
-        var asked = h.call ? h.call(method, textArgs(args), function(raw) {
+        var asked = h.call ? h.call(module, method, textArgs(args), function(raw) {
             var r = reply(raw)
             if (r.ok) { if (done) done(r.value); return }
             var read = READS.indexOf(method) >= 0
             if ((r.busy || (r.unclear && read)) && tries < RETRIES) {
-                later(function() { wallet.call(method, args, done, failed, { tries: tries + 1, timeout: o.timeout }) }, RETRY_MS * (tries + 1))
+                later(function() { wallet.call(method, args, done, failed, { tries: tries + 1, timeout: o.timeout, module: o.module, quiet: o.quiet }) }, RETRY_MS * (tries + 1))
                 return
             }
-            if (r.missing) setState("missing", WORDS.missing)
+            if (r.missing && !o.quiet) setState("missing", WORDS.missing)
             if (r.unclear && !read) { r.uncertain = true; r.error = WORDS.uncertain }
             no(r)
         }, o.timeout || 30000) : false
-        if (asked === false) { setState("missing", WORDS.missing); no({ ok: false, missing: true, error: WORDS.noBridge }) }
+        if (asked === false) { if (!o.quiet) setState("missing", WORDS.missing); no({ ok: false, missing: true, error: WORDS.noBridge }) }
     }
 
     /// Whether this Names build has `feature` (from `get_config`, read by `check`).
     wallet.has = function(feature) { return (wallet.features || []).indexOf(feature) >= 0 }
 
-    /// Where Names Wallet stands: its config and features, the zone (`options.chain`: the
-    /// chain's channel, 64 hex, the app is built for), and the accounts given. `done(wallet)`.
+    /// Where the wallet stands: which one (`getWallet`), its config and features, the zone
+    /// (`options.chain`: the chain's channel, 64 hex, the app is built for), and the accounts
+    /// given. `done(wallet)`; with several wallets and none chosen yet, after the person chooses.
     wallet.check = function(options, done) {
         var o = options || {}
         if (o.chain !== undefined) wallet.chain = String(o.chain || "")
         var end = done || function() {}
+        if (!wallet.current) {
+            wallet.getWallet(function(w) { if (w) wallet.check({}, end); else if (wallet.state === "none") end(wallet) })
+            return
+        }
         wallet.call("get_config", [], function(config) {
             wallet.config = config
             wallet.features = (config && config.features) || []
+            var d = declared(wallet.current.module, config)
+            wallet.current.sdk_version = d ? d.version : null
+            if (d && d.app) wallet.current.app = d.app
             if (!zoneMatches(config, wallet.chain)) { setState("otherZone", WORDS.otherZone); end(wallet); return }
             wallet.call("granted_accounts", [], function(g) {
                 wallet.accounts = (g && g.connected && g.accounts) || []
@@ -206,21 +374,24 @@ export function create(host) {
         }, failed)
     }
 
-    /// Bring the Names app forward (Basecamp's `basecamp.apps.launch`; declare it in
-    /// metadata.json `uses`). Names shows the app again once the person answers.
-    wallet.open = function() { if (h.open) h.open() }
+    /// Bring the wallet's app forward (Basecamp's `basecamp.apps.launch`; declare it in
+    /// metadata.json `uses`). The wallet shows your app again once the person answers.
+    wallet.open = function() { if (h.open && wallet.current && wallet.current.app) h.open(wallet.current.app) }
 
-    /// Read `request` (its id, or the request) every POLL_MS until it is no longer open.
+    /// Read `request` (its id, or the request) every POLL_MS until it is no longer open
+    /// (options.status: another method to read it with, options.cancel: to withdraw it).
     /// handlers: update(request) each read while open, done(request) at the end (approved,
     /// done, rejected, expired, cancelled or failed: see requestLine), failed(r) when Names
     /// refuses to say. Returns `{stop(), withdraw(done, failed)}`.
-    wallet.watch = function(request, handlers) {
+    wallet.watch = function(request, handlers, options) {
         var hs = handlers || {}
+        var o = options || {}
+        var statusMethod = o.status || "request_status"
         var id = isObject(request) ? request.request : String(request || "")
         var watcher = { stopped: false, request: isObject(request) ? request : { request: id, state: "pending" } }
         function poll() {
             if (watcher.stopped) return
-            wallet.call("request_status", [id], function(v) {
+            wallet.call(statusMethod, [id], function(v) {
                 if (watcher.stopped) return
                 watcher.request = v
                 if (requestOpen(v)) { if (hs.update) hs.update(v); later(poll, hs.every || POLL_MS); return }
@@ -233,14 +404,15 @@ export function create(host) {
             })
         }
         watcher.stop = function() { watcher.stopped = true }
-        watcher.withdraw = function(done, failed) { wallet.withdraw(id, done, failed) }
+        watcher.withdraw = function(done, failed) { wallet.withdraw(id, done, failed, o.cancel) }
         later(poll, hs.every || POLL_MS)
         return watcher
     }
 
-    /// Withdraw a request while it is pending (`cancel_request`). The watch then ends `cancelled`.
-    wallet.withdraw = function(requestId, done, failed) {
-        wallet.call("cancel_request", [isObject(requestId) ? requestId.request : requestId], done, failed)
+    /// Withdraw a request while it is pending (`cancel_request`, or `cancelMethod`). The watch
+    /// then ends `cancelled`.
+    wallet.withdraw = function(requestId, done, failed, cancelMethod) {
+        wallet.call(cancelMethod || "cancel_request", [isObject(requestId) ? requestId.request : requestId], done, failed)
     }
 
     /// Connect: ask for access (`reason`, your words, up to 280 characters), take the person to
@@ -282,15 +454,17 @@ export function create(host) {
         }, failed)
     }
 
-    /// Any propose_* call that answers a request: sends it, takes the person to Names
+    /// Any propose_* call that answers a request: sends it, takes the person to the wallet
     /// (options.open, default true) and watches it. handlers: sent(request) once it waits in
-    /// Names, update(request), done(request) (see requestLine for its state), failed(r).
-    /// Returns nothing; `sent` gets the request and the watcher (`{stop, withdraw}`).
+    /// the wallet, update(request), done(request) (see requestLine for its state), failed(r).
+    /// options.status / options.cancel: the methods that read and withdraw it, for a kind with
+    /// its own (NFT requests: `nft_request_status`, `cancel_nft_request`). Returns nothing;
+    /// `sent` gets the request and the watcher (`{stop, withdraw}`).
     wallet.propose = function(method, args, handlers, options) {
         var o = options || {}
         var hs = handlers || {}
         wallet.call(method, args, function(v) {
-            var watcher = wallet.watch(v, hs)
+            var watcher = wallet.watch(v, hs, o)
             if (hs.sent) hs.sent(v, watcher)
             if (o.open !== false) wallet.open()
         }, function(r) { if (hs.failed) hs.failed(r) })

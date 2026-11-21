@@ -12,28 +12,42 @@ const CHAIN = "2d".repeat(32);
 const CONFIG = { zone: { id: "home", channel: CHAIN, home: true }, features: ["call_reads_clock", "request_access_with"] };
 const GRANTED = { connected: true, accounts: [{ account: "Public/A1", account_kind: "public" }] };
 
-/// A stand-in host: `answers[method]` is a reply text, a function(args, n) giving one, or a list
-/// used in turn (the last repeats). Timers run when `tick()` is called; calls are recorded.
+const NAMES_ROW = { name: "names", moduleName: "names", type: "core", category: "identity", displayName: "Names", version: "0.18.0" };
+
+/// A stand-in host: `answers[method]` is a reply text, a function(args, n, module) giving one,
+/// or a list used in turn (the last repeats). Basecamp's package list is `options.installed`
+/// (default: Names only), or `options.packages` (a raw reply). Timers run when `tick()` is
+/// called; the wallet's calls are recorded in `calls` ([method, args]), every call in `all`.
 function harness(answers, options) {
   const o = options || {};
-  const calls = [], timers = [], opened = [], changes = [];
+  const calls = [], all = [], timers = [], opened = [], changes = [], kept = {};
   const counts = {};
   const host = {
-    call(method, args, callback) {
+    call(module, method, args, callback) {
       if (o.noBridge) return false;
+      all.push([module, method, args]);
+      if (module === "package_manager") {
+        const reply = o.packages !== undefined ? o.packages : JSON.stringify(o.installed || [NAMES_ROW]);
+        queueMicrotask(() => callback(reply));
+        return true;
+      }
       calls.push([method, args]);
+      if (o.byModule) { const r = o.byModule(module, method, args); queueMicrotask(() => callback(r)); return true; }
       counts[method] = (counts[method] || 0) + 1;
       let a = answers[method];
       if (Array.isArray(a)) a = a[Math.min(counts[method] - 1, a.length - 1)];
-      if (typeof a === "function") a = a(args, counts[method]);
+      if (typeof a === "function") a = a(args, counts[method], module);
       if (a === undefined) a = no("not in this test");
       queueMicrotask(() => callback(a));
       return true;
     },
     later(f, ms) { timers.push({ f, ms }); },
-    open() { opened.push(true); },
+    open(app) { opened.push(app); },
+    recall(key) { return kept[key] || ""; },
+    remember(key, value) { kept[key] = value; },
     changed(w) { changes.push(w.state); },
   };
+  if (o.kept) Object.assign(kept, o.kept);
   const wallet = SDK.create(host);
   const settle = () => new Promise((r) => setTimeout(r, 0));
   async function tick(n = 1) {
@@ -44,7 +58,7 @@ function harness(answers, options) {
       await settle();
     }
   }
-  return { wallet, calls, timers, opened, changes, tick, settle };
+  return { wallet, calls, all, timers, opened, changes, kept, tick, settle };
 }
 
 test("VERSION is semver text", () => assert.match(SDK.VERSION, /^\d+\.\d+\.\d+$/));
@@ -287,6 +301,119 @@ test("balances joined to the accounts", async () => {
     [{ account: "Public/A1", account_kind: "public", balance: "12" }, { account: "Private/B", account_kind: "private", balance: "0" }]);
 });
 
+// ── Which wallet ────────────────────────────────────────────────────────────────────
+const X_ROW = { name: "xwallet", type: "core", category: "wallet", displayName: "X Wallet", version: "1.2.0" };
+const X_CONFIG = { ...CONFIG, wallet_sdk: { name: "names-wallet", version: "1.0", app: "xwallet_ui" } };
+
+test("only Names installed: it is the wallet, every call goes to it, Names is opened", async () => {
+  const h = harness({ get_config: ok(CONFIG), granted_accounts: ok(GRANTED), request_access: ok({ request: "c1", state: "pending" }), request_status: ok({ request: "c1", state: "pending" }) });
+  let w = null;
+  h.wallet.check({}, (x) => (w = x));
+  await h.tick();
+  assert.equal(w.current.module, "names");
+  assert.equal(w.current.sdk_version, "1.0", "Names 0.18, before the declaration, counts as 1.0");
+  assert.ok(h.all.filter(([m]) => m !== "package_manager").every(([m]) => m === "names"));
+  h.wallet.connect("why", {}, {});
+  await h.settle();
+  assert.deepEqual(h.opened, ["names_ui"]);
+});
+
+test("no wallet installed: the plain state, and calls say so", async () => {
+  const h = harness({}, { installed: [{ name: "vesting", type: "core", category: "finance" }, { name: "names_ui", type: "ui_qml" }] });
+  let w = null, failed = null;
+  h.wallet.check({}, (x) => (w = x));
+  await h.settle();
+  assert.equal(w.state, "none");
+  assert.equal(w.problem, "No wallet installed: install Names from Basecamp's app list.");
+  h.wallet.call("granted_accounts", [], () => {}, (r) => (failed = r));
+  await h.settle();
+  assert.equal(failed.none, true);
+  assert.equal(h.calls.length, 0, "nothing was sent to any module");
+});
+
+test("Basecamp's package list unreadable: Names is assumed", async () => {
+  for (const packages of ["", "not json", JSON.stringify({ error: "Call refused" })]) {
+    const h = harness({ get_config: ok(CONFIG), granted_accounts: ok(GRANTED) }, { packages });
+    let w = null;
+    h.wallet.check({}, (x) => (w = x));
+    await h.tick();
+    assert.equal(w.current.module, "names", JSON.stringify(packages));
+  }
+});
+
+test("several wallets: the person chooses once, it is remembered, and calls go there", async () => {
+  const byModule = (module, method) => method === "get_config" ? ok(module === "xwallet" ? X_CONFIG : CONFIG) : ok(GRANTED);
+  const h = harness({}, { installed: [X_ROW, NAMES_ROW], byModule });
+  let w = null;
+  h.wallet.check({}, (x) => (w = x));
+  await h.settle();
+  assert.equal(h.wallet.state, "choose");
+  assert.equal(h.wallet.problem, SDK.WORDS.choose);
+  assert.deepEqual(h.wallet.wallets.map((x) => [x.module, x.display_name]), [["names", "Names"], ["xwallet", "X Wallet"]], "Names first");
+  assert.equal(w, null, "check waits for the choice");
+  assert.equal(h.wallet.chooseWallet("nothing"), false);
+  assert.equal(h.wallet.chooseWallet("xwallet"), true);
+  await h.tick();
+  assert.equal(w.state, "connected");
+  assert.equal(h.kept.wallet, "xwallet", "remembered for this app");
+  assert.ok(h.all.filter(([m]) => m !== "package_manager").every(([m]) => m === "xwallet"));
+  h.wallet.open();
+  assert.deepEqual(h.opened, ["xwallet_ui"], "the app its get_config names");
+  // Next time: no question.
+  const again = harness({}, { installed: [X_ROW, NAMES_ROW], byModule, kept: { wallet: "xwallet" } });
+  let w2 = null;
+  again.wallet.check({}, (x) => (w2 = x));
+  await again.tick();
+  assert.equal(w2.current.module, "xwallet");
+  assert.equal(again.changes.includes("choose"), false);
+  // Forgotten: asked again.
+  again.wallet.forgetWallet();
+  again.wallet.check({}, () => {});
+  await again.settle();
+  assert.equal(again.wallet.state, "choose");
+});
+
+test("a remembered wallet since removed is not used: one left is used, several are asked again", async () => {
+  const h = harness({ get_config: ok(CONFIG), granted_accounts: ok(GRANTED) }, { kept: { wallet: "gone" } });
+  let w = null;
+  h.wallet.check({}, (x) => (w = x));
+  await h.tick();
+  assert.equal(w.current.module, "names");
+});
+
+test("listWallets: each with its SDK version, null for one that doesn't answer or implement it", async () => {
+  const Y_ROW = { name: "ywallet", type: "core", category: "wallet", display_name: "Y" };
+  const Z_ROW = { name: "zmod", type: "core", category: "Wallet", displayName: "Z" };
+  const byModule = (module) => module === "xwallet" ? ok(X_CONFIG) : module === "names" ? ok(CONFIG) : module === "zmod" ? ok({ zone: null }) : "Module not connected: ywallet";
+  const h = harness({}, { installed: [Y_ROW, X_ROW, NAMES_ROW, Z_ROW, { name: "names_ui", type: "ui_qml", category: "wallet" }], byModule });
+  let list = null;
+  h.wallet.listWallets((x) => (list = x));
+  await h.tick(2);
+  assert.deepEqual(list.map((w) => [w.module, w.display_name, w.sdk_version]), [["names", "Names", "1.0"], ["ywallet", "Y", null], ["xwallet", "X Wallet", "1.0"], ["zmod", "Z", null]]);
+  assert.equal(list.find((w) => w.module === "xwallet").app, "xwallet_ui");
+  assert.equal(h.wallet.state, "checking", "a wallet that isn't running doesn't make the app's state 'missing'");
+});
+
+test("walletRows and speaks", () => {
+  assert.deepEqual(SDK.walletRows([{ name: "names_ui", type: "ui_qml" }, { name: "chat", type: "core", category: "social" }, NAMES_ROW, NAMES_ROW]).map((w) => w.module), ["names"]);
+  assert.equal(SDK.walletRows([{ name: "w", type: "core", category: "wallet", displayName: "a\u202eb" }])[0].display_name, "ab");
+  assert.deepEqual([SDK.speaks("1.0"), SDK.speaks("1.7"), SDK.speaks("2.0"), SDK.speaks(null)], [true, true, false, false]);
+  assert.equal(SDK.declared("other", CONFIG), null, "only Names counts without the declaration");
+});
+
+test("NFT requests are watched and withdrawn with their own methods", async () => {
+  const h = harness({ propose_nft_transfer: ok({ request: "n1", kind: "nft_transfer", state: "pending" }), nft_request_status: ok({ request: "n1", state: "done", tx: "aa" }), cancel_nft_request: ok({ state: "cancelled" }) });
+  let done = null, watch = null;
+  h.wallet.propose("propose_nft_transfer", ["P", "Public/A", "alice", "s"], { sent: (v, w) => (watch = w), done: (v) => (done = v) }, { status: "nft_request_status", cancel: "cancel_nft_request" });
+  await h.tick(2);
+  assert.equal(done.tx, "aa");
+  assert.ok(h.calls.some(([m]) => m === "nft_request_status"));
+  assert.ok(!h.calls.some(([m]) => m === "request_status"));
+  watch.withdraw();
+  await h.settle();
+  assert.equal(h.calls[h.calls.length - 1][0], "cancel_nft_request");
+});
+
 // ── LNS ─────────────────────────────────────────────────────────────────────────────
 const RECORD = { name: "alice", display: "alice.lez", owner_tag: "aa", account: "FLBC4VrQ12UDpbG2ArnRgcwrZTz5cabKbT9oY1M7BE2Z", npk: null, vpk: null, texts: {}, forward: null, lapsed: false, deposit: "1000000" };
 
@@ -360,7 +487,8 @@ test("no reserved word after a dot (some Qt builds refuse x.public)", () => {
 });
 
 test("about no one app: no app's own words in the SDK", () => {
-  assert.equal(/vest|faucet|testimonial|bridge test network|schedule/i.test(source.replace(/^\/\/.*$/gm, "")), false);
+  assert.equal(/vest|faucet|testimonial|bridge test network|schedule/i.test(source.replace(/^\s*\/\/.*$/gm, "")), false);
+  assert.equal(/"names"/.test(qml), false, "the QML side names no wallet");
 });
 
 test("no data field shadows a call", () => {
@@ -371,7 +499,7 @@ test("no data field shadows a call", () => {
 });
 
 test("the QML side forwards every call the SDK has", () => {
-  for (const name of ["call", "has", "check", "balances", "open", "connect", "disconnect", "watch", "withdraw", "propose", "proposeCall", "proposeTransfer", "resolve", "reverse"])
+  for (const name of ["listWallets", "getWallet", "chooseWallet", "forgetWallet", "call", "has", "check", "balances", "open", "connect", "disconnect", "watch", "withdraw", "propose", "proposeCall", "proposeTransfer", "resolve", "reverse"])
     assert.match(qml, new RegExp("function " + name + "\\("), name);
   assert.match(qml, /basecamp\.apps\.launch/);
   assert.match(qml, /oneShot\.createObject/);

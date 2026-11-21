@@ -1,16 +1,18 @@
-// The Names Wallet SDK's QML side: Basecamp's bridge and one timer per wait, around
-// NamesWalletSDK.mjs (where everything else is, and which node tests). Copy both files into your
-// app's qml/ folder unchanged; then, in Main.qml:
+// The Names Wallet SDK's QML side: Basecamp's bridge, one timer per wait, and this app's
+// remembered choice of wallet, around NamesWalletSDK.mjs (where everything else is, and which
+// node tests). Copy both files into your app's qml/ folder unchanged; then, in Main.qml:
 //
-//     NamesWallet { id: names; bridge: typeof logos !== "undefined" ? logos : null }
+//     NamesWallet { id: wallet; app: "my_app_ui"; bridge: typeof logos !== "undefined" ? logos : null }
 //
-// and bind to names.status, names.problem, names.accounts, names.features. The calls are the
-// SDK's (NamesWalletSDK.mjs documents each): check, connect, disconnect, balances, proposeCall,
-// proposeTransfer, propose, watch, withdraw, resolve, reverse, call, has, open.
-// Your metadata.json lists "names" in dependencies (or optional_dependencies) and
-// `"uses": [{ "intent": "basecamp.apps.launch" }]`, so Names can be brought forward.
+// and bind to wallet.status, .problem, .accounts, .features, .wallets, .current. The calls are
+// the SDK's (NamesWalletSDK.mjs documents each): listWallets, getWallet, chooseWallet,
+// forgetWallet, check, connect, disconnect, balances, proposeCall, proposeTransfer, propose,
+// watch, withdraw, resolve, reverse, call, has, open. Your app never names a wallet module.
+// Your metadata.json declares `"uses": [{ "intent": "basecamp.apps.launch" }]`, so the wallet
+// can be brought forward.
 
 import QtQuick
+import QtQuick.LocalStorage
 import "NamesWalletSDK.mjs" as SDK
 
 Item {
@@ -19,33 +21,45 @@ Item {
 
     /// Basecamp's bridge (`logos`). Set it from your Main.qml, where `logos` is in scope.
     property var bridge: null
+    /// Your app's module name (metadata.json `name`): the key of its remembered wallet.
+    property string app: ""
     /// How long one call may take before it counts as no answer (ms).
     property int patience: 30000
 
-    /// SDK.STATES: checking, missing, otherZone, disconnected, asking, connected.
+    /// SDK.STATES: checking, none, choose, missing, otherZone, disconnected, asking, connected.
     property string status: "checking"
     property string problem: ""
     property var config: null
     property var features: []
     property var accounts: []
     property var balancesRead: []
+    /// The installed wallets found (`[{module, display_name, app}]`); the person picks one
+    /// when `status` is "choose".
+    property var wallets: []
+    /// The wallet in use: `{module, display_name, app, sdk_version}`, or null.
+    property var current: null
     readonly property string version: SDK.VERSION
 
-    /// After status, accounts, features or config change.
+    /// After status, current, wallets, accounts, features or config change.
     signal updated()
 
     property var core: null
+    property var chosenNow: ({})
+    function memory() {
+        try { return LocalStorage.openDatabaseSync("NamesWalletSDK", "1", "The wallet each app uses", 4096) }
+        catch (error) { return null }
+    }
     function sdk() {
         if (core) return core
         core = SDK.create({
-            call: function(method, args, callback, ms) {
+            call: function(module, method, args, callback, ms) {
                 var b = wallet.bridge
                 if (!b) return false
-                if (b.callModuleAsync) { b.callModuleAsync("names", method, args, callback, ms || wallet.patience); return true }
+                if (b.callModuleAsync) { b.callModuleAsync(module, method, args, callback, ms || wallet.patience); return true }
                 if (!b.callModule) return false
                 Qt.callLater(function() {
                     var raw
-                    try { raw = b.callModule("names", method, args) } catch (error) { raw = "" }
+                    try { raw = b.callModule(module, method, args) } catch (error) { raw = "" }
                     callback(raw)
                 })
                 return true
@@ -55,9 +69,36 @@ Item {
                 t.then = f
                 t.start()
             },
-            open: function() {
+            open: function(appName) {
                 var b = wallet.bridge
-                if (b && b.request) b.request("basecamp.apps.launch", { app: "names_ui" }, function() {})
+                if (b && b.request && appName) b.request("basecamp.apps.launch", { app: appName }, function() {})
+            },
+            recall: function(key) {
+                var k = wallet.app + "/" + key
+                if (wallet.chosenNow[k] !== undefined) return wallet.chosenNow[k]
+                var db = wallet.memory()
+                var found = ""
+                if (db) try {
+                    db.transaction(function(tx) {
+                        tx.executeSql("CREATE TABLE IF NOT EXISTS kept(k TEXT PRIMARY KEY, v TEXT)")
+                        var rows = tx.executeSql("SELECT v FROM kept WHERE k = ?", [k]).rows
+                        if (rows.length) found = String(rows.item(0).v)
+                    })
+                } catch (error) {}
+                return found
+            },
+            remember: function(key, value) {
+                var k = wallet.app + "/" + key
+                var now = wallet.chosenNow
+                now[k] = String(value)
+                wallet.chosenNow = now
+                var db = wallet.memory()
+                if (db) try {
+                    db.transaction(function(tx) {
+                        tx.executeSql("CREATE TABLE IF NOT EXISTS kept(k TEXT PRIMARY KEY, v TEXT)")
+                        tx.executeSql("INSERT OR REPLACE INTO kept(k, v) VALUES(?, ?)", [k, String(value)])
+                    })
+                } catch (error) {}
             },
             changed: function(w) {
                 wallet.status = w.state
@@ -66,6 +107,8 @@ Item {
                 wallet.features = w.features
                 wallet.accounts = w.accounts
                 wallet.balancesRead = w.lastBalances
+                wallet.wallets = w.wallets
+                wallet.current = w.current
                 wallet.updated()
             }
         })
@@ -80,6 +123,10 @@ Item {
         }
     }
 
+    function listWallets(done) { sdk().listWallets(done) }
+    function getWallet(done) { sdk().getWallet(done) }
+    function chooseWallet(module) { return sdk().chooseWallet(module) }
+    function forgetWallet() { sdk().forgetWallet() }
     function call(method, args, done, failed, options) { sdk().call(method, args, done, failed, options) }
     function has(feature) { return sdk().has(feature) }
     function check(options, done) { sdk().check(options, done) }
@@ -87,8 +134,8 @@ Item {
     function open() { sdk().open() }
     function connect(reason, options, handlers) { sdk().connect(reason, options, handlers) }
     function disconnect(done, failed) { sdk().disconnect(done, failed) }
-    function watch(request, handlers) { return sdk().watch(request, handlers) }
-    function withdraw(request, done, failed) { sdk().withdraw(request, done, failed) }
+    function watch(request, handlers, options) { return sdk().watch(request, handlers, options) }
+    function withdraw(request, done, failed, cancelMethod) { sdk().withdraw(request, done, failed, cancelMethod) }
     function propose(method, args, handlers, options) { sdk().propose(method, args, handlers, options) }
     function proposeCall(program, accountsJson, instructionHex, summary, handlers, options) { sdk().proposeCall(program, accountsJson, instructionHex, summary, handlers, options) }
     function proposeTransfer(asset, amount, destination, handlers, options) { sdk().proposeTransfer(asset, amount, destination, handlers, options) }

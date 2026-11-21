@@ -363,8 +363,10 @@ pub trait NamesModule: Send + 'static {
     /// The sequencer URL, registry program ID and wallet files in use. To the Names app, the
     /// plain object (as every version of the app reads it); to any other app, the network part
     /// only (`sequencer`, `names_sequencer`, `registry`, `token_program`, `zone`,
-    /// `names_network`, `module_version`) in the usual `{success, value, error}` envelope
-    /// (since 0.17.0; before, it was a plain object for every caller).
+    /// `names_network`, `module_version`, `features`, and `wallet_sdk`: `{name: "names-wallet",
+    /// version, app}`, the Names Wallet SDK this module implements) in the usual
+    /// `{success, value, error}` envelope (since 0.17.0; before, it was a plain object for every
+    /// caller).
     fn get_config(&mut self) -> String;
 
     /// Switches the names network to `network`: `lez-0.3` (the public Logos testnet) or
@@ -1772,6 +1774,8 @@ impl Default for Names {
 /// The one app that may use the methods that spend, sign, change the module's
 /// settings or read the person's own state: the Names app.
 const NAMES_APP: &str = "names_ui";
+/// The Names Wallet SDK version this module implements (sdk/qml/NamesWalletSDK.mjs `SDK_VERSION`).
+const WALLET_SDK_VERSION: &str = "1.0";
 
 /// This module's package version, the one in `basecamp-module/metadata.json`.
 /// `get_config` reports it so the Names app can refuse a module from another
@@ -1914,7 +1918,17 @@ fn public_config(config: &Value) -> Value {
         // What this build can do (MODULE_FEATURES): an app checks it before using a newer call
         // (`request_access_with`, `grant_add_account`). Nothing in it is private.
         "features": config["features"],
+        // That this module implements the Names Wallet SDK, its version and the app to open
+        // (docs/wallet/PROVIDER-SDK.md, "Implementing the SDK in another wallet").
+        "wallet_sdk": config["wallet_sdk"],
     })
+}
+
+/// The Names Wallet SDK this module implements (`get_config`'s `wallet_sdk`): an app's
+/// `listWallets` reads it to know this is a wallet, which version it speaks, and which app to
+/// bring forward for the person's answers.
+fn wallet_sdk() -> Value {
+    json!({ "name": "names-wallet", "version": WALLET_SDK_VERSION, "app": NAMES_APP })
 }
 
 /// The home zone as the configuration's own fields give it: `sequencer`, and nothing
@@ -3018,6 +3032,7 @@ impl Names {
         // What this build can do that an earlier 0.17.0 can't, for an app to check (every 0.17.0
         // says 0.17.0): `reveal_name` (the reveal driver's reveal-only call).
         config["features"] = json!(MODULE_FEATURES);
+        config["wallet_sdk"] = wallet_sdk();
         // This computer's memory, for the app's warning before a proof (about 9.5 GB).
         config["memory_bytes"] = machine_memory().map_or(Value::Null, Value::from);
         config["names_network"] = self.net.shown();
@@ -12815,6 +12830,13 @@ mod tests {
         let (kept, _) = names.served.count(&app_reads_prefix("vesting_ui"));
         assert_eq!(kept, 2, "both reads kept under the app's own keys");
         assert_eq!(names.served.count("name:").0 + names.served.count("reverse:").0, 0, "nothing kept under the Names app's keys");
+        // The same answers as the read on the spot gives (the way every app's was read before).
+        names.served = served::Served::default();
+        let inline_resolved = parsed(&names.resolve("alice".into()));
+        let inline_reversed = parsed(&names.reverse(account.clone()));
+        for (threaded, inline) in [(&resolved, &inline_resolved), (&reversed, &inline_reversed)] {
+            assert_eq!((&threaded["success"], &threaded["value"], &threaded["error"]), (&inline["success"], &inline["value"], &inline["error"]), "{threaded} vs {inline}");
+        }
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
     }
 
@@ -13734,7 +13756,7 @@ mod tests {
         assert_eq!(answered["success"], true, "the envelope: {answered}");
         let other = answered["value"].clone();
         let keys: Vec<&String> = other.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["features", "module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "zone"], "{other}");
+        assert_eq!(keys, ["features", "module_version", "names_network", "names_sequencer", "registry", "sequencer", "token_program", "wallet_sdk", "zone"], "{other}");
         let zone: Vec<&String> = other["zone"].as_object().unwrap().keys().collect();
         assert_eq!(zone, ["channel", "home", "id"], "{other}");
     }
@@ -13929,6 +13951,8 @@ mod tests {
         for feature in documented {
             assert!(features.contains(&feature), "PROVIDER-SDK.md names {feature}, which another app doesn't see in get_config");
         }
+        // It says it implements the Names Wallet SDK (an app's listWallets reads this).
+        assert_eq!(seen["value"]["wallet_sdk"], json!({ "name": "names-wallet", "version": WALLET_SDK_VERSION, "app": "names_ui" }));
         // Nothing beyond the network part and the features: no paths, wallet or CLI.
         for private in ["cli", "cli_wallet", "wallet_config", "wallet_storage", "main_name", "memory_bytes"] {
             assert!(seen["value"].get(private).is_none(), "{private} must stay with the Names app");
