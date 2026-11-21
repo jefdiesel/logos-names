@@ -8492,7 +8492,11 @@ Item {
                 loadAppRequests()
                 return
             }
-            if (next.notice !== "")
+            // A call that failed: its whole reason on a sheet of its own, over the page the
+            // person is on, with the way back to the app (appFailure). Anything else: a notice.
+            if (outcome.state === "failed")
+                appFailure = { request: f.request, problem: String(outcome.problem || ""), told: String(outcome.error || "") }
+            else if (next.notice !== "")
                 say(next.notice, next.tone)
             console.log("names_ui: request " + f.request.id + " ended " + outcome.state + (next.back ? "" : "; staying here"))
             loadAppRequests(f.drawnHere || !next.back ? undefined : function(fresh) { returnAfterAnswer(f.request, fresh) })
@@ -8510,6 +8514,7 @@ Item {
             loadAppRequests()
         }, 20000)
     }
+    property var appFailure: null   // {request, problem, told}: an app's call that failed, its reason shown (followAnswer)
     Timer {
         id: followTimer
         property var follow: null
@@ -17251,6 +17256,53 @@ Item {
                 x: (appSheet.width - width) / 2
                 y: Math.max(root.px(32), (appSheet.height - implicitHeight) / 2)
                 ApproveBody {}
+            }
+        }
+    }
+
+    // An app's call that failed after the person approved it: the whole reason (it may name
+    // their balances, so only here and in the History), what the app was told, and the way
+    // back to the app. Shown once no request waits.
+    Rectangle {
+        id: failureSheet
+        visible: root.appRequest === null && root.appFailure !== null
+        anchors.fill: parent
+        color: Qt.rgba(root.slate.r, root.slate.g, root.slate.b, 0.94)
+        MouseArea { anchors.fill: parent; hoverEnabled: true; onWheel: function(wheel) { wheel.accepted = true } }
+        Card {
+            width: Math.min(failureSheet.width - root.px(64), root.px(760))
+            x: (failureSheet.width - width) / 2
+            y: Math.max(root.px(32), (failureSheet.height - implicitHeight) / 2)
+            ColumnLayout {
+                id: failureBody
+                Layout.fillWidth: true
+                spacing: 14
+                readonly property string who: root.appFailure !== null ? root.appShown(root.appFailure.request.app) : ""
+                Text {
+                    Layout.fillWidth: true
+                    text: "Couldn't send it for " + failureBody.who
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    font.family: root.sans
+                    font.pixelSize: root.px(24)
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.WordWrap
+                }
+                StatusLine { kind: "problem"; text: root.appFailure !== null ? Logic.bridgeText(root.appFailure.problem || "it wasn't sent", 600) : "" }
+                Hint {
+                    visible: root.appFailure !== null && root.appFailure.told !== ""
+                    textFormat: Text.PlainText
+                    text: root.appFailure !== null ? failureBody.who + " was told: “" + Logic.clean(root.appFailure.told) + "”. The rest stays here and in your History." : ""
+                }
+                RowLayout {
+                    spacing: 10
+                    Action {
+                        label: "Back to " + failureBody.who
+                        strong: true
+                        onPressed: { var r = root.appFailure.request; root.appFailure = null; root.returnAfterAnswer(r, root.appRequests) }
+                    }
+                    Action { label: "Close"; onPressed: root.appFailure = null }
+                }
             }
         }
     }
