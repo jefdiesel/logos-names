@@ -34,7 +34,7 @@ Rectangle {
     Text {
         textFormat: Text.PlainText
         anchors.fill: input
-        verticalAlignment: TextInput.AlignVCenter
+        verticalAlignment: Text.AlignVCenter
         visible: input.text === ""
         text: field.hint
         color: look.faint
