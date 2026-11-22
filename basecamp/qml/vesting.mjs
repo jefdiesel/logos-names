@@ -20,6 +20,7 @@ export function accountIds(accounts) {
 const MISSING = /module not connected|module not reachable|no such module|unknown module|module not found|not loaded|is not installed/i
 const NO_METHOD = /method not found|unknown[_ ]method|no such method|has no method|not a method/i
 const BUSY = /timed? ?out|timeout|busy/i
+const STALE = /auth token|unauthori[sz]ed/i
 
 /// A raw `vesting` reply, sorted: `{kind, value, error}`. The module answers JSON text
 /// `{"ok":true,...}` or `{"ok":false,"error":...}`, which Basecamp may encode once or twice more.
@@ -50,6 +51,7 @@ export function reply(raw) {
         : String(parsed)
     if (MISSING.test(said)) return { kind: "missing", value: null, error: said.trim() }
     if (NO_METHOD.test(said)) return { kind: "nomethod", value: null, error: said.trim() }
+    if (STALE.test(said)) return { kind: "error", value: null, error: "Close the Names tab and open Names again to reconnect to Vest." }
     if (BUSY.test(said) || !(parsed && typeof parsed === "object") || said.trim() === "") return { kind: "busy", value: null, error: said.trim() }
     return { kind: "error", value: null, error: "Basecamp refused the call: " + errorText(parsed.message || parsed.error) }
 }
@@ -155,7 +157,8 @@ export function scanLine(answer) {
 
 /// Whether a display amount is more than nothing ("0", "0 LEZ", "0.000" are nothing).
 export function someAmount(text) {
-    return /[1-9]/.test(String(text || "").replace(/[^0-9.,]/g, ""))
+    var m = /^\s*([0-9.,_]+)/.exec(String(text || ""))
+    return !!m && /[1-9]/.test(m[1])
 }
 
 /// What a row says under its amount, in words. `dateOf(ms)`: the local date and time (QML's).
@@ -175,7 +178,7 @@ export function rowLines(s, dateOf) {
     }
     if (g === "finished")
         return { amount: total, line: someAmount(claimed) ? "Finished · claimed " + claimed : "Finished · nothing left to claim" }
-    return { amount: total, line: when !== "" ? "Nothing to claim until " + when : "Nothing to claim yet" + (someAmount(claimed) ? " · claimed so far: " + claimed : "") }
+    return { amount: total, line: (when !== "" ? "Nothing to claim until " + when : "Nothing to claim yet") + (someAmount(claimed) ? " · claimed so far: " + claimed : "") }
 }
 
 /// What the page shows. `s`: {net ("0.4" or not), installed (true, false, or null: not known),

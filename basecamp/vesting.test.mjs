@@ -35,6 +35,8 @@ check("reply: no Vest module", [reply("Module not connected").kind, reply(JSON.s
 check("reply: an older Vest without the call", [reply(JSON.stringify({ error: "Method not found" })).kind, reply("unknown method incoming").kind, reply(JSON.stringify({ ok: false, error: "unknown_method: incoming" })).kind], ["nomethod", "nomethod", "nomethod"]);
 check("reply: no answer yet", [reply(undefined).kind, reply(null).kind, reply("").kind, reply("Timed out waiting for the module").kind, reply(JSON.stringify({ error: "timeout" })).kind, reply("{}").kind], ["busy", "busy", "busy", "busy", "busy", "busy"]);
 check("reply: the host refused the call", reply(JSON.stringify({ error: "Call refused", message: "expected string at arg0" })), { kind: "error", value: null, error: "Basecamp refused the call: expected string at arg0" });
+const RECONNECT = { kind: "error", value: null, error: "Close the Names tab and open Names again to reconnect to Vest." };
+check("reply: stale Basecamp auth token / unauthorized asks to reopen Names", [reply("Invalid auth token"), reply("Unauthorized"), reply(JSON.stringify({ error: "Unauthorised" })), reply(JSON.stringify({ success: false, error: "Invalid auth token" }))], [RECONNECT, RECONNECT, RECONNECT, RECONNECT]);
 
 // Groups: Claimable now, Unvested (soonest unlock first, no date last), Finished; each once.
 const list = [row(S1, "unvested", { next_unlock_ms: 3000 }), row(S2, "claimable", { claimable_display: "250 LEZ" }), row(S3, "closed"), row(S4, "unvested", { next_unlock_ms: 1000 }),
@@ -65,10 +67,14 @@ const date = (ms) => "D" + ms;
 check("rowLines: claimable", rowLines(row(S2, "claimable", { claimable_display: "250 LEZ" }), date), { amount: "1,000 LEZ", line: "Claimable now: 250 LEZ" });
 check("rowLines: claimable, some claimed, next unlock", rowLines(row(S2, "claimable", { claimable_display: "250 LEZ", claimed_display: "100 LEZ", next_unlock_ms: 5 }), date).line, "Claimable now: 250 LEZ · claimed so far: 100 LEZ · next unlock D5");
 check("rowLines: unvested with a date", rowLines(row(S1, "unvested", { next_unlock_ms: 3000 }), date), { amount: "1,000 LEZ", line: "Nothing to claim until D3000" });
+check("rowLines: unvested with a date and some claimed", rowLines(row(S1, "unvested", { next_unlock_ms: 3000, claimed_display: "100 LEZ" }), date).line, "Nothing to claim until D3000 · claimed so far: 100 LEZ");
 check("rowLines: unvested without a date", rowLines(row(S1, "unvested"), date).line, "Nothing to claim yet");
+check("rowLines: unvested without a date and some claimed", rowLines(row(S1, "unvested", { claimed_display: "100 LEZ" }), date).line, "Nothing to claim yet · claimed so far: 100 LEZ");
 check("rowLines: finished", [rowLines(row(S3, "closed", { claimed_display: "1,000 LEZ" }), date).line, rowLines(row(S3, "closed"), date).line], ["Finished · claimed 1,000 LEZ", "Finished · nothing left to claim"]);
 check("rowLines: a huge amount is never a Number", rowLines(row(S1, "unvested", { total_display: "123456789012345678901234567890" }), date).amount, "123456789012345678901234567890");
 check("someAmount", [someAmount("0"), someAmount("0 LEZ"), someAmount("0.000"), someAmount("0.5"), someAmount(""), someAmount("12 LEZ")], [false, false, false, true, false, true]);
+check("someAmount: ignores digits inside the token symbol", [someAmount("0 ERC20"), someAmount("0.000 USDC2"), someAmount("0.5 ERC20"), someAmount("ERC20")], [false, false, true, false]);
+check("rowLines: zero amount with digits in token symbol isn't treated as claimed", [rowLines(row(S2, "claimable", { claimable_display: "250 ERC20", claimed_display: "0 ERC20" }), date).line, rowLines(row(S3, "closed", { claimed_display: "0 ERC20" }), date).line], ["Claimable now: 250 ERC20", "Finished · nothing left to claim"]);
 
 // What the page shows.
 const at = (over) => pageState(Object.assign({ net: "0.4", installed: true, kind: "ok", answered: true, accounts: 2, accountsKnown: true, count: 3 }, over));
@@ -123,6 +129,28 @@ check("vestOnView: the page, LEZ 0.4, Names in front", /readonly property bool v
 check("Open in Vest: Basecamp's launch intent, app vesting_ui", /logos\.request\("basecamp\.apps\.launch", \{ app: "vesting_ui" \}/.test(block), true);
 check("every vesting call's argument is text", [...block.matchAll(/vestCall\("(\w+)", \[([^\]]*)\]/g)].map((m) => [m[1], m[2]]), [["incoming", "JSON.stringify(vestAccounts)"], ["discover", '""']]);
 check("next unlock kept as a real", /property real vestReadAt/.test(block) && !/property int vest\w*(At|Ms)\b/.test(block), true);
+check("vestRead deduplicates an in-flight incoming for the same key", /property string vestInFlightKey: ""/.test(block) && /if \(vestInFlightKey === key\)\s*\n\s*return/.test(block) && /function vestDiscover\(\)[\s\S]*?vestInFlightKey = ""/.test(block), true);
+check("vestScanProblem clears on catch-up, account change, retry and discover start, and shows only on list/empty",
+  /if \(!Vesting\.behind\(r\.value\)\) \{\s*\n\s*vestScanProblem = ""/.test(block)
+  && /onVestAccountsKeyChanged:[\s\S]*?vestScanProblem = ""/.test(block)
+  && /function vestTryAgain\(\)[\s\S]*?vestScanProblem = ""/.test(block)
+  && /function vestDiscover\(\)[\s\S]*?vestScanProblem = ""[\s\S]*?vestCall\("discover"/.test(block)
+  && /visible: \(root\.vestState === "list" \|\| root\.vestState === "empty"\) && root\.vestScanProblem !== ""/.test(block), true);
+check("vestReadNames runs only while vestOnView, keeps one 4 s retry timer, and resets tries on new creators",
+  /function vestReadNames\(\) \{\s*\n\s*if \(!vestOnView\)\s*\n\s*return/.test(block)
+  && /onVestOnViewChanged:[^\n]*vestReadNames\(\)/.test(block)
+  && /if \(vestOnView\) \{\s*\n\s*vestSeeAll\(\)\s*\n\s*vestReadNames\(\)/.test(block)
+  && /property bool vestNamesWaiting: false/.test(block)
+  && /if \(key !== vestNamesKey\) \{\s*\n\s*vestNamesKey = key\s*\n\s*vestNameTries = 0/.test(block), true);
+check("vestDiscover handles missing/busy/nomethod and hides the working scan line on vestScanHold",
+  /if \(r\.kind === "missing"\) \{\s*\n\s*vestKind = "missing"/.test(block)
+  && /else if \(r\.kind === "busy"\)/.test(block)
+  && /else if \(r\.kind === "nomethod"\)/.test(block)
+  && /visible: \(root\.vestState === "list" \|\| root\.vestState === "empty"\) && root\.vestScanNow !== "" && !root\.vestScanHold && root\.vestScanProblem === ""/.test(block), true);
+check("problem line handles empty error and omits 'Vest answered:' for Basecamp / reconnect errors",
+  /root\.vestError\.trim\(\) === "" \? "Vest couldn't list your schedules\." : \/\^Basecamp \|\^Close the Names tab\/\.test\(root\.vestError\)/.test(block), true);
+check("page-level Open Vest button has a WhyLine when vesting_ui is not installed",
+  /label: "Open Vest"[\s\S]*?WhyLine \{ visible: \(root\.vestState === "idle" \|\| root\.vestState === "older" \|\| root\.vestState === "empty"\) && root\.vestUiInstalled === false; text: "Install the Vest app from the app catalog to open it\." \}/.test(block), true);
 
 // QML rules (Basecamp's engine): no BigInt, no Java reserved words as names.
 const code = readFileSync(new URL("./qml/vesting.mjs", import.meta.url), "utf8");

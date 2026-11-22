@@ -1689,7 +1689,7 @@ for _name, _js, _mock in [
     ("vesting-older", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"list": {"ok": True}}}),
     # The scan behind the chain: discover is asked for more blocks while the page is open.
     ("vesting-scanning", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "reverse": _V_REVERSE,
-        "vesting": {"incoming": dict(_V_ANSWER, to_block=41200, tip=52310, schedules=_V_ROWS[:2]), "discover": {"ok": True, "chain_id": "2da7", "from_block": 41201, "to_block": 41200, "tip": 52310, "done": False, "found": [], "incoming": 2}}}),
+        "vesting": {"incoming": dict(_V_ANSWER, to_block=41200, tip=52310, schedules=_V_ROWS[:2]), "discover": {"ok": True, "chain_id": "2da7", "from_block": 41201, "to_block": 42200, "tip": 52310, "done": False, "found": [], "incoming": 2}}}),
     ("vesting-error", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": {"ok": False, "error": "the network didn't answer (https://lez.nameswallet.app/): connection refused"}}}),
     ("vesting-busy", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": "busy"}}),
     ("vesting-empty", _V_OPEN % 'root.openVesting()', {"names_network": "lez-0.4", "packages": _V_PKGS, "vesting": {"incoming": dict(_V_ANSWER, schedules=[])}}),

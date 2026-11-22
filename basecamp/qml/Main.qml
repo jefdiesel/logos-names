@@ -8244,13 +8244,17 @@ Item {
     property string vestKind: ""           // the last incoming reply's kind (Vesting.reply), "" before any
     property string vestError: ""
     property bool vestAsking: false        // a call to the module on its way
+    property string vestInFlightKey: ""    // net|accounts of an in-flight incoming call
     property bool vestAgain: false         // a read asked for while a call was on its way
     property bool vestScanning: false      // a discover round on its way, or the next one due
     property bool vestScanHold: false      // no more rounds until the next 60 s beat (done, or stuck)
     property string vestScanProblem: ""
+    property string vestScanKind: ""       // "", "problem", "waiting", "note"
     property var vestSeen: []              // unvested schedules already seen on the page (memory only)
     property bool vestFinishedOpen: false
     property int vestNameTries: 0
+    property bool vestNamesWaiting: false  // a 4 s retry timer for creator names is scheduled
+    property string vestNamesKey: ""       // sorted unresolved creator IDs for vestNameTries
     property string vestOpenLine: ""
     property real vestReadAt: 0            // ms
     readonly property bool vestOnView: section === "vesting" && namesNet === "0.4" && Qt.application.state === Qt.ApplicationActive
@@ -8269,9 +8273,11 @@ Item {
     onVestAccountsKeyChanged: {
         vestAnswer = null
         vestKind = ""
+        vestScanProblem = ""
+        vestScanKind = ""
         if (vestReads) vestRead()
     }
-    onVestOnViewChanged: if (vestOnView) { vestScanHold = false; vestSeeAll(); vestRead() }
+    onVestOnViewChanged: if (vestOnView) { vestScanHold = false; vestSeeAll(); vestReadNames(); vestRead() }
 
     /// A local date and time for a schedule's next unlock (`ms`, a real).
     function vestDate(ms) {
@@ -8299,16 +8305,20 @@ Item {
     function vestRead() {
         if (!vestReads)
             return
+        var key = namesNet + "|" + vestAccountsKey
         if (vestAsking) {
+            if (vestInFlightKey === key)
+                return
             vestAgain = true
             return
         }
-        var key = namesNet + "|" + vestAccountsKey
         vestAsking = true
+        vestInFlightKey = key
         vestAgain = false
         vestCall("incoming", [JSON.stringify(vestAccounts)], function(r) {
             vestAsking = false
-            // Asked for while this one was on its way (other accounts, the page opened): again.
+            vestInFlightKey = ""
+            // Asked for while this one was on its way (other accounts, discover): again.
             if (vestAgain || key !== namesNet + "|" + vestAccountsKey) {
                 vestAgain = false
                 Qt.callLater(vestRead)
@@ -8320,9 +8330,13 @@ Item {
             if (r.kind !== "ok")
                 return
             vestAnswer = r.value
-            vestReadNames()
+            if (!Vesting.behind(r.value)) {
+                vestScanProblem = ""
+                vestScanKind = ""
+            }
             if (vestOnView) {
                 vestSeeAll()
+                vestReadNames()
                 if (Vesting.behind(r.value) && !vestScanHold && !vestScanning) {
                     vestScanning = true
                     againAfter(2000, vestDiscover)
@@ -8340,8 +8354,12 @@ Item {
         var key = namesNet + "|" + vestAccountsKey
         var before = vestAnswer !== null ? Number(vestAnswer.to_block) : -1
         vestAsking = true
+        vestInFlightKey = ""
+        vestScanProblem = ""
+        vestScanKind = ""
         vestCall("discover", [""], function(r) {
             vestAsking = false
+            vestInFlightKey = ""
             vestScanning = false
             if (key !== namesNet + "|" + vestAccountsKey) {
                 vestRead()
@@ -8349,11 +8367,27 @@ Item {
             }
             if (r.kind !== "ok") {
                 vestScanHold = true
-                vestScanProblem = r.kind === "error" ? sentence(r.error) : ""
+                if (r.kind === "missing") {
+                    vestKind = "missing"
+                    vestError = r.error
+                } else if (r.kind === "busy") {
+                    vestScanKind = "waiting"
+                    vestScanProblem = "Vest hasn't finished reading more of the chain yet. Names asks again every minute."
+                } else if (r.kind === "nomethod") {
+                    vestScanKind = "note"
+                    vestScanProblem = "This Vest can't scan more of the chain from Names yet. Update Vest from the app catalog."
+                } else {
+                    vestScanKind = "problem"
+                    var scanWhy = sentence(r.error)
+                    vestScanProblem = scanWhy === "" ? "Vest couldn't read more of the chain."
+                        : /^Basecamp |^Close the Names tab/.test(r.error) ? scanWhy
+                        : "Vest couldn't read more of the chain: " + scanWhy
+                }
                 if (vestAgain) vestRead()
                 return
             }
             vestScanProblem = ""
+            vestScanKind = ""
             var v = r.value
             if (v.done === true || !(Number(v.to_block) > before))
                 vestScanHold = true
@@ -8365,6 +8399,7 @@ Item {
     function vestScanAgain() {
         vestScanHold = false
         vestScanProblem = ""
+        vestScanKind = ""
         vestScanning = true
         vestDiscover()
     }
@@ -8377,26 +8412,51 @@ Item {
     /// The creators' LNS names (`reverse`, kept in accountNames), asked again a few times while
     /// the module is busy; until then the short address is shown.
     function vestReadNames() {
-        var ids = vestSchedules.map(function(s) { return String(s.creator || "") }).filter(function(id) {
-            return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id) && !Object.prototype.hasOwnProperty.call(accountNames, id)
+        if (!vestOnView)
+            return
+        var ids = []
+        vestSchedules.forEach(function(s) {
+            var id = String(s.creator || "")
+            if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id) && !Object.prototype.hasOwnProperty.call(accountNames, id) && ids.indexOf(id) < 0)
+                ids.push(id)
         })
-        if (ids.length === 0 || vestNameTries >= 8)
+        if (ids.length === 0) {
+            vestNamesKey = ""
+            return
+        }
+        var key = ids.slice().sort().join(",")
+        if (key !== vestNamesKey) {
+            vestNamesKey = key
+            vestNameTries = 0
+        } else if (vestNamesWaiting) {
+            return
+        }
+        if (vestNameTries >= 8)
             return
         vestNameTries++
         readAccountNames(ids)
-        againAfter(4000, vestReadNames)
+        if (!vestNamesWaiting) {
+            vestNamesWaiting = true
+            againAfter(4000, function() {
+                root.vestNamesWaiting = false
+                root.vestReadNames()
+            })
+        }
     }
     function openVesting() {
-        go("vesting")
         vestScanHold = false
         vestScanProblem = ""
+        vestScanKind = ""
         vestNameTries = 0
+        go("vesting")
         loadInstalled(function() { root.vestRead() })
     }
     /// "Try again" after a refusal or no answer: the list read now.
     function vestTryAgain() {
         vestKind = vestAnswer !== null ? "ok" : ""
         vestError = ""
+        vestScanProblem = ""
+        vestScanKind = ""
         loadInstalled(function() { root.vestRead() })
     }
     /// Opens Vest (basecamp.apps.launch, as Names opens other apps), where claims are made.
@@ -8413,7 +8473,7 @@ Item {
         interval: 60000
         repeat: true
         running: root.vestOnView
-        onTriggered: { root.vestScanHold = false; root.vestRead() }
+        onTriggered: { root.vestScanHold = false; root.vestScanProblem = ""; root.vestScanKind = ""; root.vestRead() }
     }
     // The menu's count, while Names is in front with the page closed: incoming answers from what
     // Vest has already found, so this asks nothing of the chain.
@@ -12088,7 +12148,7 @@ Item {
                 StatusLine {
                     visible: root.vestState === "problem"
                     kind: "problem"
-                    text: "Vest answered: " + root.sentence(root.vestError)
+                    text: root.vestError.trim() === "" ? "Vest couldn't list your schedules." : /^Basecamp |^Close the Names tab/.test(root.vestError) ? root.sentence(root.vestError) : "Vest answered: " + root.sentence(root.vestError)
                     actionLabel: root.vestAsking ? "Checking…" : "Try again"
                     actionEnabled: !root.vestAsking
                     onAct: root.vestTryAgain()
@@ -12102,15 +12162,15 @@ Item {
                     onAct: root.vestTryAgain()
                 }
                 StatusLine {
-                    visible: (root.vestState === "list" || root.vestState === "empty") && root.vestScanNow !== "" && root.vestScanProblem === ""
+                    visible: (root.vestState === "list" || root.vestState === "empty") && root.vestScanNow !== "" && !root.vestScanHold && root.vestScanProblem === ""
                     kind: "working"
                     text: root.vestScanNow
                 }
                 StatusLine {
-                    visible: root.vestScanProblem !== "" && root.vestState !== "problem"
-                    kind: "problem"
-                    text: "Vest couldn't read more of the chain: " + root.vestScanProblem
-                    actionLabel: root.vestAsking ? "Checking…" : "Try again"
+                    visible: (root.vestState === "list" || root.vestState === "empty") && root.vestScanProblem !== ""
+                    kind: root.vestScanKind === "note" ? "" : root.vestScanKind || "problem"
+                    text: root.vestScanProblem
+                    actionLabel: root.vestScanKind === "note" ? "" : root.vestAsking ? "Checking…" : "Try again"
                     actionEnabled: !root.vestAsking
                     onAct: root.vestScanAgain()
                 }
@@ -12143,6 +12203,7 @@ Item {
                     enabledNow: root.vestUiInstalled !== false
                     onPressed: root.vestOpenApp()
                 }
+                WhyLine { visible: (root.vestState === "idle" || root.vestState === "older" || root.vestState === "empty") && root.vestUiInstalled === false; text: "Install the Vest app from the app catalog to open it." }
                 StatusLine { visible: root.vestOpenLine !== ""; kind: root.vestOpenLine === "Opening Vest…" ? "working" : "problem"; text: root.vestOpenLine }
             }
         }
