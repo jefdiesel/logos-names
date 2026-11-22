@@ -100,7 +100,7 @@ check("arrivingReady counts the Claims", [arrivingReady(arriving), arrivingReady
 // Jef's two withdrawals as the card shows them (wallet-top.jpg): recorded, the service offered.
 const recorded = { stage: "recorded", settle_offer: { available: true, prove_first: true }, root: "0xf3be", releasable_at: 1795047180 };
 const row = (id, status) => ({ id, progress: sendBackProgress(status, 1795400000) });
-check("Jef's rows read 'finish it' today", row("sb-6163f4e0007b40e3", recorded).progress.card, "Recorded on Ethereum · finish it");
+check("Jef's rows ask for the proof first (the bridge here proves first)", row("sb-6163f4e0007b40e3", recorded).progress.card, "Recorded on Ethereum · make the proof");
 const twoRows = [row("sb-6163f4e0007b40e3", recorded), row("sb-8c065e4e54235fe6", recorded), row("sb-1", { stage: "burned" })];
 check("bridgingReady: the ones waiting on the person", bridgingReady(twoRows, {}, {}), 2);
 check("bridgingReady: a dead one isn't ready", bridgingReady(twoRows, {}, { "sb-6163f4e0007b40e3": "the Names Wallet gives another exit secret than this send-back was made with (another account or wallet?)" }), 1);

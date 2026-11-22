@@ -1306,6 +1306,10 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   const offer = { available: true, consent_needed: true, consent_text: SETTLE_CONSENT };
   const rec = sendBackProgress({ stage: "recorded", settle_offer: offer }, 0, () => "12:00");
   check("settle: offered on recorded", [rec.action, rec.more, rec.headline], ["settle", "prove", "Recorded on Ethereum: finish it on Ethereum."]);
+  const pf = sendBackProgress({ stage: "recorded", settle_offer: Object.assign({}, offer, { prove_first: true }) }, 0, () => "12:00");
+  check("settle: prove_first on recorded keeps Make the proof", [pf.action, pf.more, pf.card], ["prove", "", "Recorded on Ethereum · make the proof"]);
+  const pfp = sendBackProgress({ stage: "proved", settle_offer: Object.assign({}, offer, { prove_first: true }) }, 0, () => "12:00");
+  check("settle: prove_first once proved offers Finish", [pfp.action, pfp.card], ["settle", "Proof made · finish it"]);
   check("settle: not offered: the by-hand path as before", sendBackProgress({ stage: "recorded", settle_offer: { available: false, reason: "The service is paused." } }, 0).action, "prove");
   check("settle: its reason in small text", settleNotOffered({ stage: "recorded", settle_offer: { available: false, reason: "The service is paused." } }), "The service is paused.");
   const run = (stage, extra) => sendBackProgress(Object.assign({ stage: "recorded", settle_id: "s1", settle: Object.assign({ stage }, extra || {}) }), 0, () => "12:34");

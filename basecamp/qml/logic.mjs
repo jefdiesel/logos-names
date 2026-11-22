@@ -2996,7 +2996,12 @@ export function sendBackProgress(status, nowSeconds, clock) {
                  detail: s.settle_note ? String(s.settle_note) : "", tone: "wait", action: "", more: "" }
     }
     p.more = ""
-    if (settleOffered(s)) {
+    if (settleOffered(s) && s.settle_offer.prove_first === true && s.stage === "recorded" && p.action === "prove") {
+        // The LEZ Bridge here makes the proof itself first (its local proof helper is set): the
+        // service refuses Finish until then, so "Make the proof" stays the one action.
+        p.card = "Recorded on Ethereum · make the proof"
+        p.headline = "Recorded on Ethereum. Next: make the proof here, then finish it on Ethereum."
+    } else if (settleOffered(s)) {
         p.more = p.action
         p.action = "settle"
         if (s.stage === "recorded") { p.card = "Recorded on Ethereum · finish it"; p.headline = "Recorded on Ethereum: finish it on Ethereum." }
