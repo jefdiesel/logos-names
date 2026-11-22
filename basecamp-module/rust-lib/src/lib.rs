@@ -15381,6 +15381,12 @@ mod tests {
         let asked = parsed(&names.propose_call(NFT_PROGRAM.into(), "[]".into(), "01".into(), "Mint".into()));
         let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
         assert_eq!(names.store().get(&id).unwrap()["warnings"][0], NFT_ROOT_WARNING);
+        // And so the sheet has it: the Names app's list of waiting requests.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let pending = parsed(&names.pending_requests());
+        let shown = pending["value"].as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).cloned().unwrap_or_else(|| panic!("{pending}"));
+        assert_eq!(shown["warnings"][0], NFT_ROOT_WARNING, "{shown}");
+        as_caller(app("tips_ui"));
         // Another program: no such warning.
         let plain = parsed(&names.propose_call(registry::account_text(&[5; 32]), "[]".into(), "01".into(), String::new()));
         let plain = plain["value"]["request"].as_str().unwrap().to_owned();
