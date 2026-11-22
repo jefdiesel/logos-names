@@ -142,7 +142,7 @@ BRIDGE = r"""
             }
             // The names network: set_names_network moves it, get_config says it.
             if (method === "set_names_network") { root.mockNet = String(args[0]); method = "get_config"; var wrapNet = true }
-            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"], bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"], names_network: { id: root.mockNet || (%(mock)s).names_network || "lez-0.3" }, network_choice: (%(mock)s).network_choice || null, custom_network: (%(mock)s).custom_network || null, custom_network_last: (%(mock)s).custom_network_last || null, lez04_chain: "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374", network_reset_at: (%(mock)s).network_reset_at || 0, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
+            if (method === "get_config") return (function(c) { return wrapNet ? ok(c) : JSON.stringify(c) })({ features: ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "test_lez_faucet"].concat((%(mock)s).noSettings ? [] : ["app_settings"]), bridge_programs: ["JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA"], names_network: { id: root.mockNet || (%(mock)s).names_network || "lez-0.3" }, network_choice: (%(mock)s).network_choice || null, custom_network: (%(mock)s).custom_network || null, custom_network_last: (%(mock)s).custom_network_last || null, lez04_chain: "2da7f7dfb6e51a28c942ea80391aa518253ec515e98d28cb4d83cc9e16ff5374", network_reset_at: (%(mock)s).network_reset_at || 0, zone: (%(mock)s).zone || { id: "home", name: "Home", channel: "%(home_channel)s", home: true }, names_sequencer: "http://127.0.0.1:3040", registry: %(registry)s, sequencer: (%(mock)s).zone ? "http://127.0.0.1:3041" : "http://127.0.0.1:3040", wallet_config: "/Users/you/wallet/wallet_config.json", wallet_storage: "/Users/you/wallet/storage.json", cli: "/Users/you/.local/bin/names", cli_wallet: "/Users/you/.lee/wallet", bridge_key: "%(bridge_key)s", bridge_node: null, module_version: root.neededModule })
             if (method === "normalize") return String(args[0]).toLowerCase().replace(/\.lez$/, "")
             if (method === "mine") return ok({ names: names.filter(function(entry) { return !(%(mock)s).noNames && entry.owner === "%(alice)s" }).map(function(entry) {
                 return { name: entry.name, display: entry.name + ".lez", owner: entry.owner, expires: null, never: true, lapsed: false } }).concat((%(mock)s).extraMine || []), pending: ((%(mock)s).pending || []).map(function(p) {
@@ -169,6 +169,16 @@ BRIDGE = r"""
                 return ok({ account: "yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z", balance: mock.private !== undefined ? mock.private : root.missing === "pauper" ? "5000" : "250000000",
                     public: { account: "CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", balance: mock.public !== undefined ? mock.public : "1250000" },
                     waiting: mock.waiting || null })
+            }
+            // The app's view settings (app_settings / app_setting): the mock's `settings`, then what
+            // this run kept; `settingFails`: app_setting refused.
+            if (method === "app_settings") return ok(Object.assign({}, mock.settings || {}, root.mockCalls.__settings || {}))
+            if (method === "app_setting") {
+                if (mock.settingFails) return JSON.stringify({ success: false, value: null, error: "cannot keep the setting: disk full" })
+                var kept = Object.assign({}, root.mockCalls.__settings || {})
+                kept[String(args[0])] = String(args[1])
+                root.mockCalls.__settings = kept
+                return ok("")
             }
             // The bridge test network (LEZ 0.4), as bridge_net_balances answers from its last read.
             if (method === "bridge_net_balances") return ok(mock.bridgeNet || %(bridge_net)s)
@@ -1703,6 +1713,65 @@ HEIGHTS["vesting-menu"] = 900
 HEIGHTS["vesting-finished-open"] = 1800
 HEIGHTS["vesting-narrow"] = 1900
 WIDTHS = {"vesting-narrow": 760}
+
+
+# ── The card kept tidy (Jef, 21 Nov; tidy.mjs) ──
+# His account as wallet-tokens.jpg shows it: LEZ, then wETH and dUSDC on bridges v2 to v7, 0.1
+# wETH on v3; the LEZ Bridge on v5 (his config), the wallet reading v2 to v7. His two withdrawals
+# as wallet-top.jpg shows them (recorded, the service offered), and one arriving with its Claim.
+_T_BRIDGES = [("JECKBkvoc2e3dC18Wm6zZJEC2BGMwUwLsdZiQzYTnUx7", "v2"), ("4eaeK3yiqATXhpCEYEFMMtjUn1bS7HLxPwfrH31mXCvr", "v3"), ("BKXe3q5JcKeiSrKv9FUBjZw3AowbvYgyHZ3SYPgDxJBf", "v4"),
+              ("CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA", "v5"), ("4PxaLAfPZDvpfZaR8SsC2Y7pYMPNwPPGVGMpjEVPQWed", "v6"), ("CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93", "v7")]
+_T_LABEL = {"v2": "demo", "v3": "demo v3"}
+def _t_tok(program, v, symbol, amount):
+    return {"definition": (symbol + v + "1111111111111111111111111111111111111111")[:44], "eth_token": "0x0000000000000000000000000000000000000000" if symbol == "wETH" else "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e",
+            "symbol": symbol, "decimals": 18 if symbol == "wETH" else 6, "name": ("Wrapped Sepolia ETH" if symbol == "wETH" else "Wrapped dUSDC") + " (" + _T_LABEL.get(v, v) + ")",
+            "bridge": program, "bridge_label": "bridge " + v, "amount": amount}
+_T_JEF = "Public/BawxwquWtPEVcrwSFftD6jS3XFxZNv4qYrV8pkyo9mu7"
+_T_TOKENS = [t for program, v in _T_BRIDGES for t in (_t_tok(program, v, "dUSDC", "0"), _t_tok(program, v, "wETH", "100000000000000000" if v == "v3" else "0"))]
+_T_NET = dict(NET04, read=dict(NET04_READ, height=46578, tokens=[dict(t, amount=None) for t in _T_TOKENS], bridges=[{"program": p, "label": "bridge " + v, "bridge": True, "token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7"} for p, v in _T_BRIDGES],
+    accounts=[{"account": _T_JEF, "found": True, "native": "10000104865784", "tokens": _T_TOKENS, "other_tokens": 0}]))
+_T_CONFIG = {"build": {"commit": SHIPPED_BUILD}, "deployment": {"name": "bridge-test-network-v5", "bridge_program": "CuV1ctZ2qJG4wQcXP4TBudVGKzNmdoYT3DpP1veHnDMA", "release": "proof"},
+             "features": SB_FEATURES + ["send_back_settle", "bridges"], "notices": {}}
+_T_REC = {"stage": "recorded", "root": "0xf3be03a30b3d5f4eb9eeddbcd70e1e3a9b9fa55781f511efc46efbd50bc8f4b6", "releasable_at": 1795047180, "settle_offer": {"available": True, "reason": None, "consent_needed": False, "prove_first": True}}
+_T_DEAD_NOTE = "the Names Wallet gives another exit secret than this send-back was made with (another account or wallet?)"
+_T_ROWS = [{"id": "sb-6163f4e0007b40e3", "amount": "0.1 ETH", "account": _T_JEF, "recipient": "0xED0cD730cE2A7E587217650338877C4Ecb54bD20", "words": "", "stage": "recorded"},
+           {"id": "sb-8c065e4e54235fe6", "amount": "0.1 ETH", "account": _T_JEF, "recipient": "0xED0cD730cE2A7E587217650338877C4Ecb54bD20", "words": "", "stage": "recorded"}]
+_T_ARR = '[{ id: "dep-1", symbol: "ETH", amount: "0.1", account: "%s" }]' % _T_JEF
+# The card on LEZ 0.4 with the bridge's config, the network read, the receive and the withdrawals;
+# `@JS@` runs after (a fold, a Hide). Checks are held so nothing moves while it is drawn.
+_T_CARD = ('root.cliNames = []; root.cliPending = []; root.openWallet("home"); Qt.callLater(function() { root.setWalletNet("0.4"); Qt.callLater(function() { '
+           'root.bridgeConfig = %s; root.loadBridgeNet(); root.receivesLoaded = true; root.receives = %s; root.receiveStatuses = ({ "dep-1": { stage: "claimable" } }); '
+           'root.sendBacksLoaded = true; root.sendBacks = %s; root.sbStatuses = @STATUSES@; root.sbCheckedAt = Date.now() - 4000; '
+           'root.againAfter(50, function() { root.receiveAskNow = false; root.sbAskNow = false; root.receiveNextAt = 0; root.sbNextAt = 0 }); '
+           'root.receiveCheckedAt = Date.now() - 3000; @JS@ }) })') % (json.dumps(_T_CONFIG), _T_ARR, json.dumps(_T_ROWS))
+def _t_card(statuses, js=""):
+    return _T_CARD.replace("@STATUSES@", "(" + json.dumps(statuses) + ")").replace("@JS@", js)
+_T_LIVE = {r["id"]: _T_REC for r in _T_ROWS}
+_T_DEAD = {_T_ROWS[0]["id"]: _T_REC, _T_ROWS[1]["id"]: dict(_T_REC, note=_T_DEAD_NOTE)}
+_T_MOCK = {"bridgeNet": _T_NET, "bridge": {"config": _T_CONFIG, "send_backs": {"send_backs": []}, "receives": {"receives": []}}}
+for _name, _js, _mock in [
+    # Older bridge tokens folded into one line; v3's 0.1 wETH, v5 (the LEZ Bridge's) and v7 (the newest) shown.
+    ("tidy-tokens-folded", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), _T_MOCK),
+    ("tidy-tokens-open", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true; root.toggleOldTokens("%s") })' % _T_JEF), _T_MOCK),
+    # The two panels open (as today, with Hide on each withdrawal), then folded to their headers.
+    ("tidy-panels-open", _t_card(_T_LIVE), _T_MOCK),
+    ("tidy-panels-folded", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldPanel("arriving"); root.foldPanel("bridging") })'), _T_MOCK),
+    # Folded as kept in the module's settings, read when Names opens.
+    ("tidy-panels-kept", _t_card(_T_LIVE), dict(_T_MOCK, settings={"wallet_fold_arriving": "yes", "wallet_fold_bridging": "yes"})),
+    # One the bridge says can't be finished: its reason, and Hide.
+    ("tidy-dead", _t_card(_T_DEAD), _T_MOCK),
+    # After Hide on it: off the card, the line under the panels, what Hide did.
+    ("tidy-dead-hidden", _t_card(_T_DEAD, 'root.againAfter(200, function() { root.hideSendBack("sb-8c065e4e54235fe6", true) })'), _T_MOCK),
+    # Both hidden: the panel goes; "2 hidden withdrawals · Show them".
+    ("tidy-both-hidden", _t_card(_T_LIVE), dict(_T_MOCK, settings={"wallet_hidden_send_backs": json.dumps([r["id"] for r in _T_ROWS])})),
+    # Show them: back on the card, each with Show.
+    ("tidy-hidden-shown", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.sbShowHidden = true })'), dict(_T_MOCK, settings={"wallet_hidden_send_backs": json.dumps([r["id"] for r in _T_ROWS])})),
+    # Hide when the module can't keep it (an older names module): hidden for now, said so.
+    ("tidy-hide-not-kept", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.hideSendBack("sb-6163f4e0007b40e3", true) })'), dict(_T_MOCK, noSettings=True)),
+]:
+    SCENARIOS[_name] = _js
+    MOCKS[_name] = _mock
+    HEIGHTS[_name] = 2100
 
 
 def main():

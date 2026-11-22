@@ -21,6 +21,7 @@ import "claimdelay.mjs" as ClaimDelay
 import "relayline.mjs" as RelayLine
 import "nft.mjs" as Nft
 import "vesting.mjs" as Vesting
+import "tidy.mjs" as Tidy
 
 Item {
     id: root
@@ -486,6 +487,7 @@ Item {
             var loaded = config.module_version ? String(config.module_version) : ""
             buildCommit = config.build_commit && config.build_commit !== "dev" ? String(config.build_commit) : ""
             moduleFeatures = Array.isArray(config.features) ? config.features : []
+            loadAppSettings()
             noteChatAddress()
             readBridgeNote()
             readWhatsNew()
@@ -897,6 +899,88 @@ Item {
     readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null, namesNet === "0.4" ? Logic.publicAccounts(cliBalance, cliAccounts) : null, bridgeTokenTable)
     property bool bridgeNetShowEmpty: false   // the wallet's accounts with nothing there, shown one by one
     readonly property var bridgeNetView: Logic.bridgeNetShown(bridgeNetBlocks, bridgeNetShowEmpty, receiveKeepAccounts)
+    // ── The card kept tidy (tidy.mjs; Jef, 21 Nov) ──
+    // An account's older bridge tokens with nothing in them fold into one line; opened here for
+    // this window only. The bridges whose tokens always show: the one new receives and sends use
+    // (the LEZ Bridge's config) and the newest one the wallet reads.
+    property var oldTokensOpen: ({})
+    readonly property var bridgeCurrent: Tidy.currentBridges(bridgeConfig !== null && bridgeConfig.deployment && bridgeConfig.deployment.bridge_program ? String(bridgeConfig.deployment.bridge_program) : "",
+        bridgeNet !== null && bridgeNet.read ? bridgeNet.read.bridges : null)
+    function toggleOldTokens(account) {
+        var open = Object.assign({}, oldTokensOpen)
+        open[account] = !open[account]
+        oldTokensOpen = open
+    }
+    // The two bridge panels folded or not, and the withdrawals hidden from the card: kept in the
+    // names module's app settings (app_settings, a file beside config.json) across restarts; a
+    // module without it keeps them for this window only.
+    property bool foldArriving: false
+    property bool foldBridging: false
+    property var sbHidden: []
+    property bool sbShowHidden: false
+    property string sbHideLine: ""
+    property string sbHideKind: ""
+    property var sbDeadSaid: ({})          // id → the bridge's answer to a press that says it can't be finished
+    readonly property bool settingsKept: moduleFeatures.indexOf("app_settings") >= 0
+    readonly property var sbCard: Tidy.visibleRows(sbRowsNow, sbHidden, sbShowHidden)
+    property bool appSettingsAsked: false
+    function loadAppSettings() {
+        if (appSettingsAsked || !settingsKept)
+            return
+        appSettingsAsked = true
+        askLater("app_settings", [], function(value) {
+            var v = value && typeof value === "object" ? value : {}
+            foldArriving = Tidy.settingOn(v.wallet_fold_arriving)
+            foldBridging = Tidy.settingOn(v.wallet_fold_bridging)
+            sbHidden = Tidy.hiddenRead(v.wallet_hidden_send_backs)
+        }, function(message) {
+            appSettingsAsked = false
+            console.log("names_ui: app_settings:", message)
+        }, 10000)
+    }
+    /// Keeps one view setting; `failed` is told when it couldn't be kept.
+    function keepSetting(key, value, kept, failed) {
+        if (!settingsKept) {
+            if (failed) failed("")
+            return
+        }
+        askLater("app_setting", [key, value], function() { if (kept) kept() }, function(message) {
+            console.log("names_ui: app_setting", key + ":", message)
+            if (failed) failed(message)
+        }, 10000)
+    }
+    function foldPanel(which) {
+        if (which === "arriving") {
+            foldArriving = !foldArriving
+            keepSetting("wallet_fold_arriving", foldArriving ? "yes" : "")
+        } else {
+            foldBridging = !foldBridging
+            keepSetting("wallet_fold_bridging", foldBridging ? "yes" : "")
+        }
+    }
+    /// Hide (or Show again) a withdrawal on the card: said at once, then whether it was kept.
+    function hideSendBack(id, hide) {
+        sbHidden = Tidy.hiddenWith(sbHidden, id, hide)
+        if (sbHidden.length === 0)
+            sbShowHidden = false
+        sbHideKind = "working"
+        sbHideLine = hide ? "Hiding it…" : "Showing it again…"
+        keepSetting("wallet_hidden_send_backs", sbHidden.length > 0 ? JSON.stringify(sbHidden) : "", function() {
+            sbHideKind = "done"
+            sbHideLine = hide ? "Hidden from the card. Nothing on Ethereum or LEZ changed." : "Shown on the card again."
+        }, function(message) {
+            sbHideKind = "waiting"
+            sbHideLine = (hide ? "Hidden for now" : "Shown for now") + (message === "" ? ": this names module can't keep it, so it comes back when Names opens again." : ": it couldn't be kept, so it comes back when Names opens again.")
+        })
+    }
+    /// What the bridge said to a press on withdrawal `id`, kept when it says it can't be finished.
+    function sbNoteDead(id, message) {
+        if (!Tidy.deadSaid(message))
+            return
+        var said = Object.assign({}, sbDeadSaid)
+        said[id] = String(message)
+        sbDeadSaid = said
+    }
 
     /// A time of day for a reading taken at `seconds`.
     function clockShown(seconds) {
@@ -2522,7 +2606,8 @@ Item {
     /// releasable time once; otherwise none.
     function sbScheduleNext() {
         var onScreen = walletView === "sendback"
-        var rows = onScreen ? sendBacks.filter(function(x) { return x.id === sbFocus }) : sendBacks
+        // A withdrawal hidden from the card isn't followed there (it is on its own screen).
+        var rows = onScreen ? sendBacks.filter(function(x) { return x.id === sbFocus }) : sendBacks.filter(function(x) { return sbShowHidden || sbHidden.indexOf(x.id) < 0 })
         var items = rows.map(function(x) {
             var m = Logic.sendBackAutoMode(Object.assign({ account: x.account }, sbStatuses[x.id] || { stage: x.stage }))
             return { mode: m.mode, at: m.at, focused: onScreen && x.id === sbFocus }
@@ -2560,6 +2645,7 @@ Item {
         var open = sendBacks.filter(function(x) {
             var st = sbStatuses[x.id] ? sbStatuses[x.id].stage : x.stage
             return st !== "released" && (st !== "planned" || x.id === onScreen) && (onScreen === "" || x.id === onScreen)
+                && (x.id === onScreen || sbShowHidden || sbHidden.indexOf(x.id) < 0)
                 && (asked || Logic.sendBackAutoMode(Object.assign({ account: x.account }, sbStatuses[x.id] || { stage: x.stage })).mode !== "none")
         })
         if (open.length === 0) {
@@ -2637,6 +2723,7 @@ Item {
                 }, function(message, kind) {
                     sbAsking = false
                     sbError = sentence(message)
+                    sbNoteDead(id, message)
                     console.log("names_ui: send back: send_back_witness:", kind, message)
                 }, 120000, false)
                 return
@@ -2658,6 +2745,7 @@ Item {
                 sbProverChanged = sentence(message)
             else
                 sbError = sentence(message)
+            sbNoteDead(id, message)
             console.log("names_ui: send back: send_back_prove:", kind, code, message)
         }, 120000, false)
     }
@@ -2717,6 +2805,7 @@ Item {
             sbAsking = false
             sbSettleAsking = false
             sbError = sentence(message)
+            sbNoteDead(id, message)
             console.log("names_ui: send back: send_back_settle:", kind, message)
         }, 120000, false)
     }
@@ -10326,6 +10415,21 @@ Item {
 
     /// A panel for something of yours under way (a receive, a bridge to Ethereum): a neutral box;
     /// its status lines carry the colour (STYLE.md).
+    /// A bridge panel's header on the card: its title in capitals; folded, how many rows it holds
+    /// and how many wait on the person (Tidy.foldedNote); "Collapse" / "Show" folds it.
+    component PanelHead: RowLayout {
+        id: head
+        property string title: ""
+        property bool folded: false
+        property string note: ""
+        signal toggle()
+        Layout.fillWidth: true
+        spacing: 10
+        Text { textFormat: Text.PlainText; text: head.title; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+        Text { textFormat: Text.PlainText; visible: head.note !== ""; Layout.fillWidth: true; text: "· " + head.note; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; elide: Text.ElideRight }
+        Item { visible: head.note === ""; Layout.fillWidth: true }
+        Link { text: head.folded ? "Show" : "Collapse"; color: root.dim; font.pixelSize: root.px(15); onPressed: head.toggle() }
+    }
     component UnderwayPanel: Rectangle {
         default property alias content: underwayColumn.data
         Layout.fillWidth: true
@@ -12622,9 +12726,15 @@ Item {
                                 : { rows: root.receives.map(function(x) { return { id: x.id, symbol: x.symbol, amount: x.amount, account: x.account, progress: { stage: "old", card: "The LEZ Bridge here can't follow it: update it.", tone: "plain", claim: false } } }), hidden: 0 }
                             readonly property bool anyClaim: view.rows.some(function(x) { return x.progress.claim })
                             visible: view.rows.length > 0 || view.hidden > 0
-                            Text { textFormat: Text.PlainText; text: "Arriving from Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            // Folds to its header, which still says how many and any Claim ready.
+                            PanelHead {
+                                title: "Arriving from Ethereum"
+                                folded: root.foldArriving
+                                note: Tidy.foldedNote(root.foldArriving, arrivingPanel.view.rows.length, Tidy.arrivingReady(arrivingPanel.view.rows), "ready to claim")
+                                onToggle: root.foldPanel("arriving")
+                            }
                             Repeater {
-                                model: arrivingPanel.view.rows
+                                model: root.foldArriving ? [] : arrivingPanel.view.rows
                                 ColumnLayout {
                                     id: arrivingRow
                                     required property var modelData
@@ -12682,26 +12792,35 @@ Item {
                                 }
                             }
                             Link {
-                                visible: arrivingPanel.view.hidden > 0 || root.receiveShowAll
+                                visible: !root.foldArriving && (arrivingPanel.view.hidden > 0 || root.receiveShowAll)
                                 text: root.receiveShowAll ? "Show fewer" : "Show " + arrivingPanel.view.hidden + (arrivingPanel.view.hidden === 1 ? " more code" : " more codes") + " not deposited"
                                 color: root.dim
                                 font.pixelSize: root.px(15)
                                 onPressed: root.receiveShowAll = !root.receiveShowAll
                             }
-                            ReceiveCheckLine { visible: root.receiveHasStatus }
+                            ReceiveCheckLine { visible: root.receiveHasStatus && !root.foldArriving }
                         }
                         // Bridging to Ethereum: this wallet's send-backs, in the same tone; the wait
                         // large. A row opens Send back at its stage.
+                        // Each row can be hidden from the card (Hide; kept across restarts), and one the
+                        // bridge says can't be finished says why in one line.
                         UnderwayPanel {
-                            visible: root.sbRowsNow.length > 0
-                            Text { textFormat: Text.PlainText; text: "Bridging to Ethereum"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
+                            visible: root.sbCard.rows.length > 0
+                            PanelHead {
+                                title: "Bridging to Ethereum"
+                                folded: root.foldBridging
+                                note: Tidy.foldedNote(root.foldBridging, root.sbCard.rows.length, Tidy.bridgingReady(root.sbCard.rows, root.sbStatuses, root.sbDeadSaid), "ready to finish")
+                                onToggle: root.foldPanel("bridging")
+                            }
                             Repeater {
-                                model: root.sbRowsNow
+                                model: root.foldBridging ? [] : root.sbCard.rows
                                 ColumnLayout {
                                     id: backRow
                                     required property var modelData
                                     required property int index
                                     readonly property var p: modelData.progress
+                                    readonly property string dead: Tidy.deadReason(root.sbStatuses[modelData.id] || null, root.sbDeadSaid[modelData.id] || "")
+                                    readonly property bool hiddenNow: root.sbHidden.indexOf(modelData.id) >= 0
                                     Layout.fillWidth: true
                                     spacing: 4
                                     Rectangle { visible: backRow.index > 0; Layout.fillWidth: true; Layout.bottomMargin: 8; implicitHeight: 1; color: root.line }
@@ -12718,9 +12837,16 @@ Item {
                                             }
                                             StatusLine {
                                                 readonly property var pj: Logic.privateJob(root.sbJobs[backRow.modelData.id] || null, "burn")
-                                                kind: pj !== null && pj.stage !== "done" ? Logic.toneKind(pj.tone) : Logic.toneKind(backRow.p.tone)
-                                                text: pj !== null && pj.stage !== "done" ? "Private burn · " + pj.card : backRow.p.card
+                                                kind: backRow.dead !== "" ? "problem" : pj !== null && pj.stage !== "done" ? Logic.toneKind(pj.tone) : Logic.toneKind(backRow.p.tone)
+                                                text: backRow.dead !== "" ? backRow.dead : pj !== null && pj.stage !== "done" ? "Private burn · " + pj.card : backRow.p.card
                                             }
+                                        }
+                                        // Hide: off the card (kept), nothing on either chain changes; Show brings it back.
+                                        Link {
+                                            text: backRow.hiddenNow ? "Show" : "Hide"
+                                            color: root.dim
+                                            font.pixelSize: root.px(15)
+                                            onPressed: root.hideSendBack(backRow.modelData.id, !backRow.hiddenNow)
                                         }
                                         // Remove: never proposed to the wallet, or released; the bridge reads LEZ at the press.
                                         Link {
@@ -12736,8 +12862,18 @@ Item {
                                     }
                                 }
                             }
-                            SendBackCheckLine { visible: root.sbRowsNow.some(function(x) { return x.progress.stage !== "released" }) }
+                            SendBackCheckLine { visible: !root.foldBridging && root.sbCard.rows.some(function(x) { return x.progress.stage !== "released" }) }
                         }
+                        // Withdrawals hidden from the card: how many, and Show to see them again.
+                        RowLayout {
+                            visible: root.sbCard.hidden > 0
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Hint { font.pixelSize: root.px(15); text: Tidy.hiddenLine(root.sbCard.hidden) }
+                            Link { text: root.sbShowHidden ? "Hide them again" : "Show them"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbShowHidden = !root.sbShowHidden }
+                        }
+                        // What Hide did: at once, then whether it was kept.
+                        StatusLine { visible: root.sbHideLine !== ""; kind: root.sbHideKind; text: root.sbHideLine }
                         // What Remove checked, and whether it removed: stays after the row (or the panel) is gone.
                         StatusLine { visible: root.bridgeRemoveLine !== ""; kind: root.bridgeRemoveKind; text: root.bridgeRemoveLine }
                         BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
@@ -12782,8 +12918,11 @@ Item {
                                     Link { visible: netAccount.modelData.copyable !== false; text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(netAccount.modelData.account, "The account ID") }
                                 }
                                 Hint { visible: !netAccount.modelData.found; font.pixelSize: root.px(15); text: "Nothing on this network." }
+                                // Older bridges' tokens with nothing in them fold into one line (tidy.mjs).
+                                readonly property var split: Tidy.tokensFolded(netAccount.modelData.assets, root.bridgeCurrent)
+                                readonly property bool oldOpen: !!root.oldTokensOpen[netAccount.modelData.account]
                                 Repeater {
-                                    model: netAccount.modelData.assets
+                                    model: netAccount.oldOpen ? netAccount.modelData.assets : netAccount.split.shown
                                     RowLayout {
                                         id: netAsset
                                         required property var modelData
@@ -12813,6 +12952,13 @@ Item {
                                             horizontalAlignment: Text.AlignRight
                                         }
                                     }
+                                }
+                                RowLayout {
+                                    visible: netAccount.split.folded.length > 0
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Hint { font.pixelSize: root.px(14); text: Tidy.olderLine(netAccount.split.folded.length) + (netAccount.oldOpen ? ", shown above" : "") }
+                                    Link { text: netAccount.oldOpen ? "Hide" : "Show"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.toggleOldTokens(netAccount.modelData.account) }
                                 }
                                 Hint { visible: netAccount.modelData.other > 0; font.pixelSize: root.px(14); text: "Also holds " + netAccount.modelData.other + (netAccount.modelData.other === 1 ? " other token" : " other tokens") + " that the bridge didn't make. Not shown." }
                                 // Test LEZ from the bridge test network's faucet, for this account.
