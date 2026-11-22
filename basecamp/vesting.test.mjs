@@ -25,6 +25,8 @@ check("accountIds: objects and non-lists", [accountIds([{ account: "Public/" + A
 // Replies: the module's {ok} text, encoded once or twice more by Basecamp, and the host's words.
 const answer = { ok: true, to_block: 10, tip: 20, schedules: [] };
 check("reply: ok, as sent", reply(JSON.stringify(answer)), { kind: "ok", value: answer, error: "" });
+check("reply: base58 copies replace hex ids (Vest 0.5.0 sends both)", reply(JSON.stringify({ ok: true, schedules: [{ address: "ab", address_base58: "Addr1", creator: "9d47", creator_base58: "Crea1", beneficiary: "9d47", beneficiary_base58: "Bene1", status: "claimable" }] })).value.schedules[0], { address: "Addr1", address_base58: "Addr1", creator: "Crea1", creator_base58: "Crea1", beneficiary: "Bene1", beneficiary_base58: "Bene1", status: "claimable" });
+check("reply: no base58 copy keeps the id", reply(JSON.stringify({ ok: true, schedules: [{ creator: "Crea2", status: "unvested" }] })).value.schedules[0].creator, "Crea2");
 check("reply: ok, encoded twice", reply(JSON.stringify(JSON.stringify(answer))).kind, "ok");
 check("reply: ok, in a host envelope", reply(JSON.stringify({ success: true, value: JSON.stringify(answer) })).value, answer);
 check("reply: the module's refusal", reply(JSON.stringify({ ok: false, error: "the chain didn't answer" })), { kind: "error", value: null, error: "the chain didn't answer" });

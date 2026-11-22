@@ -41,7 +41,7 @@ export function reply(raw) {
     }
     if (parsed && typeof parsed === "object" && typeof parsed.ok === "boolean") {
         if (parsed.ok)
-            return { kind: "ok", value: parsed, error: "" }
+            return { kind: "ok", value: withBase58(parsed), error: "" }
         var why = errorText(parsed.error)
         return { kind: NO_METHOD.test(why) ? "nomethod" : "error", value: null, error: why }
     }
@@ -52,6 +52,24 @@ export function reply(raw) {
     if (NO_METHOD.test(said)) return { kind: "nomethod", value: null, error: said.trim() }
     if (BUSY.test(said) || !(parsed && typeof parsed === "object") || said.trim() === "") return { kind: "busy", value: null, error: said.trim() }
     return { kind: "error", value: null, error: "Basecamp refused the call: " + errorText(parsed.message || parsed.error) }
+}
+
+/// Vest's module sends ids as hex with a `_base58` copy beside each (`creator_base58`, …). Names
+/// shows, copies and looks up LNS names by base58, so the base58 copy wins where it is there.
+function withBase58(answer) {
+    if (!answer || !Array.isArray(answer.schedules)) return answer
+    var out = {}
+    for (var k in answer) out[k] = answer[k]
+    out.schedules = answer.schedules.map(function(s) {
+        if (!s || typeof s !== "object") return s
+        var c = {}
+        for (var f in s) c[f] = s[f]
+        ;["address", "creator", "beneficiary"].forEach(function(f) {
+            if (typeof s[f + "_base58"] === "string" && s[f + "_base58"] !== "") c[f] = s[f + "_base58"]
+        })
+        return c
+    })
+    return out
 }
 
 function errorText(e) {
