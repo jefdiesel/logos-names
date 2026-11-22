@@ -1161,7 +1161,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("429 words are a wait", [rateLimited("HTTP 429 Too Many Requests"), rateLimited("can't reach the bridge test network: too many requests"), rateLimited("The bridge's endpoint is busy; trying again shortly."), rateLimited("no such receive")], [true, true, true, false]);
   check("clock is HH:MM", /^[0-2][0-9]:[0-5][0-9]$/.test(clockShown(1763208000)), true);
   check("send_backs rows", sendBacksFrom({ send_backs: [{ id: "sb-1", amount_text: "0.01 ETH", account: "Public/A", recipient: "0xAb", words_text: "a · b · c · d", stage: "burned", symbol: "ETH" }, { stage: "x" }] }),
-    [{ id: "sb-1", amount: "0.01 ETH", account: "Public/A", recipient: "0xAb", words: "a · b · c · d", stage: "burned", symbol: "ETH" }]);
+    [{ id: "sb-1", amount: "0.01 ETH", account: "Public/A", recipient: "0xAb", words: "a · b · c · d", stage: "burned", symbol: "ETH", deployment: null }]);
   const rows = sendBackRowsShown([{ id: "a", stage: "burned" }, { id: "b", stage: "released" }, { id: "c", stage: "released" }], { a: { stage: "recorded" } }, { b: 1000 }, 2000);
   check("card rows: under way, and received only for a while", rows.map((x) => x.id + ":" + x.progress.stage), ["a:recorded", "b:released"]);
   const now = (st) => sendBackSteps(st).find((x) => x.state === "now");

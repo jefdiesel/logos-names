@@ -125,7 +125,7 @@ Item {
     // at install, but an older module can still be the one Basecamp loaded).
     readonly property string neededModule: "0.18.2"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.18.2"
+    readonly property string appVersion: "0.18.3"
     property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
     property var moduleFeatures: []    // get_config features: what this build of the names module can do
     property real machineMemory: 0     // get_config memory_bytes: this computer's memory (0: unknown)
@@ -899,18 +899,13 @@ Item {
     readonly property var bridgeNetBlocks: Logic.bridgeNetRows(bridgeNet ? bridgeNet.read : null, namesNet === "0.4" ? Logic.publicAccounts(cliBalance, cliAccounts) : null, bridgeTokenTable)
     property bool bridgeNetShowEmpty: false   // the wallet's accounts with nothing there, shown one by one
     readonly property var bridgeNetView: Logic.bridgeNetShown(bridgeNetBlocks, bridgeNetShowEmpty, receiveKeepAccounts)
-    // ── The card kept tidy (tidy.mjs; Jef, 21 Nov) ──
-    // An account's older bridge tokens with nothing in them fold into one line; opened here for
-    // this window only. The bridges whose tokens always show: the one new receives and sends use
-    // (the LEZ Bridge's config) and the newest one the wallet reads.
-    property var oldTokensOpen: ({})
-    readonly property var bridgeCurrent: Tidy.currentBridges(bridgeConfig !== null && bridgeConfig.deployment && bridgeConfig.deployment.bridge_program ? String(bridgeConfig.deployment.bridge_program) : "",
-        bridgeNet !== null && bridgeNet.read ? bridgeNet.read.bridges : null)
-    function toggleOldTokens(account) {
-        var open = Object.assign({}, oldTokensOpen)
-        open[account] = !open[account]
-        oldTokensOpen = open
-    }
+    // ── The card kept tidy (tidy.mjs; Jef, 21 and 22 Nov: "only show current vault") ──
+    // Only the current bridge (the one the LEZ Bridge's config uses for new receives and sends)
+    // stays on the card. An older bridge's tokens, receives and withdrawals that still need the
+    // person go behind an "Older bridges · N" line, opened here for this window only; the rest
+    // are left out. Until the LEZ Bridge's config is read, nothing counts as older.
+    property bool olderOpen: false
+    readonly property var bridgeCurrent: Tidy.currentBridges(bridgeConfig !== null && bridgeConfig.deployment && bridgeConfig.deployment.bridge_program ? String(bridgeConfig.deployment.bridge_program) : "")
     // The two bridge panels folded or not, and the withdrawals hidden from the card: kept in the
     // names module's app settings (app_settings, a file beside config.json) across restarts; a
     // module without it keeps them for this window only.
@@ -922,7 +917,9 @@ Item {
     property string sbHideKind: ""
     property var sbDeadSaid: ({})          // id → the bridge's answer to a press that says it can't be finished
     readonly property bool settingsKept: moduleFeatures.indexOf("app_settings") >= 0
-    readonly property var sbCard: Tidy.visibleRows(sbRowsNow, sbHidden, sbShowHidden)
+    // Older bridges' withdrawals that can still be finished stay followed (sendBacks, not this).
+    readonly property var sbSplit: Tidy.bridgingSplit(sbRowsNow, sbStatuses, sbDeadSaid)
+    readonly property var sbCard: Tidy.visibleRows(olderOpen ? sbSplit.rows.concat(sbSplit.older) : sbSplit.rows, sbHidden, sbShowHidden)
     property bool appSettingsAsked: false
     function loadAppSettings() {
         if (appSettingsAsked || !settingsKept)
@@ -2388,7 +2385,7 @@ Item {
                 plans[id] = ticked
                 sbOwnPlans = plans
             }
-            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), symbol: String(value.symbol || ""), kind: String(value.kind || ""), notice: String(value.account_notice || "") }
+            var row = { id: id, amount: String(value.amount_text || ""), account: String(value.account || sbAccount), recipient: String(value.recipient || ""), words: String(value.words_text || ""), stage: String(value.stage || "planned"), symbol: String(value.symbol || ""), kind: String(value.kind || ""), notice: String(value.account_notice || ""), deployment: value.deployment && typeof value.deployment === "object" ? value.deployment : null }
             sendBacks = [row].concat(sendBacks.filter(function(x) { return x.id !== id }))
             var all = sbStatuses
             all[id] = value
@@ -10445,6 +10442,19 @@ Item {
         Item { visible: head.note === ""; Layout.fillWidth: true }
         Link { text: head.folded ? "Show" : "Collapse"; color: root.dim; font.pixelSize: root.px(15); onPressed: head.toggle() }
     }
+    /// The quiet line for what older bridges still hold here (Tidy.olderLine): "Older bridges · 2",
+    /// with Show / Hide; one switch (root.olderOpen) opens them all. Nothing when `count` is 0.
+    component OlderLine: RowLayout {
+        id: olderRow
+        property int count: 0
+        property int size: 15
+        property bool allowed: true
+        visible: allowed && count > 0
+        Layout.fillWidth: true
+        spacing: 12
+        Hint { font.pixelSize: root.px(olderRow.size); text: Tidy.olderLine(olderRow.count) + (root.olderOpen ? ", shown above" : "") }
+        Link { text: root.olderOpen ? "Hide" : "Show"; color: root.dim; font.pixelSize: root.px(olderRow.size); onPressed: root.olderOpen = !root.olderOpen }
+    }
     component UnderwayPanel: Rectangle {
         default property alias content: underwayColumn.data
         Layout.fillWidth: true
@@ -12737,10 +12747,13 @@ Item {
                         // in the panel once it has arrived. A row opens Receive at its step.
                         UnderwayPanel {
                             id: arrivingPanel
-                            readonly property var view: root.receiveHasStatus ? Logic.receiveRowsShown(root.receives, root.receiveStatuses, root.receiveClaimedAt, root.receiveNow, root.receiveShowAll)
+                            readonly property var full: root.receiveHasStatus ? Logic.receiveRowsShown(root.receives, root.receiveStatuses, root.receiveClaimedAt, root.receiveNow, root.receiveShowAll)
                                 : { rows: root.receives.map(function(x) { return { id: x.id, symbol: x.symbol, amount: x.amount, account: x.account, progress: { stage: "old", card: "The LEZ Bridge here can't follow it: update it.", tone: "plain", claim: false } } }), hidden: 0 }
+                            // An older bridge's deposits on their way or arrived wait behind "Older bridges"; its others are left out.
+                            readonly property var split: Tidy.arrivingSplit(full.rows)
+                            readonly property var view: ({ rows: root.olderOpen ? split.rows.concat(split.older) : split.rows, hidden: full.hidden })
                             readonly property bool anyClaim: view.rows.some(function(x) { return x.progress.claim })
-                            visible: view.rows.length > 0 || view.hidden > 0
+                            visible: view.rows.length > 0 || view.hidden > 0 || split.older.length > 0
                             // Folds to its header, which still says how many and any Claim ready.
                             PanelHead {
                                 title: "Arriving from Ethereum"
@@ -12813,6 +12826,7 @@ Item {
                                 font.pixelSize: root.px(15)
                                 onPressed: root.receiveShowAll = !root.receiveShowAll
                             }
+                            OlderLine { allowed: !root.foldArriving; count: arrivingPanel.split.older.length }
                             ReceiveCheckLine { visible: root.receiveHasStatus && !root.foldArriving }
                         }
                         // Bridging to Ethereum: this wallet's send-backs, in the same tone; the wait
@@ -12820,7 +12834,7 @@ Item {
                         // Each row can be hidden from the card (Hide; kept across restarts), and one the
                         // bridge says can't be finished says why in one line.
                         UnderwayPanel {
-                            visible: root.sbCard.rows.length > 0
+                            visible: root.sbCard.rows.length > 0 || root.sbSplit.older.length > 0
                             PanelHead {
                                 title: "Bridging to Ethereum"
                                 folded: root.foldBridging
@@ -12877,6 +12891,7 @@ Item {
                                     }
                                 }
                             }
+                            OlderLine { allowed: !root.foldBridging; count: root.sbSplit.older.length }
                             SendBackCheckLine { visible: !root.foldBridging && root.sbCard.rows.some(function(x) { return x.progress.stage !== "released" }) }
                         }
                         // Withdrawals hidden from the card: how many, and Show to see them again.
@@ -12933,11 +12948,10 @@ Item {
                                     Link { visible: netAccount.modelData.copyable !== false; text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(netAccount.modelData.account, "The account ID") }
                                 }
                                 Hint { visible: !netAccount.modelData.found; font.pixelSize: root.px(15); text: "Nothing on this network." }
-                                // Older bridges' tokens with nothing in them fold into one line (tidy.mjs).
+                                // Only the current bridge's tokens; an older bridge's that can still go back wait behind "Older bridges" (tidy.mjs).
                                 readonly property var split: Tidy.tokensFolded(netAccount.modelData.assets, root.bridgeCurrent)
-                                readonly property bool oldOpen: !!root.oldTokensOpen[netAccount.modelData.account]
                                 Repeater {
-                                    model: netAccount.oldOpen ? netAccount.modelData.assets : netAccount.split.shown
+                                    model: root.olderOpen ? netAccount.split.shown.concat(netAccount.split.folded) : netAccount.split.shown
                                     RowLayout {
                                         id: netAsset
                                         required property var modelData
@@ -12968,13 +12982,7 @@ Item {
                                         }
                                     }
                                 }
-                                RowLayout {
-                                    visible: netAccount.split.folded.length > 0
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    Hint { font.pixelSize: root.px(14); text: Tidy.olderLine(netAccount.split.folded.length) + (netAccount.oldOpen ? ", shown above" : "") }
-                                    Link { text: netAccount.oldOpen ? "Hide" : "Show"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.toggleOldTokens(netAccount.modelData.account) }
-                                }
+                                OlderLine { count: netAccount.split.folded.length; size: 14 }
                                 Hint { visible: netAccount.modelData.other > 0; font.pixelSize: root.px(14); text: "Also holds " + netAccount.modelData.other + (netAccount.modelData.other === 1 ? " other token" : " other tokens") + " that the bridge didn't make. Not shown." }
                                 // Test LEZ from the bridge test network's faucet, for this account.
                                 Action {
@@ -15926,7 +15934,7 @@ Item {
                         visible: root.whatsNewShown
                         Layout.fillWidth: true
                         spacing: 6
-                        Part { text: "What's new in Names 0.18.2" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
+                        Part { text: "What's new in Names 0.18.3" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
                         Repeater {
                             model: Logic.WHATS_NEW
                             Hint { required property var modelData; color: root.ink; text: "· " + modelData }

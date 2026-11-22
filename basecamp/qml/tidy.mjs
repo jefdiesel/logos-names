@@ -1,7 +1,10 @@
 // The wallet's bridge card kept tidy (Jef, 21 Nov: "a ton of older bridge tokens … not useful",
 // "the claims should show but collapsible", two withdrawals he can't use): which bridged tokens
 // fold away, what a folded panel's header says, which withdrawals the bridge says can't be
-// finished, and the withdrawals hidden from the card. Pure functions, tested in tidy.test.mjs.
+// finished, and the withdrawals hidden from the card. Since 22 Nov ("hide old vault deposits. only
+// show current vault"): only the current bridge's tokens, receives and withdrawals stay on the
+// card; an older bridge's that still need the person go behind one "Older bridges" line, the rest
+// are left out. Pure functions, tested in tidy.test.mjs.
 // Basecamp's QML engine: no BigInt, no Java reserved words as names.
 
 /// The bridges the wallet knows, oldest first (logic.mjs BRIDGE_LABELS; the module's
@@ -25,27 +28,17 @@ export function asList(x) {
     return []
 }
 
-/// The bridges whose tokens always stay on the card: the one new receives and sends use
-/// (`chosen`: the LEZ Bridge's config().deployment.bridge_program, "" when it doesn't say), and the
-/// newest one the wallet reads (`read`: bridge_net_balances' read.bridges, [{program}]): the
-/// newest known one by BRIDGE_ORDER, else the last one listed. [] when neither is known.
-export function currentBridges(chosen, read) {
-    var out = []
+/// The bridges whose vault can never release (rfp-022 vault/DEPLOYMENTS.md): v2 (its update
+/// image is a placeholder) and v3 (deployed with a zero G2 state, so it accepts no update). Their
+/// tokens can never go back to Ethereum.
+export const NEVER_RELEASE = BRIDGE_ORDER.slice(0, 2)
+
+/// The current bridge (Jef, 22 Nov: "only show current vault"): the one the LEZ Bridge itself uses
+/// for new receives and sends (`chosen`: its config().deployment.bridge_program), as a list. []
+/// while that isn't known (not read yet, or a LEZ Bridge that doesn't say): then nothing is older.
+export function currentBridges(chosen) {
     var mine = String(chosen || "")
-    if (mine !== "")
-        out.push(mine)
-    var listed = asList(read).map(function(b) { return b && b.program ? String(b.program) : "" }).filter(function(p) { return p !== "" })
-    var newest = ""
-    var rank = -1
-    listed.forEach(function(p) {
-        var at = BRIDGE_ORDER.indexOf(p)
-        if (at > rank) { rank = at; newest = p }
-    })
-    if (newest === "" && listed.length > 0)
-        newest = listed[listed.length - 1]
-    if (newest !== "" && out.indexOf(newest) < 0)
-        out.push(newest)
-    return out
+    return mine !== "" ? [mine] : []
 }
 
 /// Whether a card asset row (logic.mjs bridgeNetRows) holds anything: its base units aren't 0.
@@ -54,9 +47,11 @@ function holds(asset) {
     return base !== "" && !/^0*$/.test(base)
 }
 
-/// One account's card rows split in two: `shown` (native LEZ, every token of a current bridge,
-/// anything held, a token whose bridge isn't known) and `folded` (an older bridge's token with
-/// nothing in it). `current`: currentBridges. With no current bridge known nothing folds.
+/// One account's card rows split: `shown` (native LEZ, every token of the current bridge, a token
+/// whose bridge isn't said) and `folded` (an older bridge's token that still holds something and
+/// can still go back to Ethereum: behind the "Older bridges" line). An older bridge's token with
+/// nothing in it, or on a bridge that can never release (NEVER_RELEASE), is left out. `current`:
+/// currentBridges. With no current bridge known, everything is shown.
 export function tokensFolded(assets, current) {
     var list = asList(assets)
     var keep = asList(current)
@@ -65,17 +60,50 @@ export function tokensFolded(assets, current) {
     var shown = [], folded = []
     list.forEach(function(a) {
         var bridge = a && a.bridge ? String(a.bridge) : ""
-        var older = bridge !== "" && keep.indexOf(bridge) < 0
-        if (older && !holds(a)) folded.push(a)
-        else shown.push(a)
+        if (bridge === "" || keep.indexOf(bridge) >= 0) shown.push(a)
+        else if (holds(a) && NEVER_RELEASE.indexOf(bridge) < 0) folded.push(a)
     })
     return { shown: shown, folded: folded }
 }
 
-/// The one quiet line for an account's folded tokens: "Older bridge tokens · 10", "" for none.
+/// Whether a card row (a receive or a withdrawal) was made on an older bridge: the LEZ Bridge says
+/// its deployment isn't the current one. A row that doesn't say counts as current.
+export function isOlder(row) {
+    var d = row && row.deployment && typeof row.deployment === "object" ? row.deployment : null
+    return d !== null && d.current === false
+}
+
+/// The "Arriving from Ethereum" rows split: `rows` (the current bridge's) and `older` (an older
+/// bridge's deposit still on its way or arrived: behind the "Older bridges" line). An older
+/// bridge's code nothing was deposited for, a claimed one or one that can't be followed is left out.
+export function arrivingSplit(rows) {
+    var out = { rows: [], older: [] }
+    asList(rows).forEach(function(x) {
+        if (!isOlder(x)) out.rows.push(x)
+        else if (x.progress && ["deposited", "final", "claimable", "noclaim"].indexOf(x.progress.stage) >= 0) out.older.push(x)
+    })
+    return out
+}
+
+/// The "Bridging to Ethereum" rows split: `rows` (the current bridge's) and `older` (an older
+/// bridge's withdrawal not received yet that can still be finished: behind the "Older bridges"
+/// line, and still followed). An older one received, or one the bridge says can't be finished
+/// (deadReason), is left out. `statuses`, `said`: as bridgingReady.
+export function bridgingSplit(rows, statuses, said) {
+    var out = { rows: [], older: [] }
+    asList(rows).forEach(function(x) {
+        if (!isOlder(x)) { out.rows.push(x); return }
+        var st = statuses ? statuses[x.id] : null
+        var done = x.progress && x.progress.stage === "released"
+        if (!done && deadReason(st, said ? said[x.id] : "") === "") out.older.push(x)
+    })
+    return out
+}
+
+/// The one quiet line for what an older bridge still holds: "Older bridges · 2", "" for none.
 export function olderLine(count) {
     var n = Number(count) || 0
-    return n > 0 ? "Older bridge tokens · " + n : ""
+    return n > 0 ? "Older bridges · " + n : ""
 }
 
 /// What a panel's header says beside its title: "" while open; folded, how many rows it holds and

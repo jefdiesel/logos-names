@@ -2,7 +2,7 @@
   "name": "names_ui",
   "display_name": "Names",
   "author": "lns:names",
-  "version": "0.18.2",
+  "version": "0.18.3",
   "type": "ui_qml",
   "category": "identity",
   "description": "Your name on Logos: register it, post as it, edit its profile",

@@ -1749,12 +1749,23 @@ def _t_card(statuses, js=""):
 _T_LIVE = {r["id"]: _T_REC for r in _T_ROWS}
 _T_DEAD = {_T_ROWS[0]["id"]: _T_REC, _T_ROWS[1]["id"]: dict(_T_REC, note=_T_DEAD_NOTE)}
 _T_MOCK = {"bridgeNet": _T_NET, "bridge": {"config": _T_CONFIG, "send_backs": {"send_backs": []}, "receives": {"receives": []}}}
+# The same card with the LEZ Bridge on v7: v5 is then an older bridge, its withdrawals say so.
+_T_V7 = "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"
+_T_OLD_CONFIG = dict(_T_CONFIG, deployment={"name": "added-7ef9153b69a3", "label": "bridge v7", "bridge_program": _T_V7, "release": "proof"})
+_T_OLD_TOKENS = [dict(t, amount="1200000000000000000") if t["bridge_label"] == "bridge v5" and t["symbol"] == "wETH" else t for t in _T_TOKENS]
+_T_OLD_NET = dict(_T_NET, read=dict(_T_NET["read"], accounts=[dict(_T_NET["read"]["accounts"][0], tokens=_T_OLD_TOKENS)]))
+_T_OLD_ST = {r["id"]: dict(_T_REC, deployment={"id": "bridge-test-network-v5", "label": "bridge v5", "current": False, "network": "LEZ 0.4 · bridge test network"}) for r in _T_ROWS}
+_T_OLD_JS = 'root.bridgeConfig = %s' % json.dumps(_T_OLD_CONFIG)
+_T_OLD_MOCK = {"bridgeNet": _T_OLD_NET, "bridge": {"config": _T_OLD_CONFIG, "send_backs": {"send_backs": []}, "receives": {"receives": []}}}
 for _name, _js, _mock in [
-    # Older bridge tokens folded into one line; v3's 0.1 wETH, v5 (the LEZ Bridge's) and v7 (the newest) shown.
+    # Only the current bridge (22 Nov): LEZ and v5's tokens; v3's 0.1 wETH (it can never go back) and the empty older ones left out, no line.
     ("tidy-tokens-folded", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), _T_MOCK),
     # With Move (a names module that has bridge_token_send): v3's 0.1 wETH keeps it.
     ("tidy-tokens-move", _t_card(_T_LIVE, _MV_FEAT + '; root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), dict(_T_MOCK, names_network="lez-0.4")),
-    ("tidy-tokens-open", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true; root.toggleOldTokens("%s") })' % _T_JEF), _T_MOCK),
+    # The LEZ Bridge moved on to v7: v5's 1.2 wETH and both v5 withdrawals wait behind "Older bridges · N" (each can still go back).
+    ("tidy-older", _t_card(_T_OLD_ST, _T_OLD_JS), _T_OLD_MOCK),
+    # Show on one line opens all of them in place.
+    ("tidy-older-open", _t_card(_T_OLD_ST, _T_OLD_JS + '; root.againAfter(200, function() { root.olderOpen = true })'), _T_OLD_MOCK),
     # The two panels open (as today, with Hide on each withdrawal), then folded to their headers.
     ("tidy-panels-open", _t_card(_T_LIVE), _T_MOCK),
     ("tidy-panels-folded", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldPanel("arriving"); root.foldPanel("bridging") })'), _T_MOCK),

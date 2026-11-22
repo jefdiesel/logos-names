@@ -3098,22 +3098,26 @@ function sendBackProgressPlain(status, nowSeconds, clock) {
 }
 
 /// This wallet's send-backs, from the bridge's `send_backs()` (no chain read; newest first):
-/// [{id, symbol, amount, account, recipient, words, stage}].
+/// [{id, symbol, amount, account, recipient, words, stage, deployment}] (`deployment`: the bridge
+/// it was made on, {id, label, current}, or null).
 export function sendBacksFrom(value) {
     var rows = value && Array.isArray(value.send_backs) ? value.send_backs : Array.isArray(value) ? value : []
     return rows.filter(function(x) { return x && x.id }).map(function(x) {
         return { id: String(x.id), amount: String(x.amount_text || ""), account: String(x.account || ""), recipient: String(x.recipient || ""),
-                 words: String(x.words_text || ""), stage: String(x.stage || ""), symbol: String(x.symbol || "") }
+                 words: String(x.words_text || ""), stage: String(x.stage || ""), symbol: String(x.symbol || ""),
+                 deployment: x.deployment && typeof x.deployment === "object" ? x.deployment : null }
     })
 }
 
 /// The card's "Bridging to Ethereum" rows, newest first: every one not received yet, and the
-/// ones received in the last 30 min (`receivedAt`: id → ms, while Names was open).
+/// ones received in the last 30 min (`receivedAt`: id → ms, while Names was open). Each carries
+/// the bridge it was made on (its last status's, else the list's), for tidy.mjs bridgingSplit.
 export function sendBackRowsShown(list, statuses, receivedAt, nowMs) {
     var st = statuses || {}, at = receivedAt || {}
     return (Array.isArray(list) ? list : []).map(function(x) { var s = st[x.id] || { stage: x.stage }; return { row: x, status: s } })
         .filter(function(e) { return e.status.stage !== "released" || (at[e.row.id] && Number(nowMs) - at[e.row.id] < RECEIVE_CLAIMED_SHOWN_MS) })
-        .map(function(e) { return { id: e.row.id, amount: e.row.amount, account: e.row.account, recipient: e.row.recipient, progress: sendBackProgress(e.status, Number(nowMs) / 1000) } })
+        .map(function(e) { return { id: e.row.id, amount: e.row.amount, account: e.row.account, recipient: e.row.recipient, progress: sendBackProgress(e.status, Number(nowMs) / 1000),
+                                    deployment: e.status.deployment && typeof e.status.deployment === "object" ? e.status.deployment : e.row.deployment || null } })
 }
 
 /// The send-back screen's steps: [{key, n, total, title, short, state}]. `s`: {stage ("choose" |
