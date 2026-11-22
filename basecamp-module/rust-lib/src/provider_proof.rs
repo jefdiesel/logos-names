@@ -70,7 +70,9 @@ pub struct Pass {
     pub tx_hash: String,
 }
 
-/// The stages the client reports while it proves.
+/// The stages the client reports while it proves. Each report is answered: false means stop,
+/// and send nothing. `Sending` is reported BEFORE the send, and its answer is the decision: once
+/// it is true, the proof can no longer be cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Proving,
@@ -82,8 +84,9 @@ pub enum Stage {
 pub trait GateClient: Send + Sync {
     /// Pre-checks 2, 4 (on chain) and 5: the payer's reserve, the gate's header, the simulation.
     fn prepare(&self, job: &ProofJob) -> Result<Prepared, WalletError>;
-    /// Proves and sends the prepared transaction, reporting stages.
-    fn prove_and_send(&self, job: &ProofJob, prepared: &Prepared, stage: &dyn Fn(Stage)) -> Result<Pass, WalletError>;
+    /// Proves and sends the prepared transaction, reporting stages. It sends only after
+    /// `stage(Stage::Sending)` answered true.
+    fn prove_and_send(&self, job: &ProofJob, prepared: &Prepared, stage: &dyn Fn(Stage) -> bool) -> Result<Pass, WalletError>;
 }
 
 /// The production client today: no gate is pinned, so nothing is proven.
@@ -93,7 +96,7 @@ impl GateClient for NoGateClient {
     fn prepare(&self, _: &ProofJob) -> Result<Prepared, WalletError> {
         Err(WalletError::GateNotPinned)
     }
-    fn prove_and_send(&self, _: &ProofJob, _: &Prepared, _: &dyn Fn(Stage)) -> Result<Pass, WalletError> {
+    fn prove_and_send(&self, _: &ProofJob, _: &Prepared, _: &dyn Fn(Stage) -> bool) -> Result<Pass, WalletError> {
         Err(WalletError::GateNotPinned)
     }
 }
@@ -126,9 +129,25 @@ pub enum Status {
     WaitingForBlock,
     Ready(Value),
     Failed(WalletError),
+    /// It failed after the send was decided: it may be on the chain.
+    FailedAfterSend(WalletError),
+    Cancelled,
 }
 
+/// What a failure after the send was decided says: never that nothing was sent.
+const MAYBE_SENT: &str = "It may have been sent: check your activity before trying again.";
+
 impl Status {
+    /// Whether nothing can follow it.
+    fn ended(&self) -> bool {
+        matches!(self, Status::Ready(_) | Status::Failed(_) | Status::FailedAfterSend(_) | Status::Cancelled)
+    }
+
+    /// Whether the send is decided (or the proof has ended): too late to cancel.
+    fn past_cancel(&self) -> bool {
+        self.ended() || matches!(self, Status::Sending | Status::WaitingForBlock)
+    }
+
     pub fn view(&self, now_ms: u64) -> Value {
         match self {
             Status::AwaitingApproval => json!({ "state": "awaiting-approval" }),
@@ -138,6 +157,9 @@ impl Status {
             Status::WaitingForBlock => json!({ "state": "waiting-for-block" }),
             Status::Ready(proof) => json!({ "state": "ready", "proof": proof }),
             Status::Failed(e) => json!({ "state": "failed", "code": e.code(), "plain_message": e.plain() }),
+            Status::FailedAfterSend(WalletError::OutOfWindow) => Status::Failed(WalletError::OutOfWindow).view(now_ms),
+            Status::FailedAfterSend(_) => json!({ "state": "failed", "code": "SENT_UNCONFIRMED", "plain_message": MAYBE_SENT }),
+            Status::Cancelled => json!({ "state": "cancelled" }),
         }
     }
 }
@@ -152,6 +174,36 @@ fn runs() -> std::sync::MutexGuard<'static, Option<HashMap<String, Status>>> {
 
 fn set_status(id: &str, status: Status) {
     runs().get_or_insert_with(HashMap::new).insert(id.to_owned(), status);
+}
+
+/// Moves a proof under way to `next`, under the same lock as [`cancel_run`]: false, changing
+/// nothing, once it was cancelled or has ended. A failure once the send is decided is kept as
+/// [`Status::FailedAfterSend`].
+fn advance(id: &str, next: Status) -> bool {
+    let mut held = runs();
+    let Some(now) = held.as_mut().and_then(|all| all.get_mut(id)) else { return false };
+    if now.ended() {
+        return false;
+    }
+    *now = match next {
+        Status::Failed(e) if now.past_cancel() => Status::FailedAfterSend(e),
+        next => next,
+    };
+    true
+}
+
+/// Cancels a proof unless its send is decided. A proof with no thread (the wallet restarted)
+/// can always be cancelled.
+fn cancel_run(id: &str) -> bool {
+    let mut held = runs();
+    match held.as_mut().and_then(|all| all.get_mut(id)) {
+        None => true,
+        Some(now) if now.past_cancel() => false,
+        Some(now) => {
+            *now = Status::Cancelled;
+            true
+        }
+    }
 }
 
 fn status_of(id: &str) -> Option<Status> {
@@ -241,10 +293,13 @@ impl Names {
                 request["state"] = json!("cancelled");
                 request["status"] = json!({ "state": "cancelled" });
             }
-            // Cancel is allowed until sending (§4.5); the thread checks it before proving.
+            // Cancel is allowed until sending (§4.5). The record can be behind the thread, so the
+            // thread's own status decides, under the lock the send decision takes.
             Some("checking" | "proving") => {
-                request["status"] = json!({ "state": "cancelled" });
-                set_status(id.trim(), Status::Failed(WalletError::AccountBusy));
+                if !cancel_run(id.trim()) {
+                    return Err("a proof that is being sent can't be cancelled".to_owned());
+                }
+                request["status"] = Status::Cancelled.view(provider::now_ms());
                 request["state"] = json!("cancelled");
             }
             other => return Err(format!("a proof that is {} can't be cancelled", other.unwrap_or("decided"))),
@@ -416,17 +471,19 @@ fn self_busy() -> String {
 fn run(job: ProofJob, client: std::sync::Arc<dyn GateClient>) {
     let work = move || {
         let id = job.request.clone();
-        let cancelled = || matches!(status_of(&id), Some(Status::Failed(_)));
+        let fail = |e: WalletError| {
+            advance(&id, Status::Failed(e));
+        };
         let prepared = match client.prepare(&job) {
             Ok(prepared) => prepared,
-            Err(e) => return set_status(&id, Status::Failed(e)),
+            Err(e) => return fail(e),
         };
         // Pre-check 4 on chain: the gate is the pinned, immutable image serving the pinned NFT program.
         if proof::gate_is_pinned(&prepared.gate_image, prepared.gate_immutable, &job.pinned_image, &prepared.gate_nft_program, &job.nft_program).is_err() {
-            return set_status(&id, Status::Failed(WalletError::GateNotPinned));
+            return fail(WalletError::GateNotPinned);
         }
         if !proof::covers_reserve(prepared.payer_balance, prepared.reserve) {
-            return set_status(&id, Status::Failed(WalletError::FeeReserve));
+            return fail(WalletError::FeeReserve);
         }
         // Pre-check 6, here and not in the client: what the transaction would do must be exactly one
         // pass written and the fee paid, for this slot and this binding. Fail closed.
@@ -434,29 +491,27 @@ fn run(job: ProofJob, client: std::sync::Arc<dyn GateClient>) {
         let mismatch = expected.gate != job.gate || expected.nft_program != job.nft_program || expected.fact.binding != job.binding || expected.fact.not_before != job.plan.not_before || expected.fact.expires_at != job.plan.expires_at;
         expected.gate = job.gate;
         if mismatch || proof::outcome_check(&expected, &prepared.public, &prepared.private).is_err() {
-            return set_status(&id, Status::Failed(WalletError::UnexpectedOutcome));
+            return fail(WalletError::UnexpectedOutcome);
         }
-        if cancelled() {
+        if !advance(&id, Status::Proving { started_ms: provider::now_ms() }) {
             return;
         }
-        set_status(&id, Status::Proving { started_ms: provider::now_ms() });
         let stage = |s: Stage| match s {
-            Stage::Proving => {}
-            Stage::Sending => set_status(&id, Status::Sending),
-            Stage::WaitingForBlock => set_status(&id, Status::WaitingForBlock),
+            Stage::Proving => status_of(&id).is_some_and(|now| !now.ended()),
+            Stage::Sending => advance(&id, Status::Sending),
+            Stage::WaitingForBlock => advance(&id, Status::WaitingForBlock),
         };
         match client.prove_and_send(&job, &prepared, &stage) {
-            Ok(pass) => set_status(
-                &id,
-                Status::Ready(json!({
+            Ok(pass) => {
+                advance(&id, Status::Ready(json!({
                     "gate": registry::account_text(&job.gate),
                     "slot": registry::hex(&pass.slot),
                     "not_before": job.plan.not_before,
                     "expires_at": job.plan.expires_at,
                     "tx_hash": pass.tx_hash,
-                })),
-            ),
-            Err(e) => set_status(&id, Status::Failed(e)),
+                })));
+            }
+            Err(e) => fail(e),
         }
     };
     if cfg!(test) {
@@ -484,7 +539,7 @@ fn settle(store: &mut provider_nft::Store) {
         }
         match status {
             Status::Ready(_) => request["state"] = json!("done"),
-            Status::Failed(_) if request["state"] != "cancelled" => request["state"] = json!("failed"),
+            Status::Failed(_) | Status::FailedAfterSend(_) => request["state"] = json!("failed"),
             _ => {}
         }
     }
@@ -509,6 +564,41 @@ pub fn app_view(request: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_before_the_send_decision_stops_the_send_and_stays() {
+        let id = "cancel-before-send";
+        set_status(id, Status::Checking);
+        assert!(advance(id, Status::Proving { started_ms: 1 }));
+        assert!(cancel_run(id));
+        assert!(!advance(id, Status::Sending), "a cancelled proof must never be sent");
+        assert!(!advance(id, Status::Ready(json!({}))));
+        assert!(!advance(id, Status::Failed(WalletError::AccountBusy)));
+        assert_eq!(status_of(id), Some(Status::Cancelled));
+    }
+
+    #[test]
+    fn a_cancel_while_checking_means_proving_never_starts() {
+        let id = "cancel-while-checking";
+        set_status(id, Status::Checking);
+        assert!(cancel_run(id));
+        assert!(!advance(id, Status::Proving { started_ms: 1 }));
+    }
+
+    #[test]
+    fn after_the_send_decision_cancel_is_refused_and_a_failure_never_says_nothing_was_sent() {
+        for e in WalletError::ALL {
+            let id = format!("sent-{}", e.code());
+            set_status(&id, Status::Checking);
+            assert!(advance(&id, Status::Sending));
+            assert!(!cancel_run(&id));
+            assert!(advance(&id, Status::Failed(e)));
+            let shown = status_of(&id).unwrap().view(2);
+            assert_eq!(shown["state"], "failed");
+            let said = shown["plain_message"].as_str().unwrap().to_lowercase();
+            assert!(!said.contains("nothing was sent") && !said.contains("not sent"), "{shown}");
+        }
+    }
 
     const PROGRAM: &str = "ErycMYqXUUtducaYmpHZjRgdbLXchrMiV4NZRnmRDNmu";
     const ART: &str = "HA47ERcmfSbDChGcYfBcC4SKaPQ8pJJnv4wxCLu1ejL5";

@@ -19778,9 +19778,9 @@ mod tests {
                     private: proof::ObservedPrivate { holder_before: before, holder_after: after, payer: None },
                 })
             }
-            fn prove_and_send(&self, _: &ProofJob, _: &Prepared, stage: &dyn Fn(Stage)) -> Result<Pass, proof::WalletError> {
-                stage(Stage::Sending);
-                stage(Stage::WaitingForBlock);
+            fn prove_and_send(&self, _: &ProofJob, _: &Prepared, stage: &dyn Fn(Stage) -> bool) -> Result<Pass, proof::WalletError> {
+                assert!(stage(Stage::Sending));
+                assert!(stage(Stage::WaitingForBlock));
                 Ok(Pass { slot: proof::slot(&[0x5E; 32]), tx_hash: "ab12".into() })
             }
         }
