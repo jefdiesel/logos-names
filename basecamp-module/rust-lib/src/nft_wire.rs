@@ -511,8 +511,8 @@ pub fn reveals(from_private: bool, to: To) -> (Vec<&'static str>, Vec<&'static s
             vec!["What else the private account holds stays private."],
         ),
         (false, To::TheirPrivate) => (
-            vec!["Expected (not yet observed): your public account and the collection are public."],
-            vec!["Expected: who receives it is not named; the NFT waits for their wallet to take it."],
+            vec!["Your public account, the collection, and the receiving private account's ID are public, even though you send to its receiving keys."],
+            vec!["The receiving keys themselves and what else that account holds stay private; the NFT waits for their wallet to take it."],
         ),
         (true, To::Public) => (
             vec!["The receiving account and the collection are public."],
@@ -736,7 +736,11 @@ mod tests {
         assert!(hidden[0].contains("no link"));
         // Someone else's private account was never observed: said as expected, not as fact.
         assert!(reveals(true, To::TheirPrivate).0[0].starts_with("Expected"));
-        assert!(reveals(false, To::TheirPrivate).0[0].starts_with("Expected"));
+        // From a public account, keys don't hide the recipient: observed on rc3 with development
+        // receipts, 2026-11-22 (the id was in the transaction's bytes, the npk wasn't).
+        let (named, hidden) = reveals(false, To::TheirPrivate);
+        assert!(named[0].contains("receiving private account's ID") && !named[0].starts_with("Expected"));
+        assert!(hidden.iter().all(|line| !line.contains("who receives") && !line.contains("not named")), "{hidden:?}");
         assert!(reveals(false, To::OwnPrivate).0[0].contains("receiving private account's ID"));
         assert!(reveals(true, To::Public).1[0].contains("not named"));
         assert!(reveals(false, To::Public).1.is_empty());

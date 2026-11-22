@@ -141,7 +141,7 @@ nothing links):
 | private → public | the recipient, the collection | the sender |
 | private → private (two accounts of one wallet) | only the NFT program | both accounts, the collection |
 | private initialise / burn | the collection | the holder |
-| public → someone else's private keys | expected: the sender, the collection | expected: the recipient (NOT observed) |
+| public → someone else's private keys | the sender, the collection, **the receiving private account's ID** (observed 2026-11-22, two wallets, development receipts) | the keys (the npk was searched and absent), its other state |
 | private → someone else's private keys | expected: only the NFT program | expected: both accounts (NOT observed) |
 
 The sheet shows the row that applies before Approve. Notes:
