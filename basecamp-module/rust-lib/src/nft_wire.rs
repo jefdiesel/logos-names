@@ -498,6 +498,23 @@ pub enum To {
     TheirPrivate,
 }
 
+/// `reveals(false, TheirPrivate)` as names tools before 0.18.2 print it. It was false: the
+/// recipient's ID is public. A tool already set is never replaced by installing Names, so the
+/// module corrects it as it reads the sheet (`nft::parse_plan`).
+const STALE_PUBLIC_TO_KEYS: [&str; 2] = [
+    "Expected (not yet observed): your public account and the collection are public.",
+    "Expected: who receives it is not named; the NFT waits for their wallet to take it.",
+];
+
+/// A sheet's lines as this build says them, whichever names tool printed them.
+pub fn corrected(public: bool, line: &str) -> &str {
+    if !STALE_PUBLIC_TO_KEYS.contains(&line) {
+        return line;
+    }
+    let (named, hidden) = reveals(false, To::TheirPrivate);
+    if public { named[0] } else { hidden[0] }
+}
+
 /// What a chain observer can read from a transfer, and what it can't, from Job A's table
 /// (§8b.3; development receipts, a search for known account IDs). Plain sentences for the sheet.
 pub fn reveals(from_private: bool, to: To) -> (Vec<&'static str>, Vec<&'static str>) {
@@ -727,6 +744,26 @@ mod tests {
         assert_eq!(refusal("Guest panicked: account already holds another NFT state"), Some(OTHER_COLLECTION));
         assert_eq!(refusal("Guest panicked: insufficient print balance"), Some(NO_PRINTS_LEFT));
         assert_eq!(refusal("connection refused"), None);
+    }
+
+    #[test]
+    fn an_older_tools_false_privacy_lines_are_corrected_and_nothing_else_is() {
+        let (named, hidden) = reveals(false, To::TheirPrivate);
+        assert_eq!(corrected(true, STALE_PUBLIC_TO_KEYS[0]), named[0]);
+        assert_eq!(corrected(false, STALE_PUBLIC_TO_KEYS[1]), hidden[0]);
+        for to in [To::Public, To::OwnPrivate, To::TheirPrivate] {
+            for from_private in [false, true] {
+                let (named, hidden) = reveals(from_private, to);
+                for line in &named {
+                    assert_eq!(corrected(true, line), *line);
+                }
+                for line in &hidden {
+                    assert_eq!(corrected(false, line), *line);
+                }
+            }
+        }
+        // The module cuts a sheet's line at 200 characters.
+        assert!(named.iter().chain(hidden.iter()).all(|line| line.len() <= 200));
     }
 
     #[test]

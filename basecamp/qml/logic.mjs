@@ -2684,9 +2684,9 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
-    "Vesting, in the menu: schedules made in Vest that pay you show there by themselves.",
-    "Apps can ask you to approve a call that reads the network clock, such as creating a Vest schedule.",
-    "Settings → Network → Custom network: add a chain by its RPC URL and chain id, checked first."
+    "Collectibles: a grid of your collections, each item marked Public or Private.",
+    "NFT images can load from your own Logos Storage node, checked by hash, only after you allow it.",
+    "Corrected: paying or sending to receiving keys from a public account shows the private account's ID.",
 ]
 
 /// Receive from Ethereum, the deposit step: what to do, in order (owner, 2026-11-16: "this page

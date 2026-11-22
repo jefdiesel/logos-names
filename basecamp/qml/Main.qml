@@ -123,9 +123,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.18.2"
+    readonly property string neededModule: "0.18.3"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.18.3"
+    readonly property string appVersion: "0.18.4"
     property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
     property var moduleFeatures: []    // get_config features: what this build of the names module can do
     property real machineMemory: 0     // get_config memory_bytes: this computer's memory (0: unknown)
@@ -16316,7 +16316,7 @@ Item {
                         visible: root.whatsNewShown
                         Layout.fillWidth: true
                         spacing: 6
-                        Part { text: "What's new in Names 0.18.3" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
+                        Part { text: "What's new in Names 0.18.4" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
                         Repeater {
                             model: Logic.WHATS_NEW
                             Hint { required property var modelData; color: root.ink; text: "· " + modelData }
@@ -17949,7 +17949,7 @@ Item {
                         spacing: 10
                         Part { text: "Where it is paid" }
                         Hint {
-                            text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. They reveal nothing about your funds."
+                            text: root.record === null ? "" : root.record.npk !== null && root.record.account === null ? "Private payments only. Your balance stays private. A payment from a public account shows its amount and your private account's ID."
                                 : root.record.npk !== null ? "Private payments, and a public account anyone can see."
                                 : root.record.account !== null ? "A public account only. Anyone can see its balance and history."
                                 : "Not set up. Nobody can pay this name yet."

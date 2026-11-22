@@ -390,7 +390,7 @@ pub fn collections(holdings: &[Value]) -> Vec<Value> {
 /// `names module nft plan` read back: the sheet.
 pub fn parse_plan(output: &str) -> Result<Value, String> {
     let plan: Value = serde_json::from_str(cli::last_line(output)).map_err(|_| "the names CLI's NFT sheet did not decode".to_owned())?;
-    let lines = |key: &str| plan[key].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(8).filter_map(|line| line.as_str().map(|line| json!(provider::clean_text(line, 200)))).collect::<Vec<_>>();
+    let lines = |key: &str| plan[key].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(8).filter_map(|line| line.as_str().map(|line| json!(provider::clean_text(crate::nft_wire::corrected(key == "public", line), 200)))).collect::<Vec<_>>();
     let payers: Vec<Value> = plan["payers"]
         .as_array()
         .map(Vec::as_slice)

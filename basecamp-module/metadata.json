@@ -2,7 +2,7 @@
   "name": "names",
   "display_name": "Names",
   "author": "lns:names",
-  "version": "0.18.2",
+  "version": "0.18.3",
   "type": "core",
   "interface": "cdylib",
   "category": "wallet",

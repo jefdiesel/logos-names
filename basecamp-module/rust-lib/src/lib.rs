@@ -1833,7 +1833,7 @@ const WALLET_SDK_VERSION: &str = "1.0";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.18.2";
+const MODULE_VERSION: &str = "0.18.3";
 
 /// How far this computer's clock may run ahead of the chain's before a registration's commitment
 /// is dropped as expired by it (`Commitment::expired_by_local_clock`).
