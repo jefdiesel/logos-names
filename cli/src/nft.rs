@@ -62,7 +62,9 @@ pub fn parse_to(input: &str) -> Result<To, String> {
     if let Some(rest) = input.strip_prefix("Private/") {
         return parse_account(rest).map(To::Private);
     }
-    if let Some((npk, vpk)) = input.split_once(':') {
+    // `lns:alice` is a name (SPEC.md §2), never receiving keys (deep review B10).
+    let named = input.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("lns:"));
+    if let Some((npk, vpk)) = input.split_once(':').filter(|_| !named) {
         let npk = hex::decode(npk).ok().and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
         if let (Some(npk), Ok(vpk)) = (npk, hex::decode(vpk)) {
             if !vpk.is_empty() {
@@ -572,15 +574,15 @@ impl Client {
         if reach == Reach::TheirPrivate && !their_keys {
             bail!("this wallet can't check that those receiving keys' account is ready for this collection; if it isn't, the NFT may never arrive. Pass --their-keys to send anyway");
         }
+        // The plan synced before it read the recipient; so does this, before the recipient is
+        // checked (deep review B9), or a private recipient's note could be older than the chain's.
+        if reach == Reach::OwnPrivate && !sender.is_private() {
+            self.wallet.sync_to_latest_block().await.context("cannot sync the private accounts")?;
+        }
         match self.nft_check_recipient(program, &recipient, reach, definition).await? {
             Readiness::Ready => {}
             Readiness::NeedsHolding => bail!(nft_wire::NOT_READY),
             Readiness::Refused(why) => bail!(why),
-        }
-        // The plan synced before it read the recipient; so does this, or a private recipient's
-        // note could be older than the one the sheet was planned on.
-        if reach == Reach::OwnPrivate && !sender.is_private() {
-            self.wallet.sync_to_latest_block().await.context("cannot sync the private accounts")?;
         }
         let to_state = if reach == Reach::TheirPrivate { Vec::new() } else { self.nft_state(program, recipient.account_id()).await? };
         let action: &[u8] = if print { b"print" } else { b"send" };
@@ -964,6 +966,18 @@ mod tests {
 
     const BOB: &str = "HLEwXNBDYx6GS9H5CsawDrMTptD6R4XsJywFEMr6eim2";
 
+    /// Deep review B9: a send from a public account to this wallet's own private one syncs the
+    /// private accounts before it checks the recipient is ready, not after.
+    #[test]
+    fn a_move_to_an_own_private_account_syncs_before_it_checks_the_recipient() {
+        let source = include_str!("nft.rs");
+        let body = &source[source.find("async fn nft_move(").unwrap()..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        let synced = body.find("if reach == Reach::OwnPrivate && !sender.is_private() {").expect("the sync");
+        let checked = body.find("self.nft_check_recipient(").expect("the check");
+        assert!(synced < checked);
+    }
+
     #[test]
     fn a_destination_is_a_name_an_account_or_keys_never_a_bare_id() {
         assert_eq!(parse_to("alice"), Ok(To::Name("alice".to_owned())));
@@ -973,6 +987,9 @@ mod tests {
         assert!(parse_to(BOB).unwrap_err().contains("Public/"));
         assert!(parse_to("ab:cd").is_err());
         assert!(parse_to("two words").is_err());
+        // Deep review B10: lns:alice is the name (SPEC.md §2), never receiving keys.
+        assert_eq!(parse_to("lns:Alice"), Ok(To::Name("alice".to_owned())));
+        assert_eq!(parse_to("@alice"), Ok(To::Name("alice".to_owned())));
     }
 
     #[test]

@@ -178,7 +178,11 @@ async fn captured<T>(future: impl std::future::Future<Output = T>) -> (T, String
     let _ = std::io::stdout().flush();
     let dir = std::env::temp_dir();
     let path = dir.join(format!("names-dry-run-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.subsec_nanos())));
-    let file = std::fs::OpenOptions::new().write(true).create_new(true).read(true).open(&path);
+    // 0600: the dry run prints the private fee payer's ID, and /tmp is shared on Linux (deep review A7).
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new().write(true).create_new(true).read(true).mode(0o600).open(&path)
+    };
     let Ok(file) = file else { return (future.await, String::new()) };
     // SAFETY: plain descriptor calls; stdout is put back before this returns.
     let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
@@ -198,6 +202,19 @@ async fn captured<T>(future: impl std::future::Future<Output = T>) -> (T, String
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
     (value, text)
+}
+
+/// What a row of the plan adds to the digest: its change (`after - before`, signed) or its amount,
+/// read as u128 so a balance at or above 2^127 isn't dropped (deep review A5); else whether it
+/// changed.
+fn digest_delta(row: &serde_json::Value) -> serde_json::Value {
+    let parse = |key: &str| row[key].as_str().and_then(|t| t.parse::<u128>().ok());
+    match (parse("before"), parse("after"), parse("amount")) {
+        (Some(b), Some(a), _) if a >= b => serde_json::json!((a - b).to_string()),
+        (Some(b), Some(a), _) => serde_json::json!(format!("-{}", b - a)),
+        (_, _, Some(amount)) => serde_json::json!(amount.to_string()),
+        _ => row["changed"].clone(),
+    }
 }
 
 /// A number after `label:` in the wallet's dry-run lines (`  fee at head:    5723160`).
@@ -224,11 +241,12 @@ fn token_holdings(data: &[u8]) -> Option<BTreeMap<AccountId, u128>> {
     }
 }
 
+/// A token definition's name and supply, in the prototype's layout or the bridge token program's
+/// (whose typed authority is a byte longer), so a bridge claim or burn shows its supply change
+/// (deep review B13).
 fn token_supply(data: &[u8]) -> Option<(String, u128)> {
-    match token_core::TokenState::decode(data)? {
-        token_core::TokenState::Definition(token_core::TokenDefinition::Fungible { name, total_supply, .. }) => Some((name, total_supply)),
-        token_core::TokenState::Holdings(_) => None,
-    }
+    use crate::tokens::TokenCodec as _;
+    crate::tokens::PrototypeCodec.definition(data).or_else(|| crate::tokens::BridgeCodec.definition(data)).map(|found| (found.name, found.supply))
 }
 
 impl Client {
@@ -558,14 +576,7 @@ impl Client {
         // The digest: what the person approves. Deltas, not absolute values, so another
         // transaction moving the same public balances in between doesn't void the approval;
         // anything else that changes what this call does does.
-        let delta = |row: &serde_json::Value| -> serde_json::Value {
-            let parse = |key: &str| row[key].as_str().and_then(|t| t.parse::<i128>().ok());
-            match (parse("before"), parse("after"), parse("amount")) {
-                (Some(b), Some(a), _) => serde_json::json!((a - b).to_string()),
-                (_, _, Some(amount)) => serde_json::json!(amount.to_string()),
-                _ => row["changed"].clone(),
-            }
-        };
+        let delta = |row: &serde_json::Value| -> serde_json::Value { digest_delta(row) };
         let mut hash = Sha256::new();
         let effect = serde_json::json!({
             "account": call.account.to_string(),
@@ -577,6 +588,9 @@ impl Client {
             "public": public_rows.iter().map(|row| serde_json::json!([row["account"], row["program"], row["kind"], row["definition"], delta(row)])).collect::<Vec<_>>(),
             "aliases": used_aliases.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "payer": payer.to_string(),
+            // The sheet promises whether the account's ID becomes public: so does the digest
+            // (deep review A5).
+            "account_public": account_public,
         });
         hash.update(effect.to_string().as_bytes());
         let digest = hex::encode(hash.finalize());
@@ -802,6 +816,38 @@ pub fn imported_root<C: wallet::WalletSequencerClient>(wallet: &wallet::WalletCo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deep review A5: a balance at or above 2^127 still adds its change to the digest, signed,
+    /// and in-range changes read as before.
+    #[test]
+    fn the_digest_reads_every_u128_change() {
+        let row = |before: u128, after: u128| serde_json::json!({ "before": before.to_string(), "after": after.to_string() });
+        assert_eq!(digest_delta(&row(u128::MAX - 5, u128::MAX)), serde_json::json!("5"));
+        assert_eq!(digest_delta(&row(u128::MAX, 1)), serde_json::json!(format!("-{}", u128::MAX - 1)));
+        assert_eq!(digest_delta(&row(10, 7)), serde_json::json!("-3"));
+        assert_eq!(digest_delta(&serde_json::json!({ "amount": u128::MAX.to_string() })), serde_json::json!(u128::MAX.to_string()));
+        assert_eq!(digest_delta(&serde_json::json!({ "changed": true })), serde_json::json!(true));
+    }
+
+    /// Deep review B13: a wrapped token's definition (the bridge token program's layout) is read
+    /// for its supply, like the prototype's.
+    #[test]
+    fn a_wrapped_token_s_supply_is_read() {
+        // wETH (v5) as the bridge test network held it on 2026-11-19 (tokens.rs V5_WETH_DEFINITION).
+        let state = hex::decode("01001800000057726170706564205365706f6c696120455448202876352900007862a441a7100000000000000000000101b0e26e1628be4dd9d35319baf2075ffa260c13af3c43abd8ebd1b34d0a7dd3a9").unwrap();
+        let (name, supply) = token_supply(&state).expect("a bridge token definition");
+        assert_eq!(name, "Wrapped Sepolia ETH (v5)");
+        assert_eq!(supply, u128::from_le_bytes(hex::decode("00007862a441a7100000000000000000").unwrap().try_into().unwrap()));
+        assert_eq!(token_supply(&[]), None, "empty state is no definition");
+    }
+
+    /// Deep review A7: the dry run's output file is the person's alone while it exists.
+    #[test]
+    fn the_dry_run_capture_is_private() {
+        let source = include_str!("private_call.rs");
+        let body = &source[source.find("async fn captured<T>").unwrap()..];
+        assert!(body[..body.find("let Ok(file) = file").unwrap()].contains(".mode(0o600)"));
+    }
 
     /// What `Storage::restore` promises (LEZ 0.4 `wallet/src/storage/mod.rs`: the key trees are
     /// rebuilt from the phrase, `keys_public.rs`/`keys_private.rs` derive each child with
