@@ -753,6 +753,10 @@ enum Command {
     /// send, burn, print, receive. Needs `--nft-program` (or NAMES_NFT_PROGRAM).
     #[command(subcommand)]
     Nft(nft::NftCommand),
+    /// LP-0001 membership proofs, for the Names module: checks, and a proof that is sent only
+    /// once the module has seen it.
+    #[command(subcommand, hide = true)]
+    Proof(membership::ProofCommand),
     /// The LEZ wallet's own commands: make accounts, check balances, sync private
     /// accounts and more. Run `names wallet help` for the list.
     #[command(disable_help_flag = true)]
@@ -899,6 +903,7 @@ mod app_secret;
 mod text;
 mod tokens;
 mod nft;
+mod membership;
 /// The NFT program's wire format, one file shared with the Basecamp module (as `deposit.rs` is).
 #[path = "../../basecamp-module/rust-lib/src/nft_wire.rs"]
 #[allow(dead_code)]
@@ -4340,6 +4345,7 @@ async fn run() -> Result<()> {
             client.module_token(&tokens, request).await
         }
         Command::Nft(command) => client.nft(nft::program(cli.nft_program)?, command).await,
+        Command::Proof(command) => client.membership(command).await,
         Command::Module(module::Request::Nft(request)) => client.module_nft(nft::program(cli.nft_program)?, request).await,
         Command::Module(request) => client.module(request).await,
         Command::Balance => {

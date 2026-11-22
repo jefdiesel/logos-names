@@ -190,6 +190,43 @@ where
 
 type Inner = HttpClient<RpcLogger<RpcService<NoteRetryAfter<HttpBackend>>>>;
 
+/// Sees a proven transaction before it is sent; `Err` stops it.
+pub type SendCheck = Box<dyn FnOnce(&LeeTransaction) -> Result<(), String> + Send>;
+
+/// Whether sends are held for a check (`names proof prove`).
+#[derive(Default)]
+enum Hold {
+    #[default]
+    Off,
+    Armed(SendCheck),
+    /// The check was used: nothing more is sent by this process, a repriced second proof included.
+    Spent,
+}
+
+impl Hold {
+    /// Whether `tx` may go.
+    fn admit(held: &Mutex<Hold>, tx: &LeeTransaction) -> Result<(), String> {
+        match Self::take(held)? {
+            Some(check) => check(tx),
+            None => Ok(()),
+        }
+    }
+
+    /// The check the next send must pass (none when sends aren't held). It is spent as it is
+    /// taken, before it runs, so whatever it answers, nothing after it is sent.
+    fn take(held: &Mutex<Hold>) -> Result<Option<SendCheck>, String> {
+        let mut held = held.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match std::mem::replace(&mut *held, Hold::Spent) {
+            Hold::Off => {
+                *held = Hold::Off;
+                Ok(None)
+            }
+            Hold::Armed(check) => Ok(Some(check)),
+            Hold::Spent => Err("only one proven transaction may be sent".to_owned()),
+        }
+    }
+}
+
 /// The client `names` gives the wallet: jsonrpsee's, paced and tried again on a 429. Cheap to
 /// clone; clones share the pacer and the `Retry-After` note.
 #[derive(Clone)]
@@ -198,9 +235,16 @@ pub struct Rpc {
     retry_after: RetryAfter,
     paced: bool,
     backoff: Backoff,
+    hold: Arc<Mutex<Hold>>,
 }
 
 impl Rpc {
+    /// From now on this client (and its clones) sends one transaction at most, and only if
+    /// `check` lets it through.
+    pub fn hold_send(&self, check: SendCheck) {
+        *self.hold.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Hold::Armed(check);
+    }
+
     /// A client for the sequencer at `url`, sending `Authorization: Basic <basic_auth>` when
     /// given, as the wallet's own client does (`WalletCore::client_from_config`).
     pub fn new(url: &str, basic_auth: Option<String>) -> Result<Self> {
@@ -215,7 +259,7 @@ impl Rpc {
             .set_http_middleware(tower::ServiceBuilder::new().layer(NoteRetryAfterLayer(retry_after.clone())))
             .build(url)
             .context("Failed to create sequencer client")?;
-        Ok(Self { inner, retry_after, paced: paced(url), backoff: Backoff::DEFAULT })
+        Ok(Self { inner, retry_after, paced: paced(url), backoff: Backoff::DEFAULT, hold: Arc::default() })
     }
 
     /// The client for the wallet whose config is at `config_path`, with `overrides` applied:
@@ -332,6 +376,7 @@ impl wallet::WalletSequencerClient for Rpc {
     type Error = ClientError;
 
     async fn send_transaction(&self, tx: LeeTransaction) -> Result<HashType, Self::Error> {
+        Hold::admit(&self.hold, &tx).map_err(|why| ClientError::Custom(format!("not sent: {why}")))?;
         RpcClient::send_transaction(self, tx).await
     }
 
@@ -603,5 +648,24 @@ mod tests {
         assert!(!paced("http://[::1]:3040"));
         assert!(paced("https://lez.nameswallet.app/"));
         assert!(paced("https://127.0.0.1.example.com/"));
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    #[test]
+    fn a_held_client_lets_one_checked_send_out_and_never_a_second() {
+        let rpc = Rpc::new("http://127.0.0.1:9", None).unwrap();
+        for _ in 0..2 {
+            assert!(Hold::take(&rpc.hold).unwrap().is_none(), "sends aren't held until asked");
+        }
+        let clone = rpc.clone();
+        rpc.hold_send(Box::new(|_| Err("no".to_owned())));
+        assert!(Hold::take(&clone.hold).unwrap().is_some(), "a clone made earlier is held too");
+        for client in [&rpc, &clone, &rpc] {
+            assert!(Hold::take(&client.hold).is_err(), "nothing more may be sent");
+        }
     }
 }
