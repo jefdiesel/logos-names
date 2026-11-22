@@ -2684,8 +2684,8 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
-    "Collectibles: a grid of your collections, each item marked Public or Private.",
-    "NFT images can load from your own Logos Storage node, checked by hash, only after you allow it.",
+    "A new icon: the white eta on Logos orange that all our apps now share.",
+    "Collectibles: a grid of your collections, with images from your own Logos Storage node once you allow it.",
     "Corrected: paying or sending to receiving keys from a public account shows the private account's ID.",
 ]
 

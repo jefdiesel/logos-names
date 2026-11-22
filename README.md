@@ -25,16 +25,16 @@ pay, sign or change settings, no longer any app that depends on the module;
 the Linux app loads again; private files are written for your eyes only; reads
 are size-capped; the installer refuses unsigned downloads; and the TLS libraries
 are patched (RUSTSEC-2026-0381/0382). Update both: re-run the install line below
-for the CLI, and update **Names** in Basecamp to
+for the CLI, and update **Names** in Basecamp to at least
 [0.10.3](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.10.3).
 
-**Latest: Names 0.10 for Basecamp** (0.10.3, 2026-10-30), macOS (Apple silicon) and Linux x86_64:
-[release](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.10.3).
-New in 0.10: a brand-new person can start inside Basecamp with nothing else. Welcome installs
-Names, makes the wallet, and **Get free tokens** gives it 2,000,000 testnet LEZ from the
-Names faucet (once a day): enough for a private name's 1,000,000 deposit and some to pay
-with. Move to private now moves all of it. Tested end to end on the public LEZ testnet
-from a clean setup: tokens in 39 s, a private name registered about 35 minutes later.
+**Latest test build: Names 0.18.5 for Basecamp** (2026-11-22, module 0.18.3), macOS (Apple silicon) only:
+[pre-release](https://github.com/jefdiesel/logos-names/releases/tag/wallet-0.18.5).
+It is for LEZ 0.4 (v0.4.0-rc3) on the Bridge test network, a test chain we run until Logos's
+public 0.4 testnet is live. Its coins have no value and it can be reset. Not audited. It has the
+wallet, LNS names, Collectibles and the EVM bridge. It can't make membership proofs.
+The last release for the older 0.3 testnet, with a Linux build, is
+[0.10.3](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.10.3).
 Earlier: [0.9](https://github.com/jefdiesel/logos-names/releases/tag/basecamp-v0.9.0)
 ([announcement](https://forum.logos.co/t/names-for-basecamp-posts-messages-and-pay-under-your-lez-name/2020)).
 
