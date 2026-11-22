@@ -19773,7 +19773,7 @@ mod tests {
                     gate_nft_program: job.nft_program,
                     reserve: 5_070_616,
                     payer_balance: self.balance,
-                    expected: proof::Expected { gate: job.gate, nft_program: job.nft_program, slot, fact, secret, fee_inbox: inbox, max_fee: 8_239_751 },
+                    expected: proof::Expected { gate: job.gate, nft_program: job.nft_program, slot, fact, secret, fee_inbox: inbox, max_fee: 8_239_751, holder_credit: 0, payer_credit: 0 },
                     public,
                     private: proof::ObservedPrivate { holder_before: before, holder_after: after, payer: None },
                 })

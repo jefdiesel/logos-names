@@ -292,6 +292,11 @@ pub struct Expected {
     pub secret: Bytes32,
     pub fee_inbox: Bytes32,
     pub max_fee: u128,
+    /// Pending native credits to the holder that the wallet may claim before the root (refunds
+    /// of earlier fees): its balance may rise by at most this.
+    pub holder_credit: u128,
+    /// The same for a separate payer.
+    pub payer_credit: u128,
 }
 
 fn balance(states: &States) -> Option<u128> {
@@ -368,17 +373,19 @@ pub fn outcome_check(e: &Expected, public: &ObservedPublic, private: &ObservedPr
             bad.push(format!("the holder's actor under {} changed", hex(p)));
         }
     }
-    let fee_check = |before: &States, after: &States, who: &str, bad: &mut Vec<String>| match (balance(before), balance(after)) {
-        (Some(b), Some(a)) if a <= b && b - a <= e.max_fee => {}
-        (b, a) => bad.push(format!("{who}'s balance {b:?} -> {a:?} is not a fee of at most {}", e.max_fee)),
+    // The payer: b - max_fee <= a <= b + its credits. Anyone else: b <= a <= b + its credits.
+    let fee_check = |before: &States, after: &States, credit: u128, who: &str, bad: &mut Vec<String>| match (balance(before), balance(after)) {
+        (Some(b), Some(a)) if a <= b.saturating_add(credit) && a >= b.saturating_sub(e.max_fee) => {}
+        (b, a) => bad.push(format!("{who}'s balance {b:?} -> {a:?} is not a fee of at most {} (claimable credits {credit})", e.max_fee)),
     };
     match &private.payer {
-        None => fee_check(hb, ha, "the holder", &mut bad),
+        None => fee_check(hb, ha, e.holder_credit, "the holder", &mut bad),
         Some((pb, pa)) => {
-            if balance(hb) != balance(ha) {
-                bad.push("the holder's balance changed though another account pays".to_owned());
+            match (balance(hb), balance(ha)) {
+                (Some(b), Some(a)) if a >= b && a <= b.saturating_add(e.holder_credit) => {}
+                _ => bad.push("the holder's balance changed though another account pays".to_owned()),
             }
-            fee_check(pb, pa, "the payer", &mut bad);
+            fee_check(pb, pa, e.payer_credit, "the payer", &mut bad);
             let programs: std::collections::BTreeSet<&Bytes32> = pb.keys().chain(pa.keys()).collect();
             for p in programs {
                 if *p != NATIVE_TOKEN_PROGRAM && pb.get(p) != pa.get(p) {
@@ -543,7 +550,7 @@ mod tests {
     }
 
     fn expected() -> Expected {
-        Expected { gate: GATE, nft_program: NFT, slot: slot(&SECRET), fact: Fact { binding: [0xB1; 32], not_before: NB, expires_at: NB + 3_600_000 }, secret: SECRET, fee_inbox: INBOX, max_fee: 6_000_000 }
+        Expected { gate: GATE, nft_program: NFT, slot: slot(&SECRET), fact: Fact { binding: [0xB1; 32], not_before: NB, expires_at: NB + 3_600_000 }, secret: SECRET, fee_inbox: INBOX, max_fee: 6_000_000, holder_credit: 0, payer_credit: 0 }
     }
 
     fn good() -> (ObservedPublic, ObservedPrivate) {
@@ -616,6 +623,37 @@ mod tests {
         let (mut p11, q11) = good();
         p11.boundary.insert(0, Step::PublicToPrivate { to: ([4; 32], GATE), message: vec![] });
         fails(&p11, &q11, "into the private part");
+    }
+
+    #[test]
+    fn claimed_refunds_may_raise_a_balance_by_at_most_what_was_claimable() {
+        let lez = |n: u128| n.to_le_bytes().to_vec();
+        let e = Expected { holder_credit: 6_437_240, payer_credit: 3_169_135, ..expected() };
+        let (p, good) = good();
+        let holder = |after: u128| {
+            let mut q = good.clone();
+            q.holder_after.insert(NATIVE_TOKEN_PROGRAM, lez(after));
+            q
+        };
+        let most = 20_000_000 + e.holder_credit;
+        assert_eq!(outcome_check(&e, &p, &holder(most)), Ok(()));
+        assert!(outcome_check(&e, &p, &holder(most + 1)).is_err(), "above its credits");
+        assert_eq!(outcome_check(&e, &p, &holder(20_000_000 - e.max_fee)), Ok(()));
+        assert!(outcome_check(&e, &p, &holder(20_000_000 - e.max_fee - 1)).is_err(), "more than the fee");
+        assert!(outcome_check(&expected(), &p, &holder(20_000_001)).is_err(), "no credits, no rise");
+
+        // Another account pays: the holder may only gain its credits, never lose.
+        let paid = |holder_after: u128, payer_after: u128| {
+            let mut q = holder(holder_after);
+            let of = |n: u128| States::from([(NATIVE_TOKEN_PROGRAM, lez(n))]);
+            q.payer = Some((of(9_000_000), of(payer_after)));
+            q
+        };
+        assert_eq!(outcome_check(&e, &p, &paid(most, 9_000_000 + e.payer_credit)), Ok(()));
+        assert!(outcome_check(&e, &p, &paid(most + 1, 4_000_000)).is_err(), "holder above its credits");
+        assert!(outcome_check(&e, &p, &paid(19_999_999, 4_000_000)).is_err(), "holder lost");
+        assert!(outcome_check(&e, &p, &paid(20_000_000, 9_000_001 + e.payer_credit)).is_err(), "payer above its credits");
+        assert!(outcome_check(&e, &p, &paid(20_000_000, 9_000_000 - e.max_fee - 1)).is_err(), "payer more than the fee");
     }
 
     #[test]
