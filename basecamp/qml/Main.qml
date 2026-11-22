@@ -2606,8 +2606,10 @@ Item {
     /// releasable time once; otherwise none.
     function sbScheduleNext() {
         var onScreen = walletView === "sendback"
-        // A withdrawal hidden from the card isn't followed there (it is on its own screen).
-        var rows = onScreen ? sendBacks.filter(function(x) { return x.id === sbFocus }) : sendBacks.filter(function(x) { return sbShowHidden || sbHidden.indexOf(x.id) < 0 })
+        // A withdrawal hidden from the card isn't followed there (it is on its own screen), unless
+        // it is in flight (Tidy.followedWhenHidden: its check hands a signed burn to the relay).
+        var rows = onScreen ? sendBacks.filter(function(x) { return x.id === sbFocus }) : sendBacks.filter(function(x) {
+            return sbShowHidden || sbHidden.indexOf(x.id) < 0 || Tidy.followedWhenHidden((sbStatuses[x.id] || { stage: x.stage }).stage) })
         var items = rows.map(function(x) {
             var m = Logic.sendBackAutoMode(Object.assign({ account: x.account }, sbStatuses[x.id] || { stage: x.stage }))
             return { mode: m.mode, at: m.at, focused: onScreen && x.id === sbFocus }
@@ -2645,7 +2647,7 @@ Item {
         var open = sendBacks.filter(function(x) {
             var st = sbStatuses[x.id] ? sbStatuses[x.id].stage : x.stage
             return st !== "released" && (st !== "planned" || x.id === onScreen) && (onScreen === "" || x.id === onScreen)
-                && (x.id === onScreen || sbShowHidden || sbHidden.indexOf(x.id) < 0)
+                && (x.id === onScreen || sbShowHidden || sbHidden.indexOf(x.id) < 0 || Tidy.followedWhenHidden(st))
                 && (asked || Logic.sendBackAutoMode(Object.assign({ account: x.account }, sbStatuses[x.id] || { stage: x.stage })).mode !== "none")
         })
         if (open.length === 0) {

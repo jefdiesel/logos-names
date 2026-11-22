@@ -181,6 +181,14 @@ export function visibleRows(rows, hidden, showHidden) {
     return { rows: showHidden ? list : kept, hidden: list.length - kept.length }
 }
 
+/// Whether a hidden withdrawal is still followed from the card: while it is in flight (signed and
+/// waiting for the bridge's relay, or its burn on its way) its status check is what moves it on
+/// (rfp-022 sendback.rs: send_back_status hands a signed burn to the relay), so hiding it must
+/// not stop that. Every other hidden one isn't asked about until it is shown or opened.
+export function followedWhenHidden(stage) {
+    return stage === "approve" || stage === "burning"
+}
+
 /// The line under the panels for hidden withdrawals: "1 hidden withdrawal" / "2 hidden withdrawals".
 export function hiddenLine(count) {
     var n = Number(count) || 0

@@ -1752,6 +1752,8 @@ _T_MOCK = {"bridgeNet": _T_NET, "bridge": {"config": _T_CONFIG, "send_backs": {"
 for _name, _js, _mock in [
     # Older bridge tokens folded into one line; v3's 0.1 wETH, v5 (the LEZ Bridge's) and v7 (the newest) shown.
     ("tidy-tokens-folded", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), _T_MOCK),
+    # With Move (a names module that has bridge_token_send): v3's 0.1 wETH keeps it.
+    ("tidy-tokens-move", _t_card(_T_LIVE, _MV_FEAT + '; root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), dict(_T_MOCK, names_network="lez-0.4")),
     ("tidy-tokens-open", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true; root.toggleOldTokens("%s") })' % _T_JEF), _T_MOCK),
     # The two panels open (as today, with Hide on each withdrawal), then folded to their headers.
     ("tidy-panels-open", _t_card(_T_LIVE), _T_MOCK),

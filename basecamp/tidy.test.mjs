@@ -1,9 +1,10 @@
 // Checks qml/tidy.mjs (the wallet card kept tidy: older bridge tokens folded, the bridge panels
 // foldable, withdrawals hidden or said to be dead). Run with: node basecamp/tidy.test.mjs
-import { asList, BRIDGE_ORDER, currentBridges, tokensFolded, olderLine, foldedNote, arrivingReady, bridgingReady, deadReason, deadSaid, hiddenRead, hiddenWith, visibleRows, hiddenLine, settingOn, HIDDEN_MAX } from "./qml/tidy.mjs";
+import { asList, BRIDGE_ORDER, currentBridges, tokensFolded, olderLine, foldedNote, arrivingReady, bridgingReady, deadReason, deadSaid, hiddenRead, hiddenWith, visibleRows, hiddenLine, settingOn, HIDDEN_MAX, followedWhenHidden } from "./qml/tidy.mjs";
 import { bridgeNetRows, BRIDGE_LABELS, sendBackProgress } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
+const qml0 = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
 let failures = 0;
 const check = (label, got, want) => {
   const ok = JSON.stringify(got) === JSON.stringify(want);
@@ -94,6 +95,9 @@ check("visibleRows: hidden ones off the card", [shown.rows.map((x) => x.id), sho
 check("visibleRows: Show them", visibleRows(twoRows, ["sb-6163f4e0007b40e3"], true).rows.length, 3);
 check("visibleRows: nothing hidden", visibleRows(twoRows, [], false).hidden, 0);
 check("hiddenLine", [hiddenLine(0), hiddenLine(1), hiddenLine(2)], ["", "1 hidden withdrawal", "2 hidden withdrawals"]);
+check("a hidden one in flight is still followed (its check hands the signed burn to the relay)",
+  ["planned", "approve", "burning", "burned", "recorded", "released"].map(followedWhenHidden), [false, true, true, false, false, false]);
+check("Main.qml: the card's polls follow a hidden one in flight", (qml0.match(/Tidy\.followedWhenHidden\(/g) || []).length, 2);
 check("settingOn", [settingOn("yes"), settingOn(""), settingOn(undefined), settingOn("no")], [true, false, false, false]);
 
 // ── QML rules (Basecamp's engine) and where Main.qml uses it ──
