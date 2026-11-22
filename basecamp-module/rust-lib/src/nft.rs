@@ -159,7 +159,9 @@ pub fn destination(text: &str) -> Result<String, String> {
     if text.starts_with("Public/") || text.starts_with("Private/") {
         return account(text);
     }
-    if let Some((npk, vpk)) = text.split_once(':') {
+    // `lns:alice` is a name (SPEC.md §2), never receiving keys (deep review B10).
+    let named = text.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("lns:"));
+    if let Some((npk, vpk)) = text.split_once(':').filter(|_| !named) {
         let hex = |part: &str| !part.is_empty() && part.len() % 2 == 0 && part.bytes().all(|b| b.is_ascii_hexdigit());
         if npk.len() == NPK_HEX && hex(npk) && vpk.len() == VPK_HEX && hex(vpk) {
             return Ok(format!("{}:{}", npk.to_ascii_lowercase(), vpk.to_ascii_lowercase()));
@@ -1054,6 +1056,8 @@ mod tests {
         assert!(receive.args(&[7; 32], None).is_err());
         assert_eq!(receive.args(&[7; 32], Some(&format!("Private/{BOB}"))).unwrap()[2..], ["receive".to_owned(), format!("--fee-payer={BOB}")]);
         assert!(send.args(&[7; 32], Some(&format!("Public/{BOB}"))).unwrap().contains(&format!("--fee-payer={BOB}")));
+        // Deep review B10: a name written lns:alice or @alice is the name, never receiving keys.
+        assert_eq!((destination("lns:Alice"), destination("@alice"), destination("LNS:alice.lez")), (Ok("alice".to_owned()), Ok("alice".to_owned()), Ok("alice".to_owned())));
         // Someone's keys need the tick.
         let keys = format!("{}:{}", "ab".repeat(32), "cd".repeat(1184));
         // A vpk of any other length is not one.

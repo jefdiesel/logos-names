@@ -42,6 +42,8 @@ pub const KEEP_DECIDED_MS: u64 = 24 * 60 * 60 * 1000;
 /// Apps with access, and accounts one app may be given.
 pub const MAX_APPS: usize = 64;
 pub const MAX_GRANTED: usize = 8;
+/// Why a request still waiting when its app's access was taken back ended (`Store::revoke`).
+pub const ACCESS_TAKEN_BACK: &str = "this app's access was taken back before it was approved; it can ask again";
 /// A program call's accounts and instruction.
 pub const MAX_CALL_ACCOUNTS: usize = 16;
 pub const MAX_INSTRUCTION: usize = 2048;
@@ -730,8 +732,16 @@ impl Store {
     pub fn revoke(&mut self, app: &str) -> bool {
         let private = self.private.revoke(app);
         let revoked = self.grants.remove(app).is_some() || private;
+        let now = now_ms();
+        // "Remove access" ends what the app still waits on too (deep review A3): a payment, call,
+        // secret or declaration it asked for before can no longer be approved.
+        for request in self.requests.iter_mut().filter(|request| request["app"] == app && request["state"] == "pending") {
+            request["state"] = json!("rejected");
+            request["decided"] = json!(now);
+            request["error"] = json!(ACCESS_TAKEN_BACK);
+        }
         // A disconnected app's relayed calls can't be signed again: their bytes go now.
-        self.scrub(now_ms());
+        self.scrub(now);
         revoked
     }
 }
@@ -826,6 +836,27 @@ mod tests {
         for bad in [ONE.to_owned(), format!("Public/{ONE}/x"), "Public/nope".to_owned(), format!("public/{ONE}")] {
             assert!(account_ref(&bad).is_err(), "{bad}");
         }
+    }
+
+    /// Deep review A3: "Remove access" ends the app's waiting requests, so none of them can be
+    /// approved after; another app's, and a request already decided, stay as they were.
+    #[test]
+    fn taking_access_back_ends_the_app_s_waiting_requests() {
+        let mut store = Store { path: None, requests: Vec::new(), grants: Default::default(), private: Default::default() };
+        store.grant("tips_ui", &[format!("Public/{ONE}")], 5).unwrap();
+        store.grant("other_ui", &[format!("Public/{ONE}")], 5).unwrap();
+        let pending = transfer_request("tips_ui", "LEZ", "7", "jef", 5).unwrap();
+        let mut done = transfer_request("tips_ui", "LEZ", "8", "jef", 5).unwrap();
+        done["state"] = json!("done");
+        let others = transfer_request("other_ui", "LEZ", "9", "jef", 5).unwrap();
+        let ids: Vec<String> = [&pending, &done, &others].iter().map(|r| r["id"].as_str().unwrap().to_owned()).collect();
+        store.requests = vec![pending, done, others];
+        assert!(store.revoke("tips_ui"));
+        let state = |id: &str| store.get(id).unwrap()["state"].clone();
+        assert_eq!((state(&ids[0]), state(&ids[1]), state(&ids[2])), (json!("rejected"), json!("done"), json!("pending")));
+        assert_eq!(store.get(&ids[0]).unwrap()["error"], ACCESS_TAKEN_BACK);
+        assert!(store.granted("tips_ui").is_empty());
+        assert_eq!(store.granted("other_ui").len(), 1);
     }
 
     #[test]

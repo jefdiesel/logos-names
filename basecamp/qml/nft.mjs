@@ -107,6 +107,9 @@ export function toProblem(text) {
   const typed = String(text || "").trim()
   if (typed === "") return "Enter an LNS name, an account (Public/…) or receiving keys."
   if (/^(Public|Private)\//.test(typed)) return ID.test(typed.split("/")[1]) ? "" : "After Public/ or Private/ comes the account's ID: letters and digits."
+  // An LNS name may be written lns:alice or @alice (SPEC.md §2): a name, never receiving keys.
+  const bare = nameBare(typed)
+  if (bare !== typed) return /^[a-z0-9][a-z0-9-]{0,62}(\.lez)?$/i.test(bare) ? "" : "That isn't an LNS name, an account or receiving keys."
   if (typed.indexOf(":") >= 0) {
     const [npk, vpk] = typed.split(":")
     // A real vpk is an ML-KEM-768 key: 1184 bytes, 2368 hex characters (the module's VPK_HEX).
@@ -116,9 +119,16 @@ export function toProblem(text) {
   return /^[a-z0-9][a-z0-9-]{0,62}(\.lez)?$/i.test(typed) ? "" : "That isn't an LNS name, an account or receiving keys."
 }
 
+/// `typed` without an LNS name's lns: or @ in front (deep review B10); anything else as it is.
+function nameBare(typed) {
+  return typed.replace(/^lns:/i, "").replace(/^@/, "")
+}
+
 /// Whether the destination is someone's receiving keys (can't be checked: an extra tick).
+/// `lns:alice` is a name.
 export function toTheirKeys(text) {
-  return String(text || "").indexOf(":") > 0
+  const typed = String(text || "").trim()
+  return nameBare(typed) === typed && typed.indexOf(":") > 0
 }
 
 /// Why the sheet's primary button can't be pressed yet, or "".
@@ -356,13 +366,13 @@ export function deedNameOf(deeds, program, definition) {
   return ""
 }
 
-/// Whether a holding is an LNS name card: one of the names' cards, or a collection called
-/// "LNS name deed" under a built-in program (DEEDS.md: its metadata is fixed). A card moves only
-/// with its name: the NFT program refuses its holder's own Transfer or Burn.
+/// Whether a holding is an LNS name card: one of the names' cards (deedNameOf). A collection
+/// merely called "LNS name deed" is not one: anyone can name a collection so, and a real deed sits
+/// in a registry account, never in a wallet account's holdings (deep review B11). A card moves only
+/// with its name: the NFT program refuses its holder's own Transfer or Burn. `listed` and
+/// `collection` are kept for the callers.
 export function isDeed(deeds, listed, program, definition, collection) {
-  if (deedNameOf(deeds, program, definition) !== "") return true
-  const builtIn = (listed || []).some((p) => p.program === program && p.built_in)
-  return builtIn && !!collection && collection.name === "LNS name deed"
+  return deedNameOf(deeds, program, definition) !== ""
 }
 
 /// The collection's description, if its record carries one; "" otherwise (the reference
@@ -419,8 +429,8 @@ export function ownerShown(account, name) {
 /// account, receiving keys, or not usable yet.
 export function toName(text) {
   const typed = String(text || "").trim()
-  if (typed === "" || toProblem(typed) !== "" || /^(Public|Private)\//.test(typed) || typed.indexOf(":") >= 0) return ""
-  return typed.toLowerCase().replace(/\.lez$/, "")
+  if (typed === "" || toProblem(typed) !== "" || /^(Public|Private)\//.test(typed) || toTheirKeys(typed)) return ""
+  return nameBare(typed).toLowerCase().replace(/\.lez$/, "")
 }
 
 /// One step of checking a name for Send, from `resolve`'s answer `record` for `asked`:

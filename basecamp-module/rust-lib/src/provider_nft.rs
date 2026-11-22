@@ -378,10 +378,15 @@ impl Names {
         let now = provider::now_ms();
         let mut store = self.nft_store();
         // The app names a private account by its handle: turned back into the account here.
-        let real = store.unhandle(&app, from).unwrap_or_else(|| from.trim().to_owned());
-        if real.starts_with("Private/~") {
-            return Err("ask to see that account's NFTs first (request_nft_access), then propose it".to_owned());
-        }
+        // A private account only ever by its handle: its ID written out is refused like any account
+        // not given, so an app can't learn which ID is behind its handle (deep review A6).
+        let real = match store.unhandle(&app, from) {
+            Some(real) => real,
+            None if from.trim().starts_with("Private/") => {
+                return Err("ask to see that account's NFTs first (request_nft_access), then propose it".to_owned());
+            }
+            None => from.trim().to_owned(),
+        };
         let mut request = transfer_request(&app, program, &real, destination, summary, now)?;
         request["from_shown"] = json!(from.trim());
         if !store.granted(&app).iter().any(|account| request["from"] == account.as_str()) {

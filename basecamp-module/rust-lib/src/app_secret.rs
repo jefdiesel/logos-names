@@ -163,7 +163,7 @@ pub fn imported_master(root: &[u8; 32], account: &[u8; 32], ask: &Ask, index: u6
 
 /// The values `ask` gets from the imported account `account` of the wallet whose root is `root`.
 pub fn imported_values(root: &[u8; 32], account: &[u8; 32], ask: &Ask) -> Vec<[u8; 32]> {
-    (ask.first..ask.first + ask.count).map(|index| tagged(&ask.tag, &imported_master(root, account, ask, index))).collect()
+    (0..ask.count).map(|offset| ask.first + offset).map(|index| tagged(&ask.tag, &imported_master(root, account, ask, index))).collect()
 }
 
 /// `SHA256(tag | m)`: what the app gets.
@@ -177,7 +177,7 @@ pub fn tagged(tag: &str, master: &[u8; 32]) -> [u8; 32] {
 /// The values `ask` gets from the account whose secret is `account_secret`, indexes
 /// `first..first + count`.
 pub fn values(account_secret: &[u8; 32], account: &[u8; 32], ask: &Ask) -> Vec<[u8; 32]> {
-    (ask.first..ask.first + ask.count).map(|index| tagged(&ask.tag, &master(account_secret, account, ask, index))).collect()
+    (0..ask.count).map(|offset| ask.first + offset).map(|index| tagged(&ask.tag, &master(account_secret, account, ask, index))).collect()
 }
 
 #[cfg(test)]
@@ -315,5 +315,9 @@ mod tests {
             assert!(Ask::new(app, scope, vec![0; context], tag, first, count).is_err(), "{app:?} {scope:?} {tag:?} {count}");
         }
         assert!(Ask::new("app", "s", vec![0; MAX_CONTEXT], "t", u64::MAX, 1).is_ok());
+        // Deep review B5: the last index is made like any other (its range never overflows).
+        let last = Ask::new("app", "s", Vec::new(), "t", u64::MAX, 1).unwrap();
+        assert_eq!(values(&[1; 32], &[2; 32], &last).len(), 1);
+        assert_eq!(imported_values(&[1; 32], &[2; 32], &last).len(), 1);
     }
 }

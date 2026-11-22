@@ -52,6 +52,9 @@ check("toProblem vpk length", [10, 256, 1183, 1185].map((n) => toProblem("ab".re
 check("VPK_HEX", VPK_HEX, 2368);
 check("toProblem bad", ["", BOB, "Public/x!", "ab:cd", "two words"].map((t) => toProblem(t) !== ""), [true, true, true, true, true]);
 check("toTheirKeys", [toTheirKeys("ab".repeat(32) + ":cd"), toTheirKeys("alice")], [true, false]);
+// Deep review B10: lns:alice and @alice are names (SPEC.md §2), never receiving keys.
+check("toProblem: lns: and @ names", ["lns:alice", "LNS:Alice.lez", "@alice", "lns:", "lns:two words"].map((t) => toProblem(t) === ""), [true, true, true, false, false]);
+check("toTheirKeys: lns:alice is a name", [toTheirKeys("lns:alice"), toTheirKeys("@alice")], [false, false]);
 
 // The sheet's button waits for each needed choice, and says which.
 const sheet = { action: "send", proven: true, payers: [{ account: "Private/A", enough: false }, { account: "Private/B", enough: true }], warnings: ["x"] };
@@ -147,9 +150,11 @@ check("itemOf: gone once it no longer holds it", [itemOf(programs, { ...item, ac
 check("itemOf: an unreadable one by its account", itemOf(programs, { program: PROGRAM, account: "Public/Y", definition: "" }).state, "unreadable");
 const deeds = { grace05: { deed: { definition: ART, nft_program: PROGRAM } }, turing: { deed: null }, ada: {} };
 check("deedNameOf", [deedNameOf(deeds, PROGRAM, ART), deedNameOf(deeds, "other", ART), deedNameOf(deeds, PROGRAM, BOB), deedNameOf(null, PROGRAM, ART), deedNameOf(deeds, PROGRAM, "")], ["grace05", "", "", "", ""]);
-check("isDeed: a name's card, or the fixed deed collection under a built-in program",
+// Deep review B11: anyone can name a collection "LNS name deed"; a card is one of the names' deeds
+// only (a real deed sits in a registry account, never in a wallet account's holdings).
+check("isDeed: a name's card only, never a collection that is just called so",
   [isDeed(deeds, [], PROGRAM, ART, art), isDeed({}, [{ program: PROGRAM, built_in: true }], PROGRAM, BOB, { name: "LNS name deed" }), isDeed({}, [{ program: PROGRAM }], PROGRAM, BOB, { name: "LNS name deed" }), isDeed({}, [{ program: PROGRAM, built_in: true }], PROGRAM, BOB, art)],
-  [true, true, false, false]);
+  [true, false, false, false]);
 check("itemDescription: only when the record carries one", [itemDescription(art), itemDescription({ description: "  A harbour at dawn. " }), itemDescription(null)], ["", "A harbour at dawn.", ""]);
 check("itemFields: the four, then every other field by its name", itemFields({ ...art, edition_note: "first run", extra: null, nested: { a: 1 } }).map((r) => r.label + "=" + r.value),
   ["Supply=3", "Standard=Simple", "URI=ipfs://bafyart/meta", "Creators=me", "Edition note=first run", "Extra=none given"]);
@@ -163,6 +168,7 @@ check("editionLines: a supply too big for a number is left out", editionLines({ 
 check("registryLine", [registryLine(null), registryLine({ registry: false }), registryLine({ registry: true, verified: true }), registryLine({ registry: true, verified: true, stale: true }), registryLine({ registry: true, verified: false, kind: "unregistered" }), registryLine({ registry: true, verified: false })],
   ["The Program Registry isn't installed: its source is unknown.", "The Program Registry isn't installed: its source is unknown.", "Source verified (Program Registry)", "Changed: it runs other code than was registered.", "Not in the Program Registry: its source is unknown.", "Source not verified (Program Registry)"]);
 check("ownerShown: the name, else the short account", [ownerShown("Public/" + BOB, "alice"), ownerShown("Public/" + BOB, ""), ownerShown("Private/" + BOB, undefined)], ["alice", "Public HLEwXN…eim2", "Private HLEwXN…eim2"]);
+check("toName: lns: and @ written names", [toName("lns:Alice"), toName("@bob.lez")], ["alice", "bob"]);
 check("toName: names only", [toName("Alice.lez"), toName(" bob "), toName("Public/" + BOB), toName("b@d"), toName(""), toName("a".repeat(64) + ":" + "b".repeat(VPK_HEX))], ["alice", "bob", "", "", "", ""]);
 const NOW = 1800000000000;
 check("nameStep: an account", nameStep("alice", "alice", { account: BOB, never: true, expires: null }, NOW), { state: "ok", name: "alice", account: BOB, via: "" });

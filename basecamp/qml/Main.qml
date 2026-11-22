@@ -123,9 +123,9 @@ Item {
     property bool configKnown: false   // the names module has answered once
     // The names module this app needs: the same release (metadata.json asks for it
     // at install, but an older module can still be the one Basecamp loaded).
-    readonly property string neededModule: "0.18.1"
+    readonly property string neededModule: "0.18.2"
     // This app's own version, as in basecamp/metadata.json (a module test keeps them equal).
-    readonly property string appVersion: "0.18.1"
+    readonly property string appVersion: "0.18.2"
     property string buildCommit: ""   // the module's build commit (get_config build_commit), "" for a dev build
     property var moduleFeatures: []    // get_config features: what this build of the names module can do
     property real machineMemory: 0     // get_config memory_bytes: this computer's memory (0: unknown)
@@ -3901,6 +3901,9 @@ Item {
         revealing = false
         tokenHoldings = null
         walletAccount = null
+        // An account's name is the network's own (deep review B4).
+        accountNames = ({})
+        accountNamesAsking = ({})
         if (walletView === "account")
             walletView = "home"
         namesNet = net
@@ -4181,11 +4184,13 @@ Item {
         }
         chainBusy = true
         chainProblem = ""
-        askLater("chain_send", [asked[0], asked[1], asked[2], true], function(sent) {
+        // To the key the plan showed, not the name again (Logic.chainSendTo).
+        var plan = chainPlan
+        askLater("chain_send", [asked[0], Logic.chainSendTo(plan, asked[1]), asked[2], true], function(sent) {
             chainBusy = false
             chainPlan = null
             sendAmount.text = ""
-            chainSent = { hash: sent.hash, amount: sent.amount, to: sent.to, name: sent.name, state: sent.hash ? "pending" : "unknown", fee: sent.fee }
+            chainSent = { hash: sent.hash, amount: sent.amount, to: sent.to, name: sent.name || plan.name || null, state: sent.hash ? "pending" : "unknown", fee: sent.fee }
             chainSentAt = Date.now()
             loadChain()
         }, function(message) {
@@ -7783,6 +7788,9 @@ Item {
     /// busy, a few times; until then the short account is shown.
     function nftReadOwner() {
         var id = nftItemOwnerId
+        // A private owner's ID is never asked of the network (deep review B3).
+        if (nftItemRow !== null && nftItemRow.isPrivate)
+            return
         if (id === "" || Object.prototype.hasOwnProperty.call(accountNames, id) || nftOwnerTries >= 8)
             return
         nftOwnerTries++
@@ -8883,12 +8891,16 @@ Item {
     /// planned in this wallet with the address read back and ticked at step 2 (`sbOwnPlans`), and
     /// that address is the one drawn above the sheet (Logic.burnIsOwnSendBack).
     function appBurnOwn(request) {
-        return Logic.burnIsOwnSendBack(request, { inline: appInline, view: walletView, focus: sbFocus, recorded: sbOwnPlans[sbFocus] || (sbFocusRow !== null && Logic.recipientApproved(sbApproved, sbFocusRow.account, sbFocusRow.recipient) ? String(sbFocusRow.recipient) : ""), shown: sbFocusRow !== null ? String(sbFocusRow.recipient || "") : "" })
+        return Logic.burnIsOwnSendBack(request, appBurnHere())
+    }
+    /// Where the burn's sheet is drawn, for Logic.burnIsOwnSendBack / burnIsTickedSendBack.
+    function appBurnHere() {
+        return { inline: appInline, view: walletView, focus: sbFocus, recorded: sbOwnPlans[sbFocus] || (sbFocusRow !== null && Logic.recipientApproved(sbApproved, sbFocusRow.account, sbFocusRow.recipient) ? String(sbFocusRow.recipient) : ""), shown: sbFocusRow !== null ? String(sbFocusRow.recipient || "") : "" }
     }
     /// A decoded burn drawn inline under the LEZ Bridge's record of its send-back's address, which
-    /// this wallet didn't tick (not appBurnOwn): the sheet says the address above is that record.
+    /// this wallet didn't tick (not Logic.burnIsTickedSendBack): the sheet says the address above is that record.
     function appBurnUnderRecord(request) {
-        return appInline && walletView === "sendback" && Logic.burnMatchesSendBack(request, sbFocus) && !appBurnOwn(request)
+        return appInline && walletView === "sendback" && Logic.burnMatchesSendBack(request, sbFocus) && !Logic.burnIsTickedSendBack(request, appBurnHere())
     }
 
     /// Whether the app claims a publisher that doesn't vouch for it.
@@ -9130,17 +9142,18 @@ Item {
             if (Object.prototype.hasOwnProperty.call(accountNames, id) || accountNamesAsking[id])
                 return
             var asking = Object.assign({}, accountNamesAsking); asking[id] = true; accountNamesAsking = asking
-            askLater("reverse", [id], function(value) {
+            // An answer from the network left (it was switched meanwhile) is dropped (onNet).
+            askLater("reverse", [id], onNet(function(value) {
                 var known = Object.assign({}, accountNames); known[id] = Logic.reverseShown(value); accountNames = known
                 var left = Object.assign({}, accountNamesAsking); delete left[id]; accountNamesAsking = left
-            }, function(message) {
+            }), onNet(function(message) {
                 var left = Object.assign({}, accountNamesAsking); delete left[id]; accountNamesAsking = left
                 // Still being read on the module's own thread: the next read of the requests asks
                 // again. Any other answer: shown without a name.
                 if (!Logic.askAgainAfter(message, moduleBusy, moduleNoAnswer)) {
                     var none = Object.assign({}, accountNames); none[id] = ""; accountNames = none
                 }
-            }, 20000)
+            }), 20000)
         })
     }
 
@@ -9935,10 +9948,10 @@ Item {
             wrapMode: Text.WordWrap
         }
         Hint { visible: root.appSheetCompact; color: root.ink; textFormat: Text.PlainText; text: root.appSheetLine(sheetBody.request) }
-        // Another app's decoded burn (or the LEZ Bridge's away from Bridge to Ethereum): where it
-        // goes, as far as the wallet can say, before its tick.
+        // A decoded burn: where it goes, as far as the wallet can say, before its tick; this
+        // wallet's own send-back, the address the wallet checked and the relay fee (deep review A2).
         Repeater {
-            model: root.appSheetCompact && sheetBody.request !== null && !root.appBurnOwn(sheetBody.request) ? Logic.burnDestination(sheetBody.request, root.appBurnUnderRecord(sheetBody.request)) : []
+            model: root.appSheetCompact && sheetBody.request !== null ? Logic.burnSheetLines(sheetBody.request, root.appBurnOwn(sheetBody.request), root.appBurnUnderRecord(sheetBody.request)) : []
             Hint { required property var modelData; color: root.ink; textFormat: Text.PlainText; text: modelData }
         }
         // Exit keys for an Ethereum address not approved yet: the address in full, the four words
@@ -15913,7 +15926,7 @@ Item {
                         visible: root.whatsNewShown
                         Layout.fillWidth: true
                         spacing: 6
-                        Part { text: "What's new in Names 0.18.1" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
+                        Part { text: "What's new in Names 0.18.2" + (root.buildCommit !== "" ? " (" + root.buildCommit + ")" : "") }
                         Repeater {
                             model: Logic.WHATS_NEW
                             Hint { required property var modelData; color: root.ink; text: "· " + modelData }

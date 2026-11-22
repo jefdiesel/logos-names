@@ -403,6 +403,11 @@ impl Registry {
             registry_actor(&self.program, commitment_seed(&promised)),
         ];
         reached.extend(charge.paying(&self.program, &derived.id, *owner));
+        // A lapsed record's deed is burned by this registration (the program's Register): its
+        // definition and the old holder's deed account are declared, as the CLI does (deep review B2).
+        if let Some(deed_of_old) = self.record(name, derived)?.and_then(|old| old.deed.map(|deed| (deed, old.owner))) {
+            reached.extend(deed_mentions(&self.program, &derived.id, &deed_of_old.0, &[deed_of_old.1]));
+        }
         let message = encode_register(
             &derived.id,
             &profile.seal(&derived.key)?,
@@ -890,6 +895,30 @@ mod tests {
             records.borrow_mut().retain(|(held, _)| *held != id);
             records.borrow_mut().push((id, record));
         });
+    }
+
+    /// Deep review B2: registering a name that lapsed with a deed burns that deed (the program's
+    /// Register), so the reveal declares the deed's definition and the old holder's deed account,
+    /// as the CLI does; a lapsed name without a deed declares none.
+    #[test]
+    fn a_reveal_of_a_lapsed_deeded_name_declares_its_old_deed() {
+        let (owner, old_holder) = ([0x31; 32], [0x32; 32]);
+        let deadline = crate::registry::Deadline::after(std::time::Duration::from_secs(600));
+        let registry = Registry::by(&crate::registry::stub_chain_at(1_800_000_000_000), [7; 32], deadline);
+        let name = "lapseddeed";
+        let derived = derive(name);
+        let deed = crate::registry::Deed { definition: [0x55; 32], nonce: [0x66; 32] };
+        let old_tag = owner_tag(&derived.id, &old_holder);
+        let lapsed = |deed| Resolved { owner: old_tag, expires: 1, profile: Profile::bare(name), claimed: false, deed, sealed: crate::registry::Sealed::Opened };
+        put_record(name, lapsed(Some(deed)));
+        let change = registry.reveal(name, &derived, &owner, &[0x5A; 32], None).expect("a reveal");
+        let expected = deed_mentions(&registry.program, &derived.id, &deed, &[old_tag]);
+        assert!(expected.iter().all(|m| change.mentions.contains(m)), "the old deed is declared: {:?}", change.mentions);
+        put_record(name, lapsed(None));
+        let plain = registry.reveal(name, &derived, &owner, &[0x5A; 32], None).expect("a reveal");
+        let nft = crate::registry::deed_nft_program();
+        assert!(plain.mentions.iter().all(|m| m.program != nft), "no deed, nothing of the NFT program");
+        crate::registry::RECORDS.with(|records| records.borrow_mut().clear());
     }
 
     /// Jef's rule (2026-11-21): a registered name is an address, with no step to publish it.

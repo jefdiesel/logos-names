@@ -1829,7 +1829,11 @@ const WALLET_SDK_VERSION: &str = "1.0";
 /// `get_config` reports it so the Names app can refuse a module from another
 /// release (the app's own metadata asks for at least this at install, but an
 /// older module can still be the one loaded).
-const MODULE_VERSION: &str = "0.18.1";
+const MODULE_VERSION: &str = "0.18.2";
+
+/// How far this computer's clock may run ahead of the chain's before a registration's commitment
+/// is dropped as expired by it (`Commitment::expired_by_local_clock`).
+const LOCAL_CLOCK_SLACK_MS: u64 = 24 * 60 * 60 * 1000;
 /// get_config's `features`: what an app may need beyond the version (`reveal_name`;
 /// `request_access_with` and its `account_hint`; `grant_add_account`: a hint for an account
 /// the app wasn't given is a request to add it to the app's grant, not "approved").
@@ -2515,6 +2519,13 @@ impl Commitment {
     /// commitment expires.
     fn usable_at(&self, chain_now: u64) -> bool {
         chain_now.saturating_add(registry::TIME_WINDOW_MS) < self.made.saturating_add(registry::MAX_COMMIT_AGE_MS)
+    }
+
+    /// Whether the commitment is past use by this computer's clock `local`, which may run ahead of
+    /// the chain's (`made` is chain time): only once it is past use a day later than that (deep
+    /// review B7), so a clock a few hours ahead never drops a commitment that can still be revealed.
+    fn expired_by_local_clock(&self, local: u64) -> bool {
+        !self.usable_at(local.saturating_sub(LOCAL_CLOCK_SLACK_MS))
     }
 }
 
@@ -5627,6 +5638,11 @@ impl NamesModule for Names {
     }
 
     fn reverse(&mut self, account: String) -> String {
+        // A private account's ID is never asked of the sequencer, which would learn it (deep
+        // review B3); a private account publishes no name anyway.
+        if account.trim().starts_with("Private/") {
+            return reply(Err("a private account has no public name; the wallet doesn't ask the network about it".to_owned()));
+        }
         // Read on a thread of its own, busy until the first is back: the Names app's (find) in
         // its lane, another app's under its own keys (`app_read`, feature `app_name_reads`).
         if !self.served.inline {
@@ -5743,7 +5759,7 @@ impl NamesModule for Names {
             let mut under_way = Vec::new();
             let mut changed = false;
             for (name, saved) in commitments.all(&registry.program) {
-                if landed.contains(&name) || !saved.usable_at(local) {
+                if landed.contains(&name) || saved.expired_by_local_clock(local) {
                     commitments.remove(&registry.program, &name);
                     changed = true;
                     continue;
@@ -5937,9 +5953,18 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        self.change_name(&name, |registry, name, derived, held| {
-            registry.transfer(name, derived, held, &registry::parse_account(&new_owner)?)
-        })
+        // The same checks as the CLI's transfer (`may_hold`): never to the empty account or a
+        // program, nor an ID whose case was changed in copying (deep review B6).
+        let target = match registry::parse_account(&new_owner).and_then(|target| {
+            let bare = new_owner.trim();
+            registry::plausible_holder(bare.strip_prefix("Public/").unwrap_or(bare), &target)?;
+            self.not_a_sink(&target, "hold a name")?;
+            Ok(target)
+        }) {
+            Ok(target) => target,
+            Err(refused) => return reply(Err(refused)),
+        };
+        self.change_name(&name, |registry, name, derived, held| registry.transfer(name, derived, held, &target))
     }
 
     fn release(&mut self, name: String) -> String {
@@ -8304,8 +8329,14 @@ impl NamesModule for Names {
             // Checked before the registry is asked, so a bad call costs nothing.
             provider::call_request(&app, &program_id, &accounts_json, &instruction_hex, &summary, None, None, now)?;
             let program = registry::parse_account(program_id.trim().strip_prefix("Public/").unwrap_or(program_id.trim()))?;
+            self.call_root_allowed(&program)?;
             let label = program_registry::label(&registry::account_text(&program));
-            let request = provider::call_request(&app, &program_id, &accounts_json, &instruction_hex, &summary, label.as_ref(), self.program.as_ref(), now)?;
+            let mut request = provider::call_request(&app, &program_id, &accounts_json, &instruction_hex, &summary, label.as_ref(), self.program.as_ref(), now)?;
+            if self.is_listed_nft_program(&program) {
+                if let Some(warnings) = request["warnings"].as_array_mut() {
+                    warnings.insert(0, json!(NFT_ROOT_WARNING));
+                }
+            }
             self.queue(&app, request, now)
         })())
     }
@@ -9063,6 +9094,10 @@ enum Fault {
     Setup,
 }
 
+/// A program call whose root is one of the person's NFT programs: its sheet warns (so it needs the
+/// tick), since the account that signs holds its NFTs of that program in its own actor.
+const NFT_ROOT_WARNING: &str = "This is an NFT program: a call can send, print or burn the NFTs the account you choose holds in it.";
+
 /// What the app that asked is told when its call wasn't sent (`request_status` `error`).
 const CALL_NOT_SENT: &str = "the wallet couldn't send it";
 const CALL_NEEDS_UPDATE: &str = "Names Wallet needs an update to send this";
@@ -9308,6 +9343,11 @@ impl Names {
         if kind == provider::TRANSFER || kind == provider::CALL {
             // Stays pending: the person can switch zones and approve it, or reject it.
             self.asked_here(&request)?;
+        }
+        if kind == provider::CALL {
+            // A token program set (or a bridge read) since it was asked is refused now too.
+            let program = registry::parse_account(request["program"].as_str().unwrap_or_default())?;
+            self.call_root_allowed(&program)?;
         }
         let chosen: Vec<String> = account
             .split(',')
@@ -10218,6 +10258,26 @@ impl Names {
             }
         }
         own
+    }
+
+    /// A program call (`propose_call`) may not have a token program as its root (deep review A1):
+    /// the holder's tokens sit in its own actor of that program, so a root call it signs can move
+    /// them, which the call's sheet doesn't say. The wallet's token programs, every bridge's (as
+    /// known now, never waited for) and the token sources' are refused; tokens are sent with
+    /// `propose_transfer`. Checked when asked and again at approval.
+    fn call_root_allowed(&mut self, program: &AccountId) -> Result<(), String> {
+        let text = registry::account_text(program);
+        let own_tokens = self.own_programs().into_iter().any(|(id, kind)| kind == "token_program" && id == text);
+        if own_tokens || self.root_only_lenient(Check::Signing).iter().any(|(id, _)| *id == text) {
+            return Err(format!("{text} is a token program; a program call can't have it as its root, since it could move the tokens the account holds. Send tokens with propose_transfer"));
+        }
+        Ok(())
+    }
+
+    /// Whether `program` is one of the NFT programs in the person's list for this network.
+    fn is_listed_nft_program(&self, program: &AccountId) -> bool {
+        let text = registry::account_text(program);
+        self.nft_list().unwrap_or_default().iter().any(|entry| entry["program"].as_str().and_then(|p| registry::parse_account(p).ok()).is_some_and(|p| registry::account_text(&p) == text))
     }
 
     /// A token source may not name a bridge program or one of the wallet's own programs (SF-4):
@@ -11975,6 +12035,12 @@ mod tests {
         assert_eq!(saved.ready_at(), 1_000_000 + 15 * 60 * 1000);
         assert!(saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS - 1));
         assert!(!saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS));
+        // Deep review B7: this computer's clock a few hours (up to a day) ahead of the chain's
+        // never drops it; only one past use by more than a day does.
+        let last = 1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS;
+        assert!(!saved.expired_by_local_clock(last + 20 * 60 * 60 * 1000));
+        assert!(!saved.expired_by_local_clock(last + LOCAL_CLOCK_SLACK_MS - 1));
+        assert!(saved.expired_by_local_clock(last + LOCAL_CLOCK_SLACK_MS));
 
         let path = std::env::temp_dir().join(format!("logos-names-pending-{}-{}.json", std::process::id(), now()));
         let mut pending = Pending::load(path.clone());
@@ -12076,6 +12142,34 @@ mod tests {
         assert_eq!(job_end(&mut names, &id)["state"], "done");
         registry::UNSEEN.with(|list| list.borrow_mut().clear());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Deep review B6: the name plate's Transfer (`transfer`, signed by the module) refuses what
+    /// the CLI's does: the empty account, a program's account, and an ID whose case was changed.
+    #[test]
+    fn the_plate_s_transfer_refuses_a_sink_or_a_mangled_id() {
+        let (mut names, dir) = with_fake_cli("plate-transfer", "exit 0");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let unseen = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
+        for (to, why) in [
+            ("11111111111111111111111111111111".to_owned(), "empty account"),
+            (format!("Public/{}", registry::account_text(&[7; 32])), "program's account"),
+            (DEFAULT_REGISTRY.to_owned(), "program's account"),
+            (unseen.to_ascii_lowercase(), "all one case"),
+        ] {
+            let refused = parsed(&names.transfer("xferalpha".into(), to.clone()));
+            assert!(refused["error"].as_str().unwrap_or_default().contains(why), "{to}: {refused}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Deep review B3: a private account's ID is never sent to the sequencer to read its name.
+    #[test]
+    fn a_private_account_s_name_is_never_asked_of_the_network() {
+        let mut names = fresh();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let refused = parsed(&names.reverse(format!("Private/{}", registry::account_text(&[9; 32]))));
+        assert!(refused["error"].as_str().unwrap_or_default().contains("private account"), "{refused}");
     }
 
     /// failed-send-becomes-done-after-job-prune: a send that failed (exit 1) was shown
@@ -14929,9 +15023,11 @@ mod tests {
         let script_body = std::fs::read_to_string(&script).unwrap().replace(&format!("\"{PUBLIC}\""), &format!("\"{PUBLIC}\",\"{OTHER}\""));
         std::fs::write(&script, script_body).unwrap();
         assert_eq!(parsed(&names.revoke_app("tips_ui".into()))["value"]["revoked"], true);
-        let taken = approve(&mut names, &later, &other);
-        assert!(taken["error"].as_str().unwrap_or_default().contains("taken back"), "{taken}");
+        // Taking access back ends the waiting request at once (deep review A3), saying why.
         assert_eq!(names.store().get(&later).unwrap()["state"], "rejected");
+        assert!(names.store().get(&later).unwrap()["error"].as_str().unwrap_or_default().contains("taken back"));
+        let taken = approve(&mut names, &later, &other);
+        assert!(taken["error"].as_str().unwrap_or_default().contains("rejected already"), "{taken}");
         assert!(names.store().granted("tips_ui").is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -15258,6 +15354,42 @@ mod tests {
         as_caller(app("tips_ui"));
         assert!(approve(&mut names, &id, &format!("Public/{PUBLIC}"))["error"].as_str().unwrap().contains("failed already"));
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Deep review A1: a program call can't have a token program as its root (the wallet's, a
+    /// bridge's), since the account that signs holds its tokens in that program's actor and the
+    /// call's sheet doesn't say they can move; an NFT program of the person's list is allowed but
+    /// warns, so it needs the tick.
+    #[test]
+    fn a_program_call_never_roots_in_a_token_program_and_an_nft_one_warns() {
+        let (mut names, dir) = with_wallet("provider-call-roots", "exit 0");
+        let token_program = [0x44; 32];
+        names.token_program = Some(token_program);
+        connect(&mut names, "tips_ui", &format!("Public/{PUBLIC}"));
+        as_caller(app("tips_ui"));
+        let transfer = "00".to_owned() + &"11".repeat(64);
+        for root in [registry::account_text(&token_program), bridge_net::KNOWN_TOKEN_PROGRAMS[0].to_owned(), format!("Public/{}", bridge_net::KNOWN_TOKEN_PROGRAMS[1])] {
+            let refused = parsed(&names.propose_call(root.clone(), format!("[\"{OTHER}\"]"), transfer.clone(), "Sync profile".into()));
+            assert!(refused["error"].as_str().unwrap_or_default().contains("propose_transfer"), "{root}: {refused}");
+        }
+        assert!(names.store().requests.iter().all(|r| r["kind"] != provider::CALL), "nothing was queued");
+        // An NFT program in the person's list: asked, with the warning first.
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        names.nft_program_add(NFT_PROGRAM.into(), String::new());
+        as_caller(app("tips_ui"));
+        let asked = parsed(&names.propose_call(NFT_PROGRAM.into(), "[]".into(), "01".into(), "Mint".into()));
+        let id = asked["value"]["request"].as_str().unwrap_or_else(|| panic!("{asked}")).to_owned();
+        assert_eq!(names.store().get(&id).unwrap()["warnings"][0], NFT_ROOT_WARNING);
+        // Another program: no such warning.
+        let plain = parsed(&names.propose_call(registry::account_text(&[5; 32]), "[]".into(), "01".into(), String::new()));
+        let plain = plain["value"]["request"].as_str().unwrap().to_owned();
+        assert!(!names.store().get(&plain).unwrap()["warnings"].to_string().contains("NFT program"));
+        // A call asked before its program became the wallet's token program is refused at approval.
+        names.token_program = Some(registry::parse_account(NFT_PROGRAM).unwrap());
+        let late = approve(&mut names, &id, &format!("Public/{PUBLIC}"));
+        assert!(late["error"].as_str().unwrap_or_default().contains("token program"), "{late}");
+        assert_eq!(names.store().get(&id).unwrap()["state"], "pending", "nothing was sent");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -19730,6 +19862,10 @@ mod tests {
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
         names.approve_nft_request(asked["value"]["request"].as_str().unwrap().into(), String::new(), String::new(), String::new());
         as_caller(app("gallery_ui"));
+        // The private account's ID written out is refused like an account not given, and queues
+        // nothing (deep review A6): the app can't tell it is the one behind its handle.
+        let raw = parsed(&names.propose_nft_transfer(NFT_PROGRAM.into(), format!("Private/{PRIVATE}"), "alice".into(), String::new()));
+        assert!(raw["error"].as_str().unwrap_or_default().contains("request_nft_access"), "{raw}");
         let proposed = parsed(&names.propose_nft_transfer(NFT_PROGRAM.into(), handle.clone(), "alice".into(), String::new()));
         assert_eq!(proposed["value"]["from"], json!(handle), "{proposed}");
         assert!(!proposed.to_string().contains(PRIVATE));

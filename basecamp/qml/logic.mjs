@@ -437,15 +437,16 @@ export function accountNameMap(reverse, mine, mainName) {
     return out
 }
 
-/// The account IDs (base58, 32-44 characters) in `text`, without their Public/ or Private/,
-/// each once.
+/// The account IDs (base58, 32-44 characters) in `text`, without their Public/, each once. A
+/// `Private/<id>` is left out: its name is never asked of the network, which would learn the
+/// private account's ID (deep review B3).
 export function accountIdsIn(text) {
     var out = []
-    var re = /(?:Public\/|Private\/)?([1-9A-HJ-NP-Za-km-z]{32,44})/g
+    var re = /(Public\/|Private\/)?([1-9A-HJ-NP-Za-km-z]{32,44})/g
     var m
     while ((m = re.exec(String(text || ""))) !== null)
-        if (out.indexOf(m[1]) < 0)
-            out.push(m[1])
+        if (m[1] !== "Private/" && out.indexOf(m[2]) < 0)
+            out.push(m[2])
     return out
 }
 
@@ -516,6 +517,14 @@ export function keyShown(key) {
     if (account)
         return account[1] + "/" + keyShown(account[2])
     return text.length > 16 ? text.substr(0, 8) + "…" + text.substr(text.length - 4) : text
+}
+
+/// Where a checked Logos Blockchain send goes: the key the plan showed (`plan.to`, the name read
+/// once at Check), never the name again, which its holder could point elsewhere in between (deep
+/// review A4). `typed` only when the plan has no key.
+export function chainSendTo(plan, typed) {
+    var key = plan && plan.to ? String(plan.to) : ""
+    return /^[0-9a-f]{64}$/.test(key) ? key : String(typed || "")
 }
 
 /// Why `text` isn't something a Logos Blockchain send can go to (a 64-hex key, or a
@@ -1491,11 +1500,37 @@ export function burnMatchesSendBack(request, focus) {
 /// (`shown`, the LEZ Bridge's row) is that one. A send-back the LEZ Bridge lists that this wallet
 /// didn't plan and tick (another app's, or one from before Names was restarted) needs the tick.
 export function burnIsOwnSendBack(request, here) {
+    if (!burnIsTickedSendBack(request, here))
+        return false
+    // The address drawn is the LEZ Bridge's word, and so is the send-back's id: only the names
+    // module's check of the burn's opening (burn_opening.rs) says the burn pays it (deep review A2).
+    var o = request.burn_opening
+    return !!o && o.checked === true && String(o.recipient || "").toLowerCase() === String(here.recorded || "").toLowerCase()
+}
+
+/// Whether a decoded burn is, by the LEZ Bridge's word, the send-back in focus that this wallet
+/// planned and ticked, its address drawn above (`here` as burnIsOwnSendBack's). Without the names
+/// module's check of its opening it still needs the tick (burnIsOwnSendBack), but the address
+/// above is the one ticked, not only the LEZ Bridge's record.
+export function burnIsTickedSendBack(request, here) {
     var h = here || {}
     if (h.inline !== true || h.view !== "sendback" || !burnMatchesSendBack(request, h.focus))
         return false
     var recorded = String(h.recorded || "").toLowerCase(), shown = String(h.shown || "").toLowerCase()
     return recorded !== "" && recorded === shown
+}
+
+/// The lines drawn above the inline burn sheet: this wallet's own send-back (`own`,
+/// burnIsOwnSendBack) shows the checked address line, with the relay fee; any other decoded burn
+/// all of burnDestination. Each line cleaned; [] when it isn't a decoded burn.
+export function burnSheetLines(request, own, bridgeRecord) {
+    if (!decodedBurn(request))
+        return []
+    if (own === true) {
+        var line = burnAddressLine(request)
+        return line !== "" ? [line] : []
+    }
+    return burnDestination(request, bridgeRecord)
 }
 
 /// Whether the sheet's request needs the second, deliberate tick. An app whose publisher check
