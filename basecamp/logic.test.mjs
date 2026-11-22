@@ -1028,6 +1028,11 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("programs: only the claim's account is offered", sheetChoices(two, "BBB").map((c) => c.account), ["Public/BBB"]);
   check("programs: without a claim, every account", sheetChoices(two, "").length, 3);
   check("other kinds keep their choices", sheetChoices({ kind: "connect", choices: two.choices }, "BBB").length, 3);
+  const callChoices = [{ account: "Public/AAA", granted: true }, { account: "Public/BBB" }, { account: "Public/CCC" }];
+  check("call: only the accounts shared with the app are offered (Vest's claim, 21 Nov)", sheetChoices({ kind: "call", choices: callChoices }, "").map((c) => c.account), ["Public/AAA"]);
+  check("relayed call: the same", sheetChoices({ kind: "relayed_call", choices: callChoices }, "").length, 1);
+  check("call with nothing shared: every account (no dead end)", sheetChoices({ kind: "call", choices: [{ account: "Public/AAA" }, { account: "Public/BBB" }] }, "").length, 2);
+  check("payments keep every account", sheetChoices({ kind: "transfer", choices: callChoices }, "").length, 3);
   const chk = { id: "rc-1", deposit: { account: "Public/BBB", leaf_index: 2 } };
   check("a cancelled job of this check is history", claimJobFor([{ id: "j1", check: "rc-1", state: "cancelled" }], chk), null);
   check("a failed one too", claimJobFor([{ id: "j1", check: "rc-1", state: "failed" }], chk), null);

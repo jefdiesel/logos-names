@@ -282,6 +282,14 @@ export function deedCheckLine(name, reason) {
 /// one can't be the claim's (15 Nov, the owner picked another and the claim didn't go on).
 export function sheetChoices(request, hint) {
     var choices = request && Array.isArray(request.choices) ? request.choices : []
+    // A program call from another app: only the accounts shared with that app are offered. The
+    // app built the call for one of them (Vest's claim must be signed by the account the schedule
+    // pays); an account it was never given can't be right, and would show it that account.
+    if (request && (request.kind === "call" || request.kind === "relayed_call")) {
+        var shared = choices.filter(function(c) { return !!(c && c.granted) })
+        if (shared.length > 0)
+            return shared
+    }
     if (!request || request.kind !== "programs" || typeof hint !== "string" || hint === "")
         return choices
     var bare = function(a) { return String(a || "").replace(/^(Public|Private)\//, "") }
