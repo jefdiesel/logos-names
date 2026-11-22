@@ -1,6 +1,6 @@
 // Checks qml/tidy.mjs (the wallet card kept tidy: older bridge tokens folded, the bridge panels
 // foldable, withdrawals hidden or said to be dead). Run with: node basecamp/tidy.test.mjs
-import { BRIDGE_ORDER, currentBridges, tokensFolded, olderLine, foldedNote, arrivingReady, bridgingReady, deadReason, deadSaid, hiddenRead, hiddenWith, visibleRows, hiddenLine, settingOn, HIDDEN_MAX } from "./qml/tidy.mjs";
+import { asList, BRIDGE_ORDER, currentBridges, tokensFolded, olderLine, foldedNote, arrivingReady, bridgingReady, deadReason, deadSaid, hiddenRead, hiddenWith, visibleRows, hiddenLine, settingOn, HIDDEN_MAX } from "./qml/tidy.mjs";
 import { bridgeNetRows, BRIDGE_LABELS, sendBackProgress } from "./qml/logic.mjs";
 import { readFileSync } from "node:fs";
 
@@ -45,6 +45,11 @@ const label = (a) => a.symbol + " " + (a.bridgeLabel || "native");
   check("on v7: 9 fold", olderLine(split.folded.length), "Older bridge tokens · 9");
 }
 check("a token whose bridge isn't said stays", tokensFolded([{ symbol: "X", base: "0", bridge: "" }], [V7]).shown.length, 1);
+// QML hands a Repeater's nested array over as a sequence Array.isArray refuses (the first render
+// showed no tokens): taken as a list all the same.
+const seq = { length: 2, 0: { symbol: "LEZ", base: "1" }, 1: { symbol: "wETH", base: "0", bridge: V2 } };
+check("asList: a sequence, an array, nothing", [asList(seq).length, asList([1]).length, asList(null).length, asList("ab").length], [2, 1, 0, 0]);
+check("a sequence folds like an array", tokensFolded(seq, { length: 1, 0: V7 }).folded.length, 1);
 check("nothing current known: nothing folds", tokensFolded(jefAssets, []).folded.length, 0);
 check("a held amount with leading zeros is still nothing", tokensFolded([{ symbol: "X", base: "000", bridge: V2 }], [V7]).folded.length, 1);
 check("no folded tokens: no line", olderLine(0), "");

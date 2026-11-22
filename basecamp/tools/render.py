@@ -1726,7 +1726,7 @@ def _t_tok(program, v, symbol, amount):
     return {"definition": (symbol + v + "1111111111111111111111111111111111111111")[:44], "eth_token": "0x0000000000000000000000000000000000000000" if symbol == "wETH" else "0xac207b9bfebf3ef7c26297ea6abadeeccc4aa71e",
             "symbol": symbol, "decimals": 18 if symbol == "wETH" else 6, "name": ("Wrapped Sepolia ETH" if symbol == "wETH" else "Wrapped dUSDC") + " (" + _T_LABEL.get(v, v) + ")",
             "bridge": program, "bridge_label": "bridge " + v, "amount": amount}
-_T_JEF = "Public/BawxwquWtPEVcrwSFftD6jS3XFxZNv4qYrV8pkyo9mu7"
+_T_JEF = OWNER   # the mock wallet's own public account (Jef's is Bawxwq…9mu7), so it isn't view only
 _T_TOKENS = [t for program, v in _T_BRIDGES for t in (_t_tok(program, v, "dUSDC", "0"), _t_tok(program, v, "wETH", "100000000000000000" if v == "v3" else "0"))]
 _T_NET = dict(NET04, read=dict(NET04_READ, height=46578, tokens=[dict(t, amount=None) for t in _T_TOKENS], bridges=[{"program": p, "label": "bridge " + v, "bridge": True, "token_program": "5w6nTkftFFDy8mtdpnKpZVetGQJ2WCKdhmpJsAYArbU7"} for p, v in _T_BRIDGES],
     accounts=[{"account": _T_JEF, "found": True, "native": "10000104865784", "tokens": _T_TOKENS, "other_tokens": 0}]))

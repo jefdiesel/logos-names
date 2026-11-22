@@ -12841,9 +12841,9 @@ Item {
                                                 text: backRow.dead !== "" ? backRow.dead : pj !== null && pj.stage !== "done" ? "Private burn · " + pj.card : backRow.p.card
                                             }
                                         }
-                                        // Hide: off the card (kept), nothing on either chain changes; Show brings it back.
+                                        // Hide: off the card (kept), nothing on either chain changes; Unhide brings it back.
                                         Link {
-                                            text: backRow.hiddenNow ? "Show" : "Hide"
+                                            text: backRow.hiddenNow ? "Unhide" : "Hide"
                                             color: root.dim
                                             font.pixelSize: root.px(15)
                                             onPressed: root.hideSendBack(backRow.modelData.id, !backRow.hiddenNow)

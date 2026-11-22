@@ -15,6 +15,16 @@ export const BRIDGE_ORDER = [
     "CdijfhGnf1NjyCvYTZcGijQZzZ6soNJQ75Piex1ZTM93"
 ]
 
+/// A list as QML hands it over: a JS array, or a sequence (a Repeater's modelData turns a nested
+/// array into one, which Array.isArray doesn't take: the card showed no tokens at all); else [].
+export function asList(x) {
+    if (Array.isArray(x))
+        return x
+    if (x && typeof x === "object" && typeof x.length === "number")
+        return Array.prototype.slice.call(x)
+    return []
+}
+
 /// The bridges whose tokens always stay on the card: the one new receives and sends use
 /// (`chosen`: the LEZ Bridge's config().deployment.bridge_program, "" when it doesn't say), and the
 /// newest one the wallet reads (`read`: bridge_net_balances' read.bridges, [{program}]): the
@@ -24,7 +34,7 @@ export function currentBridges(chosen, read) {
     var mine = String(chosen || "")
     if (mine !== "")
         out.push(mine)
-    var listed = (Array.isArray(read) ? read : []).map(function(b) { return b && b.program ? String(b.program) : "" }).filter(function(p) { return p !== "" })
+    var listed = asList(read).map(function(b) { return b && b.program ? String(b.program) : "" }).filter(function(p) { return p !== "" })
     var newest = ""
     var rank = -1
     listed.forEach(function(p) {
@@ -48,8 +58,8 @@ function holds(asset) {
 /// anything held, a token whose bridge isn't known) and `folded` (an older bridge's token with
 /// nothing in it). `current`: currentBridges. With no current bridge known nothing folds.
 export function tokensFolded(assets, current) {
-    var list = Array.isArray(assets) ? assets : []
-    var keep = Array.isArray(current) ? current : []
+    var list = asList(assets)
+    var keep = asList(current)
     if (keep.length === 0)
         return { shown: list, folded: [] }
     var shown = [], folded = []
@@ -83,13 +93,13 @@ export function foldedNote(folded, count, ready, readyWords) {
 
 /// How many "Arriving from Ethereum" rows have their Claim ready (logic.mjs receiveRowsShown rows).
 export function arrivingReady(rows) {
-    return (Array.isArray(rows) ? rows : []).filter(function(x) { return x && x.progress && x.progress.claim === true }).length
+    return asList(rows).filter(function(x) { return x && x.progress && x.progress.claim === true }).length
 }
 
 /// How many "Bridging to Ethereum" rows wait on the person (approve the burn, make the proof,
 /// finish it, collect it: logic.mjs sendBackProgress `tone: "ready"`), dead ones left out.
 export function bridgingReady(rows, statuses, said) {
-    return (Array.isArray(rows) ? rows : []).filter(function(x) {
+    return asList(rows).filter(function(x) {
         return x && x.progress && x.progress.tone === "ready" && deadReason(statuses ? statuses[x.id] : null, said ? said[x.id] : "") === ""
     }).length
 }
@@ -156,7 +166,7 @@ export function hiddenRead(text) {
 
 /// The list with `id` hidden (`hide`) or shown again; the kept text is JSON.stringify of it.
 export function hiddenWith(list, id, hide) {
-    var now = (Array.isArray(list) ? list : []).filter(function(x) { return x !== id })
+    var now = asList(list).filter(function(x) { return x !== id })
     if (hide)
         now.push(String(id))
     return now.slice(-HIDDEN_MAX)
@@ -165,8 +175,8 @@ export function hiddenWith(list, id, hide) {
 /// The "Bridging to Ethereum" rows split: `rows` shown, `hidden` how many are hidden. With
 /// `showHidden` every row is shown (each hidden one then offers Show again).
 export function visibleRows(rows, hidden, showHidden) {
-    var list = Array.isArray(rows) ? rows : []
-    var away = Array.isArray(hidden) ? hidden : []
+    var list = asList(rows)
+    var away = asList(hidden)
     var kept = list.filter(function(x) { return away.indexOf(x.id) < 0 })
     return { rows: showHidden ? list : kept, hidden: list.length - kept.length }
 }
