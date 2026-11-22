@@ -1095,6 +1095,17 @@ pub trait NamesModule: Send + 'static {
     /// 256. Only the Names app may ask. get_config `features` lists `app_note`.
     fn app_note(&mut self, key: String, value: String) -> String;
 
+    /// The Names app's small view settings, kept across Basecamp restarts (unlike `app_note`):
+    /// which wallet panels are folded, which withdrawals are hidden from the card. `{key: value}`,
+    /// every one. Kept in `app-settings.json` beside config.json; it holds no secret. Only the
+    /// Names app may ask. get_config `features` lists `app_settings`.
+    fn app_settings(&mut self) -> String;
+
+    /// Keeps `value` under `key` in the app settings ("" removes it) and answers the value it had
+    /// ("" when none). At most 32 keys of 1 to 64 characters, values of at most 4,096. Only the
+    /// Names app may ask.
+    fn app_setting(&mut self, key: String, value: String) -> String;
+
     /// LEZ 0.4 (the bridge test network): what its test-LEZ faucet gives (`bridge_faucetInfo` on
     /// the network's endpoint): `{amount, per_account_hours, available, reason}`. Names app only.
     /// get_config `features` lists `test_lez_faucet`.
@@ -1605,6 +1616,21 @@ fn config_dir() -> Option<std::path::PathBuf> {
     Some(std::env::temp_dir().join(format!("logos-names-test-config-{}-{thread}", std::process::id())))
 }
 
+/// The Names app's view settings (`app_settings`), beside config.json: no secret in it.
+const APP_SETTINGS_FILE: &str = "app-settings.json";
+/// The most settings kept, and the longest value.
+const APP_SETTINGS_MAX: usize = 32;
+const APP_SETTING_MAX: usize = 4096;
+
+/// The settings kept, only text values; none when there is no file or it doesn't read.
+fn app_settings_read() -> serde_json::Map<String, Value> {
+    config_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join(APP_SETTINGS_FILE)).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Map<String, Value>>(&text).ok())
+        .map(|all| all.into_iter().filter(|(_, v)| v.is_string()).collect())
+        .unwrap_or_default()
+}
+
 /// How often a sheet's background LEZ 0.4 reads are made again (`SheetReads`).
 const SHEET_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1816,7 +1842,7 @@ const MODULE_VERSION: &str = "0.18.1";
 /// `app_name_reads`: other apps' `resolve`/`reverse` run on their own thread, per app.
 /// `show_name`: the Names app opens a name or an account for another app (the `names.open`
 /// intent, the SDK's `show`), and `reverse` falls back to a held name that publishes the account.
-const MODULE_FEATURES: [&str; 16] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "address_repair", "app_name_reads", "show_name"];
+const MODULE_FEATURES: [&str; 17] = ["reveal_name", "request_access_with", "file_sha256", "grant_add_account", "app_note", "app_settings", "bundled_tool", "relayed_bridge_burn", "test_lez_faucet", "bridge_token_send", "burn_opening", "account_import", "network_custom", "call_reads_clock", "address_repair", "app_name_reads", "show_name"];
 
 /// What a call that says it is a burn answers when it isn't one to a bridge a burn may go to.
 const NOT_A_BURN_BRIDGE: &str = "the wallet signs a burn only to a bridge whose vault releases by proof (bridge v4 or v5), and this call isn't one to its token program";
@@ -6185,6 +6211,37 @@ impl NamesModule for Names {
             }
             let had = if value.is_empty() { self.notes.remove(&key) } else { self.notes.insert(key, value) };
             Ok(Value::from(had.unwrap_or_default()))
+        })())
+    }
+
+    fn app_settings(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(Ok(Value::Object(app_settings_read())))
+    }
+
+    fn app_setting(&mut self, key: String, value: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply((|| {
+            let key = key.trim().to_owned();
+            if key.is_empty() || key.chars().count() > 64 {
+                return Err("a setting's key is 1 to 64 characters".to_owned());
+            }
+            if value.chars().count() > APP_SETTING_MAX {
+                return Err(format!("a setting is at most {APP_SETTING_MAX} characters"));
+            }
+            let mut all = app_settings_read();
+            if !value.is_empty() && !all.contains_key(&key) && all.len() >= APP_SETTINGS_MAX {
+                return Err(format!("at most {APP_SETTINGS_MAX} settings"));
+            }
+            let had = if value.is_empty() { all.remove(&key) } else { all.insert(key, Value::from(value)) };
+            let dir = config_dir().ok_or("no home folder to keep the setting in")?;
+            std::fs::create_dir_all(&dir).map_err(|e| format!("cannot keep the setting: {e}"))?;
+            cli::write_private(&dir.join(APP_SETTINGS_FILE), Value::Object(all).to_string().as_bytes()).map_err(|e| format!("cannot keep the setting: {e}"))?;
+            Ok(Value::from(had.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()))
         })())
     }
 
@@ -14240,6 +14297,42 @@ mod tests {
         }
     }
 
+    /// The view settings outlive the module (a file, unlike app_note), are the Names app's
+    /// own, and stay small.
+    #[test]
+    fn app_settings_are_kept_and_the_names_apps_own() {
+        let mut names = fresh();
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_file(config_dir().unwrap().join(APP_SETTINGS_FILE));
+        assert_eq!(parsed(&names.app_settings())["value"], json!({}));
+        assert_eq!(parsed(&names.app_setting("fold_bridging".into(), "yes".into()))["value"], "");
+        assert_eq!(parsed(&names.app_setting("hidden_send_backs".into(), "[\"sb-6163f4e0007b40e3\"]".into()))["value"], "");
+        // A new module (Basecamp started again) reads them back from the file.
+        let mut again = fresh();
+        assert_eq!(parsed(&again.app_settings())["value"], json!({ "fold_bridging": "yes", "hidden_send_backs": "[\"sb-6163f4e0007b40e3\"]" }));
+        assert_eq!(parsed(&again.app_setting("fold_bridging".into(), "".into()))["value"], "yes");
+        assert_eq!(parsed(&again.app_settings())["value"], json!({ "hidden_send_backs": "[\"sb-6163f4e0007b40e3\"]" }));
+        assert_eq!(parsed(&again.app_setting(" ".into(), "x".into()))["success"], false);
+        assert_eq!(parsed(&again.app_setting("k".into(), "x".repeat(APP_SETTING_MAX + 1)))["success"], false);
+        for i in 0..APP_SETTINGS_MAX - 1 {
+            assert_eq!(parsed(&again.app_setting(format!("k{i}"), "x".into()))["success"], true);
+        }
+        assert_eq!(parsed(&again.app_setting("one_more".into(), "x".into()))["success"], false);
+        assert_eq!(parsed(&again.app_setting("k0".into(), "y".into()))["value"], "x", "a key it has can change");
+        assert!(parsed(&again.get_config())["features"].as_array().unwrap().contains(&json!("app_settings")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(config_dir().unwrap().join(APP_SETTINGS_FILE)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        as_caller(logos_rust_sdk::LogosCaller::Module { name: "lez_bridge".into(), instance: None });
+        assert_eq!(parsed(&again.app_settings())["success"], false, "only the Names app");
+        assert_eq!(parsed(&again.app_setting("k0".into(), "".into()))["success"], false, "only the Names app");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let _ = std::fs::remove_file(config_dir().unwrap().join(APP_SETTINGS_FILE));
+    }
+
     #[test]
     fn app_notes_are_the_names_apps_own() {
         let mut names = fresh();
@@ -18861,6 +18954,8 @@ mod tests {
             ("set_chat_name", false, true, Box::new(|n: &mut Names| n.set_chat_name("addr".into(), "alice".into()))),
             ("board_follow", false, true, Box::new(|n: &mut Names| n.board_follow("alice".into(), false))),
             ("app_note", false, true, Box::new(|n: &mut Names| n.app_note("k".into(), "v".into()))),
+            ("app_settings", false, false, Box::new(|n: &mut Names| n.app_settings())),
+            ("app_setting", false, true, Box::new(|n: &mut Names| n.app_setting("k".into(), "v".into()))),
             ("cli_account_label", false, true, Box::new(move |n: &mut Names| n.cli_account_label(i.clone(), "main".into()))),
             ("chain_account_label", false, true, Box::new(|n: &mut Names| n.chain_account_label(NODE_KEY.into(), "x".into()))),
             ("set_bridge_programs", false, true, Box::new(move |n: &mut Names| json!(n.set_bridge_programs(json!([p1.clone()]).to_string())).to_string())),
