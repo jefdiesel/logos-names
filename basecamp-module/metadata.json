@@ -1,6 +1,7 @@
 {
   "name": "names",
   "display_name": "Names",
+  "author": "lns:names",
   "version": "0.18.1",
   "type": "core",
   "interface": "cdylib",

@@ -1,6 +1,7 @@
 {
   "name": "names_ui",
   "display_name": "Names",
+  "author": "lns:names",
   "version": "0.18.1",
   "type": "ui_qml",
   "category": "identity",
