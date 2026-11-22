@@ -84,6 +84,10 @@ check("isOlder: only when the LEZ Bridge says not current", [isOlder({ deploymen
   const rows = sendBackRowsShown(list, { "sb-a": { stage: "recorded", deployment: dep(false) }, "sb-d": { stage: "released" } }, { "sb-d": 1000 }, 2000);
   const split = bridgingSplit(rows, {}, { "sb-c": "the Names Wallet gives another exit secret than this send-back was made with" });
   check("bridging: current and unsaid stay; an older one that can be finished waits; dead or received ones are left out", [split.rows.map((x) => x.id), split.older.map((x) => x.id)], [["sb-e"], ["sb-a", "sb-b"]]);
+  // A folded panel whose only rows are older: its header counts them (Main.qml passes rows + older).
+  const onlyOld = bridgingSplit([{ id: "sb-o", deployment: dep(false), progress: sendBackProgress({ stage: "recorded", settle_offer: { available: true } }, 1795400000) }], {}, {});
+  const head = onlyOld.rows.concat(onlyOld.older);
+  check("a folded panel of older rows only says how many and what's ready", foldedNote(true, head.length, bridgingReady(head, {}, {}), "ready to finish"), "1 ready to finish");
 }
 
 // ── A folded panel's header ──
@@ -144,7 +148,8 @@ check("Main.qml: receives and withdrawals split by bridge", [qml.includes("Tidy.
 check("Main.qml: three Older bridges lines, one switch", [(qml.match(/OlderLine \{ /g) || []).length, (qml.match(/property bool olderOpen/g) || []).length], [3, 1]);
 check("Main.qml: an older withdrawal is still followed (the polls read sendBacks, not the card)", [qml.includes("sendBacks.filter(function(x) { return sbShowHidden || sbHidden.indexOf(x.id) < 0") || qml.includes("sbShowHidden || sbHidden.indexOf(x.id) < 0"), /sbScheduleNext[\s\S]{0,400}sbCard/.test(qml)], [true, false]);
 check("Main.qml: both panels have a PanelHead", (qml.match(/PanelHead \{/g) || []).length, 2);
-check("Main.qml: a folded Arriving still counts its Claims", qml.includes('Tidy.arrivingReady(arrivingPanel.view.rows), "ready to claim"'), true);
+check("Main.qml: a folded Arriving still counts its Claims, older ones too", [qml.includes('Tidy.arrivingReady(arrivingPanel.headRows), "ready to claim"'), qml.includes("readonly property var headRows: split.rows.concat(split.older)")], [true, true]);
+check("Main.qml: a folded Bridging counts the older ones too", [qml.includes("Tidy.bridgingReady(root.sbHeadRows, root.sbStatuses, root.sbDeadSaid)"), qml.includes("Tidy.visibleRows(sbSplit.rows.concat(sbSplit.older), sbHidden, sbShowHidden).rows")], [true, true]);
 check("Main.qml: hidden ids kept with app_setting", qml.includes('keepSetting("wallet_hidden_send_backs"'), true);
 check("Main.qml: a hidden withdrawal isn't polled on the card", qml.includes("sbShowHidden || sbHidden.indexOf(x.id) < 0"), true);
 check("Main.qml: module call args are text (app_setting)", /askLater\("app_setting", \[key, value\]/.test(qml), true);

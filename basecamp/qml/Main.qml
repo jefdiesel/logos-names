@@ -920,6 +920,8 @@ Item {
     // Older bridges' withdrawals that can still be finished stay followed (sendBacks, not this).
     readonly property var sbSplit: Tidy.bridgingSplit(sbRowsNow, sbStatuses, sbDeadSaid)
     readonly property var sbCard: Tidy.visibleRows(olderOpen ? sbSplit.rows.concat(sbSplit.older) : sbSplit.rows, sbHidden, sbShowHidden)
+    // What the folded header counts: the older ones too, opened or not.
+    readonly property var sbHeadRows: Tidy.visibleRows(sbSplit.rows.concat(sbSplit.older), sbHidden, sbShowHidden).rows
     property bool appSettingsAsked: false
     function loadAppSettings() {
         if (appSettingsAsked || !settingsKept)
@@ -12752,13 +12754,14 @@ Item {
                             // An older bridge's deposits on their way or arrived wait behind "Older bridges"; its others are left out.
                             readonly property var split: Tidy.arrivingSplit(full.rows)
                             readonly property var view: ({ rows: root.olderOpen ? split.rows.concat(split.older) : split.rows, hidden: full.hidden })
+                            readonly property var headRows: split.rows.concat(split.older)   // what the folded header counts
                             readonly property bool anyClaim: view.rows.some(function(x) { return x.progress.claim })
                             visible: view.rows.length > 0 || view.hidden > 0 || split.older.length > 0
                             // Folds to its header, which still says how many and any Claim ready.
                             PanelHead {
                                 title: "Arriving from Ethereum"
                                 folded: root.foldArriving
-                                note: Tidy.foldedNote(root.foldArriving, arrivingPanel.view.rows.length, Tidy.arrivingReady(arrivingPanel.view.rows), "ready to claim")
+                                note: Tidy.foldedNote(root.foldArriving, arrivingPanel.headRows.length, Tidy.arrivingReady(arrivingPanel.headRows), "ready to claim")
                                 onToggle: root.foldPanel("arriving")
                             }
                             Repeater {
@@ -12838,7 +12841,7 @@ Item {
                             PanelHead {
                                 title: "Bridging to Ethereum"
                                 folded: root.foldBridging
-                                note: Tidy.foldedNote(root.foldBridging, root.sbCard.rows.length, Tidy.bridgingReady(root.sbCard.rows, root.sbStatuses, root.sbDeadSaid), "ready to finish")
+                                note: Tidy.foldedNote(root.foldBridging, root.sbHeadRows.length, Tidy.bridgingReady(root.sbHeadRows, root.sbStatuses, root.sbDeadSaid), "ready to finish")
                                 onToggle: root.foldPanel("bridging")
                             }
                             Repeater {

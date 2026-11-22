@@ -1760,8 +1760,8 @@ _T_OLD_MOCK = {"bridgeNet": _T_OLD_NET, "bridge": {"config": _T_OLD_CONFIG, "sen
 for _name, _js, _mock in [
     # Only the current bridge (22 Nov): LEZ and v5's tokens; v3's 0.1 wETH (it can never go back) and the empty older ones left out, no line.
     ("tidy-tokens-folded", _t_card(_T_LIVE, 'root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), _T_MOCK),
-    # With Move (a names module that has bridge_token_send): v3's 0.1 wETH keeps it.
-    ("tidy-tokens-move", _t_card(_T_LIVE, _MV_FEAT + '; root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), dict(_T_MOCK, names_network="lez-0.4")),
+    # With Move (a names module that has bridge_token_send): a held v5 token (1.2 wETH here) keeps it; v3's 0.1 wETH is left out.
+    ("tidy-tokens-move", _t_card(_T_LIVE, _MV_FEAT + '; root.againAfter(200, function() { root.foldArriving = true; root.foldBridging = true })'), dict(_T_MOCK, names_network="lez-0.4", bridgeNet=_T_OLD_NET)),
     # The LEZ Bridge moved on to v7: v5's 1.2 wETH and both v5 withdrawals wait behind "Older bridges · N" (each can still go back).
     ("tidy-older", _t_card(_T_OLD_ST, _T_OLD_JS), _T_OLD_MOCK),
     # Show on one line opens all of them in place.
