@@ -5,6 +5,15 @@
 const ID = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
 /// A viewing public key in hex: 1184 bytes.
 export const VPK_HEX = 2368
+/// Longest on-chain media URI in bytes (`nft_wire::MAX_URI_LEN`).
+export const MAX_MEDIA_URI = 256
+/// Default loopback REST URL of the person's own Logos Storage node.
+export const DEFAULT_STORAGE_URL = "http://127.0.0.1:8080"
+
+/// Plain label for whether an NFT is held by a public or private account.
+export function privacyLabel(isPrivate) {
+  return isPrivate ? "Private" : "Public"
+}
 
 /// An ID shortened in the middle for a row; the full one is copied.
 export function idShown(id) {
@@ -60,7 +69,7 @@ export function accountGroups(programs) {
         group = { account: row.account, isPrivate: row.account_kind === "private", nfts: [] }
         groups.push(group)
       }
-      group.nfts.push({ program: program.program, programLabel: program.label || idShown(program.program), definition: row.definition, state: row.state, print_balance: row.print_balance, collection: row.collection, unreadable: row.unreadable })
+      group.nfts.push({ program: program.program, programLabel: program.label || idShown(program.program), definition: row.definition, state: row.state, print_balance: row.print_balance, collection: row.collection, unreadable: row.unreadable, isPrivate: row.account_kind === "private" })
     }
   }
   return groups
@@ -72,6 +81,45 @@ export function collectionCounts(programs) {
   for (const program of programs || [])
     for (const c of program.collections || [])
       out.push({ program: program.program, definition: c.definition, title: c.readable ? c.name : collectionTitle(null, c.definition), count: c.count, accounts: c.accounts })
+  return out
+}
+
+/// The collection grid cards: one card per held collection, with art metadata, count held,
+/// Public/Private breakdown, and the first holding account so a click opens its item page.
+export function collectionCards(programs) {
+  const out = []
+  for (const program of programs || []) {
+    const holdings = program.holdings || []
+    for (const c of program.collections || []) {
+      const held = holdings.filter((r) => r.holds && r.definition === c.definition)
+      const publicCount = held.filter((r) => r.account_kind !== "private").length
+      const privateCount = held.filter((r) => r.account_kind === "private").length
+      const withMeta = held.find((r) => r.collection) || null
+      const collection = withMeta ? withMeta.collection : null
+      const firstAccount = held.length > 0 ? held[0].account : (c.accounts && c.accounts[0]) || ""
+      const countText = c.count === 1 ? "1 held" : c.count + " held"
+      const scope = privateCount > 0 && publicCount > 0
+        ? publicCount + " Public, " + privateCount + " Private"
+        : privateCount > 0 ? "Private" : publicCount > 0 ? "Public" : ""
+      out.push({
+        program: program.program,
+        programLabel: program.label || idShown(program.program),
+        definition: c.definition,
+        key: program.program + ":" + c.definition,
+        title: c.readable ? c.name : collectionTitle(null, c.definition),
+        readable: !!c.readable,
+        count: c.count,
+        publicCount: publicCount,
+        privateCount: privateCount,
+        isPrivateOnly: privateCount > 0 && publicCount === 0,
+        countLabel: scope !== "" ? countText + " · " + scope : countText,
+        collection: collection,
+        uri: collection && collection.uri ? collection.uri : "",
+        firstAccount: firstAccount,
+        accounts: c.accounts || [],
+      })
+    }
+  }
   return out
 }
 
@@ -208,18 +256,125 @@ export function privateOnly(programs, program, definition) {
   return holders.length > 0 && holders.every((r) => r.account_kind === "private")
 }
 
-/// The words of the image consent for a collection, before anything is fetched. The host is
-/// named only when it is a plain host name: anything else isn't offered (its text could rewrite
-/// the sentence).
-export function imageConsent(uri, privateOnly) {
-  let host = ""
-  const m = /^https:\/\/([A-Za-z0-9.-]+)(?::\d+)?(?=[\/?#]|$)/.exec(String(uri || ""))
-  if (m) host = m[1]
-  if (host === "") return { allowed: false, text: "This collection's URI isn't an https address, so the wallet doesn't load it." }
-  return {
-    allowed: true,
-    text: "Loading the image asks " + host + " for it. That host learns your computer's address and that someone looks at this collection. It is shown only as a picture (PNG, at most 1 MiB), never as a page." + (privateOnly ? " Only private accounts hold this collection: loading it can link them to your address." : ""),
+/// UTF-8 byte length of a string (pure JS, no TextEncoder / BigInt, matching Rust `.len()`).
+function utf8ByteLen(text) {
+  let total = 0
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code <= 0x7f) total += 1
+    else if (code <= 0x7ff) total += 2
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const next = text.charCodeAt(i + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) { total += 4; i += 1 }
+      else total += 3
+    } else total += 3
   }
+  return total
+}
+
+/// Classifies a collection's media URI: missing, verified Logos Storage (`logos:<cid>#sha256=<64 hex>`),
+/// public `https://`, or unverified/unsupported.
+export function parseMediaUri(uri) {
+  const trimmed = String(uri || "").trim()
+  if (trimmed === "") return { kind: "none", state: "missing" }
+  if (utf8ByteLen(trimmed) > MAX_MEDIA_URI)
+    return { kind: "unsupported", state: "unverified", reason: "This media URI is longer than 256 bytes, so the wallet doesn't load it." }
+  if (/[\s\x00-\x1f\x7f]/.test(trimmed))
+    return { kind: "unsupported", state: "unverified", reason: "This media URI has spaces or control characters in it, so the wallet doesn't load it." }
+  if (trimmed.indexOf("logos:") === 0) {
+    const rest = trimmed.substr(6)
+    const hashAt = rest.indexOf("#")
+    if (hashAt < 0)
+      return { kind: "storage_unverified", state: "unverified", reason: "This Logos Storage URI has no SHA-256 hash (#sha256=<64 hex>), so it can't be verified and isn't loaded." }
+    const cid = rest.substr(0, hashAt)
+    const frag = rest.substr(hashAt + 1)
+    if (!/^[A-Za-z0-9]{8,256}$/.test(cid))
+      return { kind: "storage_unverified", state: "unverified", reason: "This Logos Storage URI has an invalid content ID, so it isn't loaded." }
+    const hm = /^sha256=([0-9a-fA-F]{64})$/.exec(frag)
+    if (!hm)
+      return { kind: "storage_unverified", state: "unverified", reason: "This Logos Storage URI doesn't carry a valid 64-character SHA-256 hash, so it can't be verified and isn't loaded." }
+    return { kind: "storage", state: "opt_in", cid: cid, sha256: hm[1].toLowerCase() }
+  }
+  const m = /^https:\/\/([A-Za-z0-9.-]+)(?::\d+)?(?=[\/?#]|$)/.exec(trimmed)
+  if (m) return { kind: "https", state: "opt_in", host: m[1] }
+  return { kind: "unsupported", state: "unverified", reason: "This collection's URI isn't a verified Logos Storage or https address, so the wallet doesn't load it." }
+}
+
+/// The words of the image consent for a collection, before anything is fetched. Both Logos Storage
+/// and https are opt-in per collection; a private-only collection always requires a second ask.
+export function imageConsent(uri, isPrivateOnly, storageNodeUrl) {
+  const parsed = parseMediaUri(uri)
+  if (parsed.kind === "storage") {
+    const node = String(storageNodeUrl || DEFAULT_STORAGE_URL).trim() || DEFAULT_STORAGE_URL
+    return {
+      allowed: true,
+      kind: "storage",
+      secondAsk: !!isPrivateOnly,
+      tickText: "Load images of this collection from my Logos Storage node.",
+      secondTickText: "I understand only private accounts hold this collection and still want to ask the Logos Storage network for its image.",
+      text: "Loading the image asks your Logos Storage node (" + node + ") for " + idShown(parsed.cid) + ". That tells the Logos Storage network what file is wanted. The wallet checks its SHA-256 hash before showing it, and shows it only as a PNG picture (at most 1 MiB)." + (isPrivateOnly ? " Only private accounts hold this collection: asking the network for its media can link them to you." : ""),
+    }
+  }
+  if (parsed.kind === "https") {
+    return {
+      allowed: true,
+      kind: "https",
+      secondAsk: !!isPrivateOnly,
+      tickText: "Load images of this collection.",
+      secondTickText: "I understand only private accounts hold this collection and still want to contact " + parsed.host + ".",
+      text: "Loading the image asks " + parsed.host + " for it. That host learns your computer's address and that someone looks at this collection. It is shown only as a picture (PNG, at most 1 MiB), never as a page." + (isPrivateOnly ? " Only private accounts hold this collection: loading it can link them to your address." : ""),
+    }
+  }
+  if (parsed.kind === "none")
+    return { allowed: false, kind: "none", secondAsk: false, unverified: false, text: "This collection has no media URI." }
+  return { allowed: false, kind: parsed.kind, secondAsk: false, unverified: true, text: parsed.reason }
+}
+
+/// Whether a fetch error means the fetched bytes failed hash verification.
+export function errorIsUnverified(message) {
+  return /sha-?256|unverified|hash/i.test(String(message || ""))
+}
+
+/// Visible media state for a collection: missing, unverified, not_loaded (opt-in), loading,
+/// failed, or ready. Every state is shown explicitly and never hidden.
+export function mediaState(collection, entry) {
+  if (!collection)
+    return { state: "missing", label: "Missing media", detail: "Collection metadata can't be read.", canLoad: false, canRetry: false, kind: "none", pixels: null }
+  const parsed = parseMediaUri(collection.uri)
+  if (parsed.kind === "none")
+    return { state: "missing", label: "Missing media", detail: "This collection lists no image.", canLoad: false, canRetry: false, kind: "none", pixels: null }
+  if (parsed.state === "unverified")
+    return { state: "unverified", label: "Unverified media", detail: parsed.reason, canLoad: false, canRetry: false, kind: parsed.kind, pixels: null }
+  if (entry && entry.state === "ready" && entry.pixels)
+    return { state: "ready", label: parsed.kind === "storage" ? "Verified (Logos Storage)" : "Loaded (https)", detail: "", canLoad: false, canRetry: false, kind: parsed.kind, pixels: entry.pixels }
+  if (entry && entry.state === "loading")
+    return { state: "loading", label: "Loading media…", detail: parsed.kind === "storage" ? "Fetching from your Logos Storage node and checking SHA-256…" : "Fetching from " + parsed.host + "…", canLoad: false, canRetry: false, kind: parsed.kind, pixels: null }
+  if (entry && entry.state === "unverified")
+    return { state: "unverified", label: "Unverified media", detail: entry.error || "The image didn't match its SHA-256 hash, so it isn't shown.", canLoad: false, canRetry: true, kind: parsed.kind, pixels: null }
+  if (entry && entry.state === "failed")
+    return { state: "failed", label: "Media failed to load", detail: entry.error || "The image couldn't be loaded.", canLoad: false, canRetry: true, kind: parsed.kind, pixels: null }
+  return {
+    state: "not_loaded",
+    label: parsed.kind === "storage" ? "Logos Storage · opt-in" : "Web image · opt-in",
+    detail: "Not loaded until you allow this collection.",
+    canLoad: true,
+    canRetry: false,
+    kind: parsed.kind,
+    pixels: null,
+  }
+}
+
+/// Validates a loopback-only Logos Storage node URL typed in Collectibles, or "".
+export function storageNodeProblem(text) {
+  const typed = String(text || "").trim()
+  if (typed === "") return ""
+  const m = /^http:\/\/(?:127\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|localhost|\[::1\])(?::(\d{1,5}))?\/?$/i.exec(typed)
+  if (!m) return "Enter an http:// address on this computer (127.0.0.1, localhost or [::1]), for example " + DEFAULT_STORAGE_URL + "."
+  if (m[1] !== undefined) {
+    const port = Number(m[1])
+    if (port < 1 || port > 65535) return "The port must be between 1 and 65535."
+  }
+  return ""
 }
 
 /// Burn's two steps: what the second asks.

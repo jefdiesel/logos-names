@@ -292,13 +292,21 @@ BRIDGE = r"""
             if (method === "membership_proof_sheet") return mock.nft && mock.nft.proofSheet ? ok(mock.nft.proofSheet) : JSON.stringify({ success: false, value: null, error: "there is no such proof request" })
             // An account's LNS name (the scenario's mock.reverse: bare ID -> name), else none.
             if (method === "reverse") { var rv = (mock.reverse || {})[String(args[0]).replace(/^(Public|Private)\//, "")]; return ok(rv ? { name: rv, display: rv + ".lez" } : null) }
-            if (/^nft_/.test(method)) {
+            if (/^nft_/.test(method) || method === "set_nft_storage_node") {
                 var nm = mock.nft || {}
                 if (method === "nft_collection") return ok((nm.info || {})[args[1]] || null)
                 if (method === "nft_programs") return ok(nm.programs || [])
                 if (method === "nft_holdings") return nm.readError ? JSON.stringify({ success: false, busy: true, value: null, error: "still reading your nfts; this updates in a moment" }) : ok({ programs: nm.read || [] })
                 if (method === "nft_sheet") return JSON.stringify({ success: true, value: nm.sheet, error: null, digest: "ab".repeat(32), warnings: nm.warnings || [], program_label: nm.label || null })
-                if (method === "nft_image") return ok(%(avatar)s)
+                if (method === "nft_storage_node") return ok({ url: nm.storageNode || "http://127.0.0.1:8080", "default": "http://127.0.0.1:8080" })
+                if (method === "set_nft_storage_node") return ok({ url: args[0] || "http://127.0.0.1:8080", "default": "http://127.0.0.1:8080" })
+                if (method === "nft_image") {
+                    var imgMock = (nm.images || {})[args[1]]
+                    if (imgMock === "busy") return JSON.stringify({ success: false, busy: true, value: null, error: "still reading the image; this updates in a moment" })
+                    if (imgMock && imgMock.error) return JSON.stringify({ success: false, value: null, error: imgMock.error })
+                    if (imgMock && imgMock.pixels) return ok(imgMock.pixels)
+                    return ok(%(avatar)s)
+                }
                 if (method === "nft_grants") return ok(nm.grants || [])
                 if (method === "nft_receiving_keys") return ok({ account: args[0], keys: "ab".repeat(32) + ":" + "cd".repeat(33), reveals: "Whoever has these keys can send NFTs and payments to this private account, and can work out its account ID. They can't spend from it or see what it holds. Everything sent to these keys can be told apart as going to the same account, and the keys can be passed on." })
                 return ok(null)
@@ -1596,6 +1604,81 @@ for key, mock, then in [
     MOCKS[key] = {"nft": mock, "reverse": {"CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk": "turing"}}
     SCENARIOS[key] = OPEN_NFT % ("Qt.callLater(function() { " + then + " })")
     HEIGHTS[key] = 2400
+
+# ── Phase 2 NFT viewing: Collection grid, Logos Storage media, Public/Private, media states ──
+_STOR_CID = "zDvZRwzm78buYYJGskHsMFmAQ9PbhZRRg8DgLUMhiGoUAqKewsiC"
+_STOR_HASH = "a1b2c3d4" * 8
+_STOR_URI = "logos:" + _STOR_CID + "#sha256=" + _STOR_HASH
+_COLL_STOR = "4nP7wK2xQ9vM1jR5sT8bY3cH6dF9gL2mN4pQ7rS1tU5v"
+_COLL_MISS = "5oQ8xL3yR1wN2kS6tU9cZ4dJ7eG1hM3nP5qR8sT2uV6w"
+_COLL_UNV = "6pR9yM4zS2xP3mT7uV1dA5eK8fH2jN4pQ6rS9tU3vW7x"
+_COLL_FAIL = "7qS1zN5aT3yQ4nU8vW2eB6fL9gJ3kP5qR7sT1uV4wX8y"
+_COLL_LOAD = "8rT2aP6bU4zR5pV9wX3fC7gM1hK4mQ6rS8tU2vW5xY9z"
+_PRIV_2 = "Private/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2"
+_PUB_2 = "Public/7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR"
+_PRIV_3 = "Private/HqRvXf9Lw3jQm5nYc2KpT8sDzV6bR4aE1uGhJ7kNoP2x"
+_PUB_3 = "Public/FaPur3GjBrXZoE5Yz6bNjLeqXJzEn6pzXEdE9MCJZsdg"
+_NFT_GRID_READ = [{
+    "program": NFT_P, "label": "Test chain NFTs", "registry": NFT_REG, "read_at": 1792000000,
+    "holdings": [
+        {"account": _PUB, "account_kind": "public", "state": "copy", "holds": True, "definition": _COLL_STOR, "owned": True,
+         "collection": {"definition": _COLL_STOR, "name": "Harbour at dawn", "printable_supply": "5", "standard": "Simple", "uri": _STOR_URI, "creators": "ada.lez"}},
+        {"account": _PRIV, "account_kind": "private", "state": "master", "holds": True, "definition": _COLL_STOR, "print_balance": "4",
+         "collection": {"definition": _COLL_STOR, "name": "Harbour at dawn", "printable_supply": "5", "standard": "Simple", "uri": _STOR_URI, "creators": "ada.lez"}},
+        {"account": _PRIV_2, "account_kind": "private", "state": "copy", "holds": True, "definition": _COLL_MISS, "owned": True,
+         "collection": {"definition": _COLL_MISS, "name": "Quiet note", "printable_supply": "1", "standard": "Simple", "uri": "", "creators": "grace.lez"}},
+        {"account": _PUB_2, "account_kind": "public", "state": "copy", "holds": True, "definition": _COLL_UNV, "owned": True,
+         "collection": {"definition": _COLL_UNV, "name": "Unsigned sketch", "printable_supply": "2", "standard": "Simple", "uri": "logos:" + _STOR_CID, "creators": "unknown"}},
+        {"account": _PRIV_3, "account_kind": "private", "state": "copy", "holds": True, "definition": _COLL_FAIL, "owned": True,
+         "collection": {"definition": _COLL_FAIL, "name": "Offline lantern", "printable_supply": "3", "standard": "Simple", "uri": _STOR_URI, "creators": "hopper.lez"}},
+        {"account": _PUB_3, "account_kind": "public", "state": "copy", "holds": True, "definition": _COLL_LOAD, "owned": True,
+         "collection": {"definition": _COLL_LOAD, "name": "Tide chart", "printable_supply": "10", "standard": "Simple", "uri": _STOR_URI, "creators": "turing.lez"}},
+    ],
+    "pending": [],
+    "collections": [
+        {"definition": _COLL_STOR, "name": "Harbour at dawn", "readable": True, "count": 2, "accounts": [_PUB, _PRIV]},
+        {"definition": _COLL_MISS, "name": "Quiet note", "readable": True, "count": 1, "accounts": [_PRIV_2]},
+        {"definition": _COLL_UNV, "name": "Unsigned sketch", "readable": True, "count": 1, "accounts": [_PUB_2]},
+        {"definition": _COLL_FAIL, "name": "Offline lantern", "readable": True, "count": 1, "accounts": [_PRIV_3]},
+        {"definition": _COLL_LOAD, "name": "Tide chart", "readable": True, "count": 1, "accounts": [_PUB_3]},
+    ],
+}]
+_NFT_GRID_MOCK = {
+    "programs": [dict(NFT_PROGRAMS[0], registry=NFT_REG)],
+    "read": _NFT_GRID_READ,
+    "storageNode": "http://127.0.0.1:8080",
+    "images": {
+        _COLL_FAIL: {"error": "couldn't reach Logos Storage at http://127.0.0.1:8080"},
+        _COLL_LOAD: "busy",
+    },
+}
+for _key, _mock, _then in [
+    ("collectibles-grid", _NFT_GRID_MOCK,
+     'root.nftLoadImage("%s", "%s", "%s"); root.nftLoadImage("%s", "%s", "%s"); root.nftLoadImage("%s", "%s", "%s")'
+     % (NFT_P, _COLL_STOR, _STOR_URI, NFT_P, _COLL_FAIL, _STOR_URI, NFT_P, _COLL_LOAD, _STOR_URI)),
+    ("collectibles-storage-consent", _NFT_GRID_MOCK,
+     'root.nftOpenConsent("%s|%s|%s", "%s")' % (NFT_P, _PRIV_3, _COLL_FAIL, _STOR_URI)),
+    ("nft-item-storage-consent", _NFT_GRID_MOCK,
+     'root.openNftItem({ program: "%s", account: "%s", definition: "%s" }); Qt.callLater(function() { root.nftOpenConsent("%s|%s|%s", "%s") })'
+     % (NFT_P, _PRIV_3, _COLL_FAIL, NFT_P, _PRIV_3, _COLL_FAIL, _STOR_URI)),
+    ("nft-item-private-storage", _NFT_GRID_MOCK,
+     'root.openNftItem({ program: "%s", account: "%s", definition: "%s" }); Qt.callLater(function() { root.nftLoadImage("%s", "%s", "%s") })'
+     % (NFT_P, _PRIV, _COLL_STOR, NFT_P, _COLL_STOR, _STOR_URI)),
+    ("nft-item-media-missing", _NFT_GRID_MOCK,
+     'root.openNftItem({ program: "%s", account: "%s", definition: "%s" })' % (NFT_P, _PRIV_2, _COLL_MISS)),
+    ("nft-item-media-unverified", dict(_NFT_GRID_MOCK, images={_COLL_STOR: {"error": "the image from Logos Storage didn't match its SHA-256 hash (unverified), so it isn't shown"}}),
+     'root.openNftItem({ program: "%s", account: "%s", definition: "%s" }); Qt.callLater(function() { root.nftLoadImage("%s", "%s", "%s") })'
+     % (NFT_P, _PUB, _COLL_STOR, NFT_P, _COLL_STOR, _STOR_URI)),
+    ("nft-item-media-failed", _NFT_GRID_MOCK,
+     'root.openNftItem({ program: "%s", account: "%s", definition: "%s" }); Qt.callLater(function() { root.nftLoadImage("%s", "%s", "%s") })'
+     % (NFT_P, _PRIV_3, _COLL_FAIL, NFT_P, _COLL_FAIL, _STOR_URI)),
+    ("nft-item-media-loading", _NFT_GRID_MOCK,
+     'root.openNftItem({ program: "%s", account: "%s", definition: "%s" }); Qt.callLater(function() { root.nftLoadImage("%s", "%s", "%s") })'
+     % (NFT_P, _PUB_3, _COLL_LOAD, NFT_P, _COLL_LOAD, _STOR_URI)),
+]:
+    MOCKS[_key] = {"nft": _mock, "reverse": {"CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk": "turing"}}
+    SCENARIOS[_key] = OPEN_NFT % ("Qt.callLater(function() { " + _then + " })")
+    HEIGHTS[_key] = 2600 if _key.startswith("collectibles-") else 2400
 # Settings, Connected apps, with NFT capabilities (one row each, with Remove).
 MOCKS["settings-nft-grants"] = MOCKS["collectibles-passes"]
 SCENARIOS["settings-nft-grants"] = 'root.setWalletNet("0.4"); Qt.callLater(function() { root.namesNet = "0.4"; root.section = "settings"; root.loadAppGrants() })'

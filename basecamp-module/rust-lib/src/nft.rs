@@ -39,6 +39,13 @@ const MAX_ROWS: usize = 256;
 pub const MAX_IMAGE_BYTES: usize = 1024 * 1024;
 /// Collections whose image the person allowed.
 const MAX_MEDIA: usize = 256;
+/// Default loopback REST endpoint of the person's own Logos Storage node.
+pub const DEFAULT_STORAGE_URL: &str = "http://127.0.0.1:8080";
+/// Short attempts when reading from Logos Storage: a first request often returns nothing.
+pub const STORAGE_ATTEMPTS: usize = 3;
+const STORAGE_CONNECT_LIMIT: Duration = Duration::from_secs(2);
+const STORAGE_ATTEMPT_LIMIT: Duration = Duration::from_secs(4);
+const STORAGE_RETRY_DELAY: Duration = Duration::from_millis(350);
 
 pub const KEY: &str = "nft";
 
@@ -123,6 +130,24 @@ pub fn set_media(path: &Path, program: &str, definition: &str, allow: bool) -> R
     }
     save(path, &all)?;
     Ok(allow)
+}
+
+/// The person's configured Logos Storage node URL, re-checked against the loopback-only rule on
+/// every read so a hand-edited file can never point off this computer.
+pub fn storage_url_in(path: &Path) -> String {
+    load(path)["storage_url"]
+        .as_str()
+        .and_then(|raw| storage_url(raw).ok())
+        .unwrap_or_else(|| DEFAULT_STORAGE_URL.to_owned())
+}
+
+/// Keeps the person's Logos Storage node URL (loopback http:// only; empty resets to default).
+pub fn set_storage_url(path: &Path, url: &str) -> Result<String, String> {
+    let clean = storage_url(url)?;
+    let mut all = load(path);
+    all["storage_url"] = json!(clean);
+    save(path, &all)?;
+    Ok(clean)
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────
@@ -637,6 +662,254 @@ pub fn fetch_image(uri: &str) -> Result<Value, String> {
     fetch_image_with(uri, |netloc: &str| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()))
 }
 
+// ── Logos Storage media: logos:<cid>#sha256=<64 hex> ────────────────────
+//
+// Fetched only from the person's own Logos Storage node on loopback, streamed with the same
+// `MAX_IMAGE_BYTES` ceiling, refused unless the SHA-256 of the fetched bytes matches the URI's
+// hash, and decoded through the same PNG pixel decoder as the https path.
+
+/// The supported places a collection's media `uri` may point to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaSource {
+    /// A content ID on the person's own Logos Storage node, pinned to its SHA-256 digest.
+    Storage { cid: String, sha256: String },
+    /// A public `https://` address checked by `media_url`.
+    Https(String),
+}
+
+/// Whether `text` is a plausible Logos Storage content ID: 8 to 256 ASCII letters and digits.
+fn is_cid_text(text: &str) -> bool {
+    (8..=256).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Parses a collection's `uri` into a `MediaSource`, or explains why it isn't loaded.
+///
+/// Accepts `logos:<cid>#sha256=<64 hex>` (at most `nft_wire::MAX_URI_LEN` = 256 bytes) or a
+/// public `https://` address. A `logos:` URI without a valid 64-hex `#sha256=` is refused as
+/// unverified.
+pub fn parse_media_uri(uri: &str) -> Result<MediaSource, String> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err("this collection has no media URI".to_owned());
+    }
+    if trimmed.len() > nft_wire::MAX_URI_LEN {
+        return Err(format!("that media URI is longer than {} bytes, so it isn't loaded", nft_wire::MAX_URI_LEN));
+    }
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("that address has spaces or control characters in it".to_owned());
+    }
+    if let Some(rest) = trimmed.strip_prefix("logos:") {
+        let Some((cid, frag)) = rest.split_once('#') else {
+            return Err("this Logos Storage URI is unverified: it has no #sha256=<64 hex> hash, so it isn't loaded".to_owned());
+        };
+        if !is_cid_text(cid) {
+            return Err("this Logos Storage URI has an invalid content ID, so it isn't loaded".to_owned());
+        }
+        let Some(hash) = frag.strip_prefix("sha256=") else {
+            return Err("this Logos Storage URI is unverified: it needs #sha256=<64 hex>, so it isn't loaded".to_owned());
+        };
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("this Logos Storage URI is unverified: its SHA-256 hash isn't 64 hex characters, so it isn't loaded".to_owned());
+        }
+        return Ok(MediaSource::Storage {
+            cid: cid.to_owned(),
+            sha256: hash.to_ascii_lowercase(),
+        });
+    }
+    Ok(MediaSource::Https(media_url(trimmed)?))
+}
+
+/// Validates and normalizes a Logos Storage node's base URL: loopback `http://` only
+/// (`127.0.0.1`, `localhost`, or `[::1]`, optional port `1..=65535`, no path/query/userinfo).
+/// An empty string resolves to `DEFAULT_STORAGE_URL`.
+pub fn storage_url(url: &str) -> Result<String, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_STORAGE_URL.to_owned());
+    }
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("the Logos Storage address has spaces or control characters in it".to_owned());
+    }
+    let Some(rest) = trimmed
+        .get(..7)
+        .filter(|head| head.eq_ignore_ascii_case("http://"))
+        .map(|_| &trimmed[7..])
+    else {
+        return Err("Logos Storage must use http:// on this computer (for example http://127.0.0.1:8080)".to_owned());
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() || rest.contains(['/', '?', '#', '@']) {
+        return Err("Logos Storage must be a plain loopback address with no path or user part (for example http://127.0.0.1:8080)".to_owned());
+    }
+    let parse_port = |port_text: &str| -> Result<u16, String> {
+        if port_text.is_empty() || !port_text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("the Logos Storage port must be a number between 1 and 65535".to_owned());
+        }
+        port_text
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| "the Logos Storage port must be a number between 1 and 65535".to_owned())
+    };
+    if let Some(after_open) = rest.strip_prefix('[') {
+        let Some((host, tail)) = after_open.split_once(']') else {
+            return Err("Logos Storage must run on this computer (127.0.0.1, localhost or [::1])".to_owned());
+        };
+        let Ok(v6) = host.parse::<std::net::Ipv6Addr>() else {
+            return Err("Logos Storage must run on this computer (127.0.0.1, localhost or [::1])".to_owned());
+        };
+        if !v6.is_loopback() {
+            return Err("Logos Storage must run on this computer (127.0.0.1, localhost or [::1])".to_owned());
+        }
+        if tail.is_empty() {
+            return Ok(format!("http://[{v6}]"));
+        }
+        let Some(port_text) = tail.strip_prefix(':') else {
+            return Err("Logos Storage must be a plain loopback address (for example http://[::1]:8080)".to_owned());
+        };
+        let port = parse_port(port_text)?;
+        return Ok(format!("http://[{v6}]:{port}"));
+    }
+    let (host_raw, port) = match rest.split_once(':') {
+        Some((h, p)) => {
+            if p.contains(':') {
+                return Err("write an IPv6 loopback address in brackets, for example http://[::1]:8080".to_owned());
+            }
+            (h, Some(parse_port(p)?))
+        }
+        None => (rest, None),
+    };
+    let host_lower = host_raw.to_ascii_lowercase();
+    let host_ok = host_lower == "localhost"
+        || host_lower.parse::<std::net::Ipv4Addr>().is_ok_and(|v4| v4.is_loopback());
+    if !host_ok {
+        return Err("Logos Storage must run on this computer (127.0.0.1, localhost or [::1])".to_owned());
+    }
+    Ok(match port {
+        Some(port) => format!("http://{host_lower}:{port}"),
+        None => format!("http://{host_lower}"),
+    })
+}
+
+/// The addresses a Logos Storage node may be reached at: loopback only, or none at all.
+pub fn loopback_addresses(netloc: &str, resolve: &dyn Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    let found = resolve(netloc)?;
+    if found.is_empty() {
+        return Err(std::io::Error::other("Logos Storage's host has no address"));
+    }
+    if let Some(remote) = found.iter().find(|addr| !addr.ip().is_loopback()) {
+        return Err(std::io::Error::other(format!("Logos Storage's host points at {}, which is not on this computer", remote.ip())));
+    }
+    Ok(found)
+}
+
+/// Decodes raw PNG bytes without checking an HTTP `Content-Type` header (Logos Storage serves
+/// `application/octet-stream`). Checks the PNG signature and the avatar decoder's limits.
+pub fn png_bytes_payload(bytes: &[u8]) -> Result<Value, String> {
+    if !bytes.starts_with(&PNG_SIGNATURE) {
+        return Err("the file from Logos Storage isn't a PNG image, so it isn't shown".to_owned());
+    }
+    crate::avatar::png_pixels(bytes).ok_or_else(|| "it isn't a PNG image this wallet can show (at most 1024 pixels a side)".to_owned())
+}
+
+/// Verifies `bytes` against the expected 64-hex SHA-256 digest and decodes it as PNG pixels.
+pub fn verified_storage_png(bytes: &[u8], expected_sha256: &str) -> Result<Value, String> {
+    let actual = registry::hex(&Sha256::digest(bytes));
+    if actual != expected_sha256.to_ascii_lowercase() {
+        return Err("the image from Logos Storage didn't match its SHA-256 hash (unverified), so it isn't shown".to_owned());
+    }
+    png_bytes_payload(bytes)
+}
+
+/// Fetches `cid` from the person's Logos Storage node (`base_url`, loopback-only) with short
+/// attempts and retries, streams at most `MAX_IMAGE_BYTES`, checks SHA-256 against
+/// `expected_sha256`, and decodes PNG pixels.
+pub fn fetch_storage_with(
+    base_url: &str,
+    cid: &str,
+    expected_sha256: &str,
+    attempts: usize,
+    attempt_limit: Duration,
+    retry_delay: Duration,
+    resolve: impl Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static,
+) -> Result<Value, String> {
+    let base = storage_url(base_url)?;
+    if !is_cid_text(cid) {
+        return Err("this Logos Storage URI has an invalid content ID, so it isn't loaded".to_owned());
+    }
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("this Logos Storage URI is unverified: its SHA-256 hash isn't 64 hex characters, so it isn't loaded".to_owned());
+    }
+    let resolve = std::sync::Arc::new(resolve);
+    let checked = std::sync::Arc::clone(&resolve);
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(STORAGE_CONNECT_LIMIT.min(attempt_limit))
+        .timeout(attempt_limit)
+        .user_agent("names-wallet")
+        .resolver(move |netloc: &str| loopback_addresses(netloc, &*checked))
+        .build();
+    let url = format!("{base}/api/storage/v1/data/{cid}/network/stream");
+    let tries = attempts.max(1);
+    let mut last_err = format!("couldn't reach Logos Storage at {base}");
+    for attempt in 1..=tries {
+        match agent.get(&url).call() {
+            Ok(response) => {
+                if (300..400).contains(&response.status()) {
+                    return Err("Logos Storage redirected the request, which isn't allowed".to_owned());
+                }
+                if response.header("Content-Length").and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n > MAX_IMAGE_BYTES as u64) {
+                    return Err(format!("the image is larger than {} KiB, so it isn't loaded", MAX_IMAGE_BYTES / 1024));
+                }
+                let mut bytes = Vec::new();
+                if std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_IMAGE_BYTES as u64 + 1), &mut bytes).is_err() {
+                    last_err = "Logos Storage didn't finish sending the image in time".to_owned();
+                } else if bytes.len() > MAX_IMAGE_BYTES {
+                    return Err(format!("the image is larger than {} KiB, so it isn't loaded", MAX_IMAGE_BYTES / 1024));
+                } else if bytes.is_empty() {
+                    // A first request to Logos Storage often returns nothing; retry.
+                    last_err = "Logos Storage returned nothing for this image".to_owned();
+                } else {
+                    return verified_storage_png(&bytes, expected_sha256);
+                }
+            }
+            Err(ureq::Error::Status(code, _)) => {
+                if code == 404 {
+                    last_err = "Logos Storage couldn't find this image (HTTP 404)".to_owned();
+                } else if code == 408 || code == 429 || (500..600).contains(&code) {
+                    last_err = format!("Logos Storage answered HTTP {code}");
+                } else {
+                    return Err(format!("Logos Storage answered HTTP {code}"));
+                }
+            }
+            Err(ureq::Error::Transport(transport)) => {
+                let why = transport.to_string();
+                if why.contains("not on this computer") || why.contains("has no address") {
+                    return Err("Logos Storage's host isn't on this computer, so it isn't loaded".to_owned());
+                }
+                last_err = format!("couldn't reach Logos Storage at {base}");
+            }
+        }
+        if attempt < tries && !retry_delay.is_zero() {
+            std::thread::sleep(retry_delay);
+        }
+    }
+    Err(last_err)
+}
+
+/// Fetches `cid` from the person's Logos Storage node with the default retry and timeout policy.
+pub fn fetch_storage(base_url: &str, cid: &str, expected_sha256: &str) -> Result<Value, String> {
+    fetch_storage_with(
+        base_url,
+        cid,
+        expected_sha256,
+        STORAGE_ATTEMPTS,
+        STORAGE_ATTEMPT_LIMIT,
+        STORAGE_RETRY_DELAY,
+        |netloc: &str| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+    )
+}
+
 // ── Sheets shown, by wallet and digest ──────────────────────────────────
 
 /// The sheets this module planned, by `(wallet folder, digest)`, with when: an action starts only
@@ -934,6 +1207,20 @@ impl Names {
         Ok(json!({ "allowed": allowed }))
     }
 
+    /// The configured loopback URL of this computer's Logos Storage node.
+    pub(crate) fn nft_storage_node_get(&self) -> Result<Value, String> {
+        let path = list_path().ok_or("no home folder")?;
+        Ok(json!({ "url": storage_url_in(&path), "default": DEFAULT_STORAGE_URL }))
+    }
+
+    /// Saves a loopback URL for this computer's Logos Storage node (empty resets to default).
+    pub(crate) fn nft_storage_node_set(&mut self, url: &str) -> Result<Value, String> {
+        let path = list_path().ok_or("no home folder")?;
+        let clean = set_storage_url(&path, url)?;
+        self.served.forget(&self.served_key(KEY, "image|"));
+        Ok(json!({ "url": clean, "default": DEFAULT_STORAGE_URL }))
+    }
+
     /// A collection's image, only when the person allowed it: fetched on a thread of its own.
     pub(crate) fn nft_image_now(&mut self, program: &str, definition: &str, uri: &str) -> String {
         let outcome = (|| {
@@ -943,9 +1230,25 @@ impl Names {
             if !media_allowed(&path, &program, &definition) {
                 return Ok(None);
             }
-            let url = media_url(uri)?;
-            let key = self.served_key(KEY, &format!("image|{program}|{definition}|{url}"));
-            Ok(Some(self.served.read(&key, Duration::from_secs(3600), served::Lane::Own("nft-media".to_owned()), move || fetch_image(&url))))
+            let (key, fetch): (String, Box<dyn FnOnce() -> Result<Value, String> + Send + 'static>) = match parse_media_uri(uri)? {
+                MediaSource::Https(url) => (
+                    self.served_key(KEY, &format!("image|{program}|{definition}|https|{url}|")),
+                    Box::new(move || fetch_image(&url)),
+                ),
+                MediaSource::Storage { cid, sha256 } => {
+                    let base = storage_url_in(&path);
+                    (
+                        self.served_key(KEY, &format!("image|{program}|{definition}|storage|{base}|{cid}|{sha256}|")),
+                        Box::new(move || fetch_storage(&base, &cid, &sha256)),
+                    )
+                }
+            };
+            let snap = self.served.read(&key, Duration::from_secs(3600), served::Lane::Own("nft-media".to_owned()), fetch);
+            // A failed fetch is forgotten after answering so "Try again" starts a fresh attempt.
+            if snap.value.is_none() && snap.error.is_some() && !snap.updating {
+                self.served.forget_key(&key);
+            }
+            Ok(Some(snap))
         })();
         match outcome {
             Ok(None) => crate::reply(Ok(json!({ "allowed": false }))),
@@ -1237,5 +1540,273 @@ mod tests {
         ] {
             assert!(media_url(bad).is_err(), "{bad}");
         }
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&[255; 16]).unwrap();
+        bytes
+    }
+
+    fn spawn_storage_server(responses: Vec<(String, Vec<u8>)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for (head, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let first_line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or_default().to_owned();
+                paths.push(first_line);
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+            paths
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[test]
+    fn logos_media_uri_parsing_enforces_cid_sha256_and_length() {
+        let cid = "zDvZRwzm78buYYJGskHsMFmAQ9PbhZRRg8DgLUMhiGoUAqKewsiC";
+        let hash = "a1b2c3d4".repeat(8);
+        let upper = hash.to_ascii_uppercase();
+        assert_eq!(
+            parse_media_uri(&format!("logos:{cid}#sha256={upper}")).unwrap(),
+            MediaSource::Storage { cid: cid.to_owned(), sha256: hash.clone() }
+        );
+        // Boundary: exactly MAX_URI_LEN (256) bytes passes; 257 is refused.
+        let max_cid_len = nft_wire::MAX_URI_LEN - "logos:".len() - "#sha256=".len() - 64;
+        let max_uri = format!("logos:{}#sha256={hash}", "z".repeat(max_cid_len));
+        assert_eq!(max_uri.len(), nft_wire::MAX_URI_LEN);
+        assert!(parse_media_uri(&max_uri).is_ok());
+        let too_long = format!("logos:{}#sha256={hash}", "z".repeat(max_cid_len + 1));
+        assert!(parse_media_uri(&too_long).unwrap_err().contains("256"));
+        // Missing or malformed SHA-256 is refused as unverified.
+        assert!(parse_media_uri(&format!("logos:{cid}")).unwrap_err().contains("unverified"));
+        assert!(parse_media_uri(&format!("logos:{cid}#sha256=")).unwrap_err().contains("unverified"));
+        assert!(parse_media_uri(&format!("logos:{cid}#sha256={}", "a".repeat(63))).unwrap_err().contains("unverified"));
+        assert!(parse_media_uri(&format!("logos:{cid}#sha256={}", "g".repeat(64))).unwrap_err().contains("unverified"));
+        assert!(parse_media_uri(&format!("logos:{cid}#md5={hash}")).unwrap_err().contains("unverified"));
+        // Bad CIDs.
+        assert!(parse_media_uri(&format!("logos:short#sha256={hash}")).is_err());
+        assert!(parse_media_uri(&format!("logos:bad/path1234#sha256={hash}")).is_err());
+        assert!(parse_media_uri(&format!("logos:{cid} #sha256={hash}")).is_err());
+        assert!(parse_media_uri("").is_err());
+        // Public https still parses through parse_media_uri, and also obeys MAX_URI_LEN.
+        assert_eq!(
+            parse_media_uri("https://img.example.com/a.png").unwrap(),
+            MediaSource::Https("https://img.example.com/a.png".to_owned())
+        );
+        let too_long_https = format!("https://img.example.com/{}.png", "a".repeat(nft_wire::MAX_URI_LEN));
+        assert!(parse_media_uri(&too_long_https).unwrap_err().contains("256"));
+    }
+
+    #[test]
+    fn storage_url_allows_only_loopback_http_nodes() {
+        assert_eq!(storage_url("").unwrap(), DEFAULT_STORAGE_URL);
+        assert_eq!(storage_url("  ").unwrap(), DEFAULT_STORAGE_URL);
+        assert_eq!(storage_url("http://127.0.0.1:8080/").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(storage_url("HTTP://127.0.0.1:8080").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(storage_url("http://LOCALHOST:9090").unwrap(), "http://localhost:9090");
+        assert_eq!(storage_url("http://[::1]:8080/").unwrap(), "http://[::1]:8080");
+        assert_eq!(storage_url("http://127.0.0.1").unwrap(), "http://127.0.0.1");
+        for bad in [
+            "https://127.0.0.1:8080",
+            "https://example.com:8080",
+            "http://example.com:8080",
+            "http://192.168.1.10:8080",
+            "http://10.0.0.1:8080",
+            "http://0.0.0.0:8080",
+            "http://127.00.0.1:8080",
+            "http://evil.localhost:8080",
+            "http://[::ffff:127.0.0.1]:8080",
+            "http://[fd00::1]:8080",
+            "http://user@127.0.0.1:8080",
+            "http://127.0.0.1:8080/api",
+            "http://127.0.0.1:8080?x=1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:70000",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:8080 extra",
+            "😀😀",
+        ] {
+            assert!(storage_url(bad).is_err(), "{bad}");
+        }
+        // Persistence in nft-programs.json, and fallback if hand-edited to a remote host.
+        let path = temp("storage-url");
+        assert_eq!(storage_url_in(&path), DEFAULT_STORAGE_URL);
+        assert_eq!(set_storage_url(&path, "http://127.0.0.1:9091/").unwrap(), "http://127.0.0.1:9091");
+        assert_eq!(storage_url_in(&path), "http://127.0.0.1:9091");
+        assert!(set_storage_url(&path, "http://192.168.1.5:8080").is_err());
+        assert_eq!(storage_url_in(&path), "http://127.0.0.1:9091");
+        save(&path, &json!({ "storage_url": "http://10.0.0.5:8080" })).unwrap();
+        assert_eq!(storage_url_in(&path), DEFAULT_STORAGE_URL, "tampered non-loopback URL is never used");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn storage_fetch_retries_verifies_sha256_and_decodes_png() {
+        let png = tiny_png();
+        let sha256 = registry::hex(&Sha256::digest(&png));
+        let cid = "zDvZRwzm78buYYJGskHsMFmAQ9PbhZRRg8DgLUMhiGoUAqKewsiC";
+        // Attempt 1: 200 with empty body ("often returns nothing").
+        // Attempt 2: 404 (not yet found on the network).
+        // Attempt 3: 200 with application/octet-stream and the real PNG bytes.
+        let ok_head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            png.len()
+        );
+        let (base, handle) = spawn_storage_server(vec![
+            ("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(), Vec::new()),
+            ("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(), Vec::new()),
+            (ok_head, png),
+        ]);
+        let pixels = fetch_storage_with(
+            &base,
+            cid,
+            &sha256,
+            3,
+            Duration::from_secs(2),
+            Duration::from_millis(10),
+            |netloc| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+        )
+        .unwrap();
+        assert_eq!((pixels["width"].as_u64(), pixels["height"].as_u64()), (Some(2), Some(2)));
+        let paths = handle.join().unwrap();
+        assert_eq!(paths.len(), 3, "retried empty body and 404 before succeeding");
+        assert!(paths.iter().all(|line| line.starts_with(&format!("GET /api/storage/v1/data/{cid}/network/stream "))), "{paths:?}");
+    }
+
+    #[test]
+    fn storage_fetch_refuses_hash_mismatch_non_png_oversize_and_remote_dns() {
+        use std::net::{IpAddr, SocketAddr};
+        let cid = "zDvZRwzm78buYYJGskHsMFmAQ9PbhZRRg8DgLUMhiGoUAqKewsiC";
+        let png = tiny_png();
+        let wrong_hash = "00".repeat(32);
+
+        // 1. SHA-256 mismatch is refused immediately (no retry).
+        let ok_head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", png.len());
+        let (base, handle) = spawn_storage_server(vec![(ok_head, png.clone())]);
+        let err = fetch_storage_with(
+            &base,
+            cid,
+            &wrong_hash,
+            3,
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+            |netloc| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+        )
+        .unwrap_err();
+        assert!(err.contains("SHA-256") && err.contains("unverified"), "{err}");
+        assert_eq!(handle.join().unwrap().len(), 1, "hash mismatch must not retry");
+
+        // 2. Non-PNG (SVG) with matching SHA-256 is still refused.
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>"#.to_vec();
+        let svg_hash = registry::hex(&Sha256::digest(&svg));
+        let svg_head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", svg.len());
+        let (base, handle) = spawn_storage_server(vec![(svg_head, svg)]);
+        let err = fetch_storage_with(
+            &base,
+            cid,
+            &svg_hash,
+            3,
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+            |netloc| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+        )
+        .unwrap_err();
+        assert!(err.contains("PNG"), "{err}");
+        assert_eq!(handle.join().unwrap().len(), 1);
+
+        // 3. Oversized body (> MAX_IMAGE_BYTES) is refused before hash/decode.
+        let big_head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", MAX_IMAGE_BYTES + 1);
+        let (base, handle) = spawn_storage_server(vec![(big_head, Vec::new())]);
+        let err = fetch_storage_with(
+            &base,
+            cid,
+            &wrong_hash,
+            3,
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+            |netloc| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+        )
+        .unwrap_err();
+        assert!(err.contains("larger than"), "{err}");
+        assert_eq!(handle.join().unwrap().len(), 1);
+
+        // 4. Exhausted retries on empty replies fails cleanly.
+        let (base, handle) = spawn_storage_server(vec![
+            ("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(), Vec::new()),
+            ("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(), Vec::new()),
+        ]);
+        let err = fetch_storage_with(
+            &base,
+            cid,
+            &wrong_hash,
+            2,
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+            |netloc| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+        )
+        .unwrap_err();
+        assert!(err.contains("returned nothing"), "{err}");
+        assert_eq!(handle.join().unwrap().len(), 2);
+
+        // 5. Even `localhost` is refused if DNS/hosts resolves it off-machine.
+        let err = fetch_storage_with(
+            "http://localhost:8080",
+            cid,
+            &wrong_hash,
+            3,
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+            |_| Ok(vec![SocketAddr::new("93.184.216.34".parse::<IpAddr>().unwrap(), 8080)]),
+        )
+        .unwrap_err();
+        assert!(err.contains("not on this computer") || err.contains("isn't on this computer"), "{err}");
+
+        // 6. Streamed oversized body without Content-Length is refused by the streaming ceiling.
+        let (base, handle) = spawn_storage_server(vec![(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n".to_owned(),
+            vec![0x42u8; MAX_IMAGE_BYTES + 64],
+        )]);
+        let err = fetch_storage_with(
+            &base,
+            cid,
+            &wrong_hash,
+            3,
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+            |netloc| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+        )
+        .unwrap_err();
+        assert!(err.contains("larger than"), "{err}");
+        assert_eq!(handle.join().unwrap().len(), 1);
+
+        // 7. Redirects from the Logos Storage node are refused immediately.
+        let (base, handle) = spawn_storage_server(vec![(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9999/other\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+            Vec::new(),
+        )]);
+        let err = fetch_storage_with(
+            &base,
+            cid,
+            &wrong_hash,
+            3,
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+            |netloc| std::net::ToSocketAddrs::to_socket_addrs(netloc).map(|found| found.collect()),
+        )
+        .unwrap_err();
+        assert!(err.contains("redirected"), "{err}");
+        assert_eq!(handle.join().unwrap().len(), 1);
     }
 }

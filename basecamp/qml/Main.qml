@@ -7730,9 +7730,17 @@ Item {
     property string nftProgramKind: ""
     property bool nftAdding: false
     property var nftImages: ({})          // "<program>:<definition>" -> pixels
+    property var nftImageStates: ({})     // "<program>:<definition>" -> {state, pixels, error}
     property string nftConsentFor: ""     // "<program>|<account>|<definition>": the card whose image consent is open
     property string nftConsentUri: ""
     property bool nftConsentTicked: false
+    property bool nftConsentSecondTicked: false
+    property bool nftMediaAllowing: false
+    property string nftStorageNode: Nft.DEFAULT_STORAGE_URL
+    property bool nftStorageLoaded: false
+    property bool nftStorageSaving: false
+    property string nftStorageStatus: ""
+    property string nftStorageKind: ""
     property var nftSheet: null           // {title, program, action, actionJson, request, from, row, reply, digest, asking}
     property var nftSheetTicks: ({})      // {payer, warnings, burn}
     property string nftSheetStatus: ""
@@ -7749,6 +7757,7 @@ Item {
     readonly property bool nftOnView: section === "collectibles" && namesNet === "0.4" && Qt.application.state === Qt.ApplicationActive
     readonly property var nftGroups: Nft.accountGroups(nftRead ? nftRead.programs : [])
     readonly property var nftCollections: Nft.collectionCounts(nftRead ? nftRead.programs : [])
+    readonly property var nftCollectionCards: Nft.collectionCards(nftRead ? nftRead.programs : [])
 
     // The item page: one NFT, opened from its card (or an LNS name card). Held as what names it,
     // {program, account, definition} or {deed: name}, and read again from every holdings read,
@@ -7771,6 +7780,8 @@ Item {
         nftNameCheck = null
         nftOwnerTries = 0
         nftConsentFor = ""
+        nftConsentTicked = false
+        nftConsentSecondTicked = false
         nftResult = ""
         nftItemTo.text = ""
         nftItemFlick.contentY = 0
@@ -7980,6 +7991,15 @@ Item {
             // Busy until the module's first read is back: say it plainly, keep what is shown.
             nftReadNote = waitAgain(message) ? "Reading your NFTs… this updates in a moment." : sentence(readFailed(message))
         }, 60000)
+        askLater("nft_storage_node", [], function(value) {
+            if (value && value.url) {
+                var prev = nftStorageNode
+                nftStorageNode = value.url
+                if (!nftStorageLoaded || (!nftStorageField.activeFocus && nftStorageField.text === prev))
+                    nftStorageField.text = value.url
+                nftStorageLoaded = true
+            }
+        }, function() {})
         loadNftRequests()
     }
 
@@ -8217,29 +8237,108 @@ Item {
         }, function() { job.asking = false })
     }
 
-    function nftAllowImage(program, definition, uri) {
-        nftResult = "Checking…"
-        nftResultKind = "working"
-        askLater("nft_media", [program, definition, true], function() {
-            nftConsentFor = ""
-            nftResult = ""
-            nftLoadImage(program, definition, uri)
-        }, function(message) { nftResult = sentence(message); nftResultKind = "problem" })
+    function nftImageStateFor(program, definition) {
+        var key = program + ":" + definition
+        if (nftImageStates[key])
+            return nftImageStates[key]
+        if (nftImages[key])
+            return { state: "ready", pixels: nftImages[key], error: "" }
+        return null
     }
 
-    function nftLoadImage(program, definition, uri) {
-        askLater("nft_image", [program, definition, uri], function(value) {
-            if (value && value.allowed === false)
-                return
+    function nftSetImageState(key, stateObj) {
+        var states = Object.assign({}, nftImageStates)
+        states[key] = stateObj
+        nftImageStates = states
+        if (stateObj && stateObj.state === "ready" && stateObj.pixels) {
             var images = Object.assign({}, nftImages)
-            images[program + ":" + definition] = value
+            images[key] = stateObj.pixels
             nftImages = images
+        }
+    }
+
+    function nftOpenConsent(consentKey, uri) {
+        nftConsentFor = consentKey
+        nftConsentUri = uri || ""
+        nftConsentTicked = false
+        nftConsentSecondTicked = false
+    }
+
+    function nftAllowImage(program, definition, uri) {
+        if (nftMediaAllowing)
+            return
+        nftMediaAllowing = true
+        nftResult = "Allowing media…"
+        nftResultKind = "working"
+        askLater("nft_media", [program, definition, true], function() {
+            nftMediaAllowing = false
+            nftConsentFor = ""
+            nftConsentTicked = false
+            nftConsentSecondTicked = false
+            nftResult = ""
+            nftLoadImage(program, definition, uri, 0)
         }, function(message) {
-            if (waitAgain(message))
-                return
-            nftResult = "The image wasn't loaded: " + sentence(message)
+            nftMediaAllowing = false
+            nftResult = sentence(message)
             nftResultKind = "problem"
+        })
+    }
+
+    function nftLoadImage(program, definition, uri, tries) {
+        var key = program + ":" + definition
+        var attempt = tries || 0
+        if (attempt === 0)
+            nftSetImageState(key, { state: "loading", pixels: null, error: "" })
+        askLater("nft_image", [program, definition, uri], function(value) {
+            if (value && value.allowed === false) {
+                var cleared = Object.assign({}, nftImageStates)
+                delete cleared[key]
+                nftImageStates = cleared
+                if (nftImages[key]) {
+                    var imgs = Object.assign({}, nftImages)
+                    delete imgs[key]
+                    nftImages = imgs
+                }
+                return
+            }
+            nftSetImageState(key, { state: "ready", pixels: value, error: "" })
+        }, function(message) {
+            if (waitAgain(message) && attempt < 20) {
+                againAfter(1200, function() { root.nftLoadImage(program, definition, uri, attempt + 1) })
+                return
+            }
+            var why = sentence(message)
+            var stateKind = Nft.errorIsUnverified(message) ? "unverified" : "failed"
+            // Shown by the image's own status line, with its Try again.
+            nftSetImageState(key, { state: stateKind, pixels: null, error: why })
         }, 30000)
+    }
+
+    function nftSaveStorageNode(url) {
+        if (nftStorageSaving)
+            return
+        var problem = Nft.storageNodeProblem(url)
+        if (problem !== "") {
+            nftStorageStatus = problem
+            nftStorageKind = "problem"
+            return
+        }
+        nftStorageSaving = true
+        nftStorageStatus = "Saving…"
+        nftStorageKind = "working"
+        askLater("set_nft_storage_node", [String(url || "").trim()], function(value) {
+            nftStorageSaving = false
+            var saved = value && value.url ? value.url : Nft.DEFAULT_STORAGE_URL
+            nftStorageNode = saved
+            nftStorageLoaded = true
+            nftStorageField.text = saved
+            nftStorageStatus = "Saved. Logos Storage media will be fetched from " + saved + "."
+            nftStorageKind = "done"
+        }, function(message) {
+            nftStorageSaving = false
+            nftStorageStatus = sentence(message)
+            nftStorageKind = Logic.noticeKind(nftStorageStatus, true)
+        })
     }
 
     function nftApproveList(id, capabilityOnly, ticked) {
@@ -8328,6 +8427,202 @@ Item {
                 Action { label: root.nftSheet !== null && root.nftSheet.request !== null ? "Reject" : "Cancel"; onPressed: root.nftCloseSheet() }
             }
             WhyLine { text: nftSheetBody.model === null || nftSheetBody.model.refusal ? "" : root.nftJob !== null ? "Wait for the NFT job under way to end." : nftSheetBody.appRequest !== null && nftSheetBody.appRequest.checking ? "Checking who publishes " + nftSheetBody.appRequest.app + "… a few seconds." : nftSheetBody.held ? "Tick the box about who publishes the app to answer it." : Nft.approveWhy(nftSheetBody.model, root.nftSheetTicks) }
+    }
+
+    /// Clear Public / Private pill shown on holding cards and item pages.
+    component NftPrivacyBadge: Rectangle {
+        id: privacyBadge
+        property bool isPrivate: false
+        implicitWidth: badgeText.implicitWidth + 16
+        implicitHeight: badgeText.implicitHeight + 6
+        radius: 4
+        color: privacyBadge.isPrivate ? root.raised : root.card
+        border.width: 1
+        border.color: privacyBadge.isPrivate ? root.brass : root.line
+        Text {
+            id: badgeText
+            anchors.centerIn: parent
+            text: Nft.privacyLabel(privacyBadge.isPrivate)
+            textFormat: Text.PlainText
+            color: privacyBadge.isPrivate ? root.brass : root.dim
+            font.family: root.sans
+            font.pixelSize: root.px(13)
+            font.weight: Font.DemiBold
+        }
+    }
+
+    /// Square NFT art box: paints decoded RGBA pixels crisp, or a plain placeholder naming
+    /// missing, loading, unverified, failed, or opt-in media so no state is ever hidden.
+    component NftArt: Rectangle {
+        id: artBox
+        property var media: ({ state: "missing", label: "Missing media", detail: "", pixels: null })
+        property real side: root.px(180)
+        property bool compact: false
+        readonly property var pixels: media && media.pixels ? media.pixels : null
+        readonly property var bytes: pixels !== null && typeof pixels.pixels === "string" ? root.base64Bytes(pixels.pixels) : []
+        readonly property bool showsImage: pixels !== null && pixels.width > 0 && pixels.height > 0 && bytes.length === pixels.width * pixels.height * 4
+        implicitWidth: side
+        implicitHeight: side
+        width: side
+        height: side
+        radius: 8
+        color: root.raised
+        border.width: 1
+        border.color: media && (media.state === "unverified" || media.state === "failed" || media.state === "loading") ? root.waitTone : root.line
+        clip: true
+
+        Canvas {
+            id: artCanvas
+            anchors.fill: parent
+            anchors.margins: 2
+            visible: artBox.showsImage
+            onVisibleChanged: if (visible) requestPaint()
+            onWidthChanged: if (visible) requestPaint()
+            onHeightChanged: if (visible) requestPaint()
+            Connections {
+                target: artBox
+                function onPixelsChanged() { artCanvas.requestPaint() }
+            }
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                if (!artBox.showsImage)
+                    return
+                var w = artBox.pixels.width, h = artBox.pixels.height, data = artBox.bytes
+                var scale = Math.min(width / w, height / h)
+                var left = (width - w * scale) / 2, top = (height - h * scale) / 2
+                for (var y = 0; y < h; y++) {
+                    var y0 = Math.round(top + y * scale), y1 = Math.round(top + (y + 1) * scale)
+                    var x = 0
+                    while (x < w) {
+                        var at = (y * w + x) * 4
+                        var run = x + 1
+                        while (run < w && data[at] === data[(y * w + run) * 4] && data[at + 1] === data[(y * w + run) * 4 + 1]
+                               && data[at + 2] === data[(y * w + run) * 4 + 2] && data[at + 3] === data[(y * w + run) * 4 + 3])
+                            run++
+                        if (data[at + 3] > 0) {
+                            ctx.fillStyle = "rgba(" + data[at] + "," + data[at + 1] + "," + data[at + 2] + "," + (data[at + 3] / 255) + ")"
+                            var x0 = Math.round(left + x * scale), x1 = Math.round(left + run * scale)
+                            ctx.fillRect(x0, y0, x1 - x0, y1 - y0)
+                        }
+                        x = run
+                    }
+                }
+            }
+        }
+
+        ColumnLayout {
+            visible: !artBox.showsImage
+            anchors.fill: parent
+            anchors.margins: artBox.compact ? 8 : 16
+            spacing: 4
+            Item { Layout.fillHeight: true }
+            Text {
+                Layout.fillWidth: true
+                text: artBox.media ? artBox.media.label : "Missing media"
+                textFormat: Text.PlainText
+                color: artBox.media && (artBox.media.state === "unverified" || artBox.media.state === "failed" || artBox.media.state === "loading") ? root.waitTone : root.dim
+                font.family: root.sans
+                font.pixelSize: artBox.compact ? root.px(13) : root.px(16)
+                font.weight: Font.DemiBold
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
+            Text {
+                visible: !artBox.compact && artBox.media && (artBox.media.detail || "") !== ""
+                Layout.fillWidth: true
+                text: artBox.media ? (artBox.media.detail || "") : ""
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.sans
+                font.pixelSize: root.px(13)
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
+            Item { Layout.fillHeight: true }
+        }
+    }
+
+    /// Media state + opt-in consent controls for one collection (Logos Storage and https).
+    /// Always shows missing, loading, unverified, and failed states explicitly, and requires
+    /// a second ask when only private accounts hold the collection.
+    component NftMediaConsent: ColumnLayout {
+        id: mediaCtrl
+        property string program: ""
+        property string definition: ""
+        property string consentKey: ""
+        property var collection: null
+        property var media: ({ state: "missing", label: "Missing media", detail: "", canLoad: false, canRetry: false, pixels: null })
+        readonly property bool isPrivateOnly: Nft.privateOnly(root.nftRead ? root.nftRead.programs : [], program, definition)
+        readonly property string uri: collection && collection.uri ? collection.uri : ""
+        readonly property var consent: Nft.imageConsent(open && root.nftConsentUri !== "" ? root.nftConsentUri : uri, isPrivateOnly, root.nftStorageNode)
+        readonly property bool open: consentKey !== "" && root.nftConsentFor === consentKey
+        Layout.fillWidth: true
+        spacing: 6
+
+        Hint {
+            visible: mediaCtrl.media.state === "missing"
+            textFormat: Text.PlainText
+            text: "Missing media: " + (mediaCtrl.media.detail || "none listed.")
+        }
+        StatusLine {
+            visible: mediaCtrl.media.state === "loading"
+            kind: "working"
+            text: mediaCtrl.media.detail || "Loading media…"
+        }
+        StatusLine {
+            visible: mediaCtrl.media.state === "unverified"
+            kind: "waiting"
+            text: "Unverified media: " + (mediaCtrl.media.detail || "not verified.")
+            actionLabel: mediaCtrl.media.canRetry ? "Try again" : ""
+            onAct: root.nftLoadImage(mediaCtrl.program, mediaCtrl.definition, mediaCtrl.uri, 0)
+        }
+        StatusLine {
+            visible: mediaCtrl.media.state === "failed"
+            kind: "problem"
+            text: "Media failed to load: " + (mediaCtrl.media.detail || "couldn't load.")
+            actionLabel: "Try again"
+            onAct: root.nftLoadImage(mediaCtrl.program, mediaCtrl.definition, mediaCtrl.uri, 0)
+        }
+        Link {
+            visible: mediaCtrl.media.state === "not_loaded" && !mediaCtrl.open
+            text: mediaCtrl.consent.kind === "storage" ? "Load image from Logos Storage…" : "Show its image…"
+            onPressed: root.nftOpenConsent(mediaCtrl.consentKey, mediaCtrl.uri)
+        }
+        ColumnLayout {
+            visible: mediaCtrl.open
+            Layout.fillWidth: true
+            spacing: 6
+            Hint { textFormat: Text.PlainText; color: root.ink; text: mediaCtrl.consent.text }
+            Tick {
+                visible: mediaCtrl.consent.allowed
+                checked: root.nftConsentTicked
+                text: mediaCtrl.consent.tickText || "Load images of this collection."
+                onToggled: root.nftConsentTicked = !checked
+            }
+            Tick {
+                visible: mediaCtrl.consent.allowed && mediaCtrl.consent.secondAsk
+                checked: root.nftConsentSecondTicked
+                text: mediaCtrl.consent.secondTickText || "I understand only private accounts hold this collection and still want to load its image."
+                onToggled: root.nftConsentSecondTicked = !checked
+            }
+            RowLayout {
+                spacing: 10
+                Action {
+                    visible: mediaCtrl.consent.allowed
+                    label: root.nftMediaAllowing ? "Allowing…" : "Load it"
+                    enabledNow: !root.nftMediaAllowing && root.nftConsentTicked && (!mediaCtrl.consent.secondAsk || root.nftConsentSecondTicked)
+                    onPressed: root.nftAllowImage(mediaCtrl.program, mediaCtrl.definition, root.nftConsentUri || mediaCtrl.uri)
+                }
+                Action { label: "Don't load it"; onPressed: { root.nftConsentFor = ""; root.nftConsentTicked = false; root.nftConsentSecondTicked = false } }
+            }
+            WhyLine {
+                text: !mediaCtrl.consent.allowed ? ""
+                    : !root.nftConsentTicked ? "Tick the box above to load this collection's image."
+                    : mediaCtrl.consent.secondAsk && !root.nftConsentSecondTicked ? "Tick the second box to confirm loading media for a private-only collection."
+                    : ""
+            }
+        }
     }
     // ── end Collectibles
 
@@ -11808,10 +12103,79 @@ Item {
                 StatusLine { visible: root.nftResult !== ""; kind: root.nftResultKind; text: root.nftResult; actionLabel: root.nftResultCopy !== "" ? "Copy the account" : ""; onAct: root.copy(root.nftResultCopy, "account") }
 
                 Part { visible: root.namesNet === "0.4"; text: "Collections" }
-                Hint { visible: root.namesNet === "0.4" && root.nftRead !== null && root.nftCollections.length === 0; text: "Your accounts hold no NFT under the listed programs." }
-                Repeater {
-                    model: root.nftCollections
-                    Text { required property var modelData; Layout.fillWidth: true; text: modelData.title + " · held by " + (modelData.count === 1 ? "1 of your accounts" : modelData.count + " of your accounts"); textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(18); wrapMode: Text.Wrap }
+                Hint { visible: root.namesNet === "0.4" && root.nftRead !== null && root.nftCollectionCards.length === 0; text: "Your accounts hold no NFT under the listed programs." }
+                Flow {
+                    visible: root.namesNet === "0.4" && root.nftCollectionCards.length > 0
+                    Layout.fillWidth: true
+                    spacing: 14
+                    Repeater {
+                        model: root.nftCollectionCards
+                        Rectangle {
+                            id: collTile
+                            required property var modelData
+                            readonly property var media: Nft.mediaState(modelData.collection, root.nftImageStateFor(modelData.program, modelData.definition))
+                            width: root.px(214)
+                            implicitHeight: collTileCol.implicitHeight + 28
+                            radius: 10
+                            color: root.card
+                            border.width: 1
+                            border.color: root.line
+                            ColumnLayout {
+                                id: collTileCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: 14
+                                spacing: 6
+                                NftArt {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    side: root.px(184)
+                                    compact: true
+                                    media: collTile.media
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (collTile.modelData.firstAccount !== "") root.openNftItem({ program: collTile.modelData.program, account: collTile.modelData.firstAccount, definition: collTile.modelData.definition })
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: collTile.modelData.title
+                                    textFormat: Text.PlainText
+                                    color: root.ink
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(17)
+                                    font.weight: Font.DemiBold
+                                    wrapMode: Text.Wrap
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: collTile.modelData.countLabel
+                                    textFormat: Text.PlainText
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(14)
+                                    wrapMode: Text.Wrap
+                                }
+                                Text {
+                                    visible: collTile.media.state === "ready"
+                                    Layout.fillWidth: true
+                                    text: collTile.media.label
+                                    textFormat: Text.PlainText
+                                    color: root.dim
+                                    font.family: root.sans
+                                    font.pixelSize: root.px(13)
+                                    wrapMode: Text.Wrap
+                                }
+                                Link {
+                                    visible: collTile.modelData.firstAccount !== ""
+                                    text: collTile.modelData.count === 1 ? "Open item" : "Open first item"
+                                    font.pixelSize: root.px(14)
+                                    onPressed: root.openNftItem({ program: collTile.modelData.program, account: collTile.modelData.firstAccount, definition: collTile.modelData.definition })
+                                }
+                            }
+                        }
+                    }
                 }
                 StatusLine { visible: root.nftReadNote !== ""; kind: root.nftRead === null ? "working" : "waiting"; text: root.nftReadNote }
 
@@ -11823,7 +12187,12 @@ Item {
                         required property var modelData
                         Layout.fillWidth: true
                         spacing: 6
-                        Text { text: Nft.accountShown(nftAccount.modelData.account); textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            NftPrivacyBadge { isPrivate: nftAccount.modelData.isPrivate }
+                            Text { text: Nft.accountShown(nftAccount.modelData.account); textFormat: Text.PlainText; color: root.dim; font.family: root.sans; font.pixelSize: root.px(16); font.weight: Font.DemiBold }
+                        }
                         Repeater {
                             model: nftAccount.modelData.nfts
                             Card {
@@ -11832,48 +12201,41 @@ Item {
                                 readonly property string key: modelData.program + ":" + modelData.definition
                                 readonly property string sendKey: modelData.program + "|" + nftAccount.modelData.account
                                 readonly property string consentKey: sendKey + "|" + (modelData.definition || "")
+                                readonly property var media: Nft.mediaState(modelData.collection, root.nftImageStateFor(modelData.program, modelData.definition || ""))
                                 function open() { root.openNftItem({ program: modelData.program, account: nftAccount.modelData.account, definition: modelData.definition || "" }) }
                                 Layout.fillWidth: true
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 14
-                                    Avatar {
-                                        Layout.preferredWidth: root.px(72)
-                                        Layout.preferredHeight: root.px(72)
+                                    NftArt {
+                                        side: root.px(88)
+                                        compact: true
                                         Layout.alignment: Qt.AlignTop
-                                        pixels: root.nftImages[nftCard.key] || null
-                                        owner: nftCard.modelData.definition || ""
-                                        letter: Nft.collectionTitle(nftCard.modelData.collection, nftCard.modelData.definition).charAt(0)
+                                        media: nftCard.media
                                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: nftCard.open() }
                                     }
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         spacing: 4
-                                        Text { Layout.fillWidth: true; text: Nft.collectionTitle(nftCard.modelData.collection, nftCard.modelData.definition); textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(19); font.weight: Font.DemiBold; wrapMode: Text.Wrap }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Text { Layout.fillWidth: true; text: Nft.collectionTitle(nftCard.modelData.collection, nftCard.modelData.definition); textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(19); font.weight: Font.DemiBold; wrapMode: Text.Wrap }
+                                            NftPrivacyBadge { isPrivate: nftAccount.modelData.isPrivate }
+                                        }
                                         Text { text: nftCard.modelData.state === "unreadable" ? "Its state can't be read (" + nftCard.modelData.unreadable + ")" : Nft.tokenLine(nftCard.modelData); textFormat: Text.PlainText; color: nftCard.modelData.state === "unreadable" ? root.waitTone : root.dim; font.family: root.sans; font.pixelSize: root.px(16) }
                                         Link { text: "Open its page"; onPressed: nftCard.open() }
                                         Fact { label: "Collection ID"; value: Nft.idShown(nftCard.modelData.definition); full: nftCard.modelData.definition || ""; code: true }
                                         Repeater { model: Nft.metadataRows(nftCard.modelData.collection); Fact { required property var modelData; label: modelData.label; value: modelData.value } }
                                         Fact { label: "Program"; value: nftCard.modelData.programLabel; full: nftCard.modelData.program }
                                         Link { visible: !!nftCard.modelData.definition; text: "Copy the collection's link (for someone getting ready to receive it)"; onPressed: root.copy(Nft.linkOf(nftCard.modelData.program, nftCard.modelData.definition), "collection link") }
-                                        // The image: never loaded until allowed for this collection.
-                                        Link {
-                                            visible: !root.nftImages[nftCard.key] && nftCard.modelData.collection !== null && root.nftConsentFor !== nftCard.consentKey
-                                            text: "Show its image…"
-                                            onPressed: { root.nftConsentFor = nftCard.consentKey; root.nftConsentUri = nftCard.modelData.collection.uri || ""; root.nftConsentTicked = false }
-                                        }
-                                        ColumnLayout {
-                                            visible: root.nftConsentFor === nftCard.consentKey
-                                            Layout.fillWidth: true
-                                            spacing: 6
-                                            readonly property var consent: Nft.imageConsent(root.nftConsentUri, Nft.privateOnly(root.nftRead ? root.nftRead.programs : [], nftCard.modelData.program, nftCard.modelData.definition))
-                                            Hint { color: root.ink; text: parent.consent.text }
-                                            Tick { visible: parent.consent.allowed; checked: root.nftConsentTicked; text: "Load images of this collection."; onToggled: root.nftConsentTicked = !checked }
-                                            RowLayout {
-                                                spacing: 10
-                                                Action { visible: parent.parent.consent.allowed; label: "Load it"; enabledNow: root.nftConsentTicked; onPressed: root.nftAllowImage(nftCard.modelData.program, nftCard.modelData.definition, root.nftConsentUri) }
-                                                Action { label: "Don't load it"; onPressed: root.nftConsentFor = "" }
-                                            }
+                                        // The image: never loaded until allowed for this collection; every media state shown.
+                                        NftMediaConsent {
+                                            program: nftCard.modelData.program
+                                            definition: nftCard.modelData.definition || ""
+                                            consentKey: nftCard.consentKey
+                                            collection: nftCard.modelData.collection
+                                            media: nftCard.media
                                         }
                                         // Send: the destination, then the sheet.
                                         ColumnLayout {
@@ -12040,6 +12402,19 @@ Item {
                     Action { label: root.nftAdding ? "Checking…" : "Add"; enabledNow: !root.nftAdding && nftProgramField.text.trim() !== ""; onPressed: root.nftAddProgram(nftProgramField.text, nftProgramLabel.text) }
                 }
                 StatusLine { visible: root.nftProgramStatus !== ""; kind: root.nftProgramKind; text: root.nftProgramStatus }
+
+                // Logos Storage node: loopback only, for logos:<cid>#sha256=<64 hex> collection media.
+                Part { visible: root.namesNet === "0.4"; text: "Logos Storage node" }
+                Hint { visible: root.namesNet === "0.4"; text: "Used for collection media stored on Logos Storage (logos:<cid>#sha256=…). Only a node on this computer is allowed (127.0.0.1, localhost or [::1]). Leave empty for the default (" + Nft.DEFAULT_STORAGE_URL + ")." }
+                RowLayout {
+                    visible: root.namesNet === "0.4"
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Field { id: nftStorageField; Layout.fillWidth: true; text: root.nftStorageNode; hint: Nft.DEFAULT_STORAGE_URL; code: true }
+                    Action { label: root.nftStorageSaving ? "Saving…" : "Save"; enabledNow: !root.nftStorageSaving && Nft.storageNodeProblem(nftStorageField.text) === ""; onPressed: root.nftSaveStorageNode(nftStorageField.text) }
+                }
+                WhyLine { visible: root.namesNet === "0.4"; text: Nft.storageNodeProblem(nftStorageField.text) }
+                StatusLine { visible: root.namesNet === "0.4" && root.nftStorageStatus !== ""; kind: root.nftStorageKind; text: root.nftStorageStatus }
             }
         }
 
@@ -12074,6 +12449,7 @@ Item {
                 readonly property string title: deed ? (root.nftItemDeed !== "" ? root.nftItemDeed : "An LNS name card") : row !== null ? Nft.collectionTitle(row.collection, row.definition) : "This NFT"
                 readonly property string sendWhy: row === null ? "" : Nft.itemSendWhy(nftItemTo.text, root.nftNameCheck, root.nftTheirKeys)
                 readonly property var preview: Nft.namePreview(Nft.toName(nftItemTo.text), root.nftNameCheck)
+                readonly property var media: !deed && row !== null ? Nft.mediaState(collection, root.nftImageStateFor(program, definition)) : ({ state: "missing", label: "Missing media", detail: "", canLoad: false, canRetry: false, pixels: null })
 
                 BackButton { label: "Collectibles"; onPressed: root.closeNftItem() }
 
@@ -12086,36 +12462,24 @@ Item {
                 StatusLine { visible: !nftItemPage.shown && !nftItemPage.deed && root.nftRead === null; kind: "working"; text: "Reading your NFTs… this updates in a moment." }
 
                 // 1. The image. A name card is drawn here; any other is loaded only once allowed,
-                // with the same consent as its card (one consent per collection).
+                // with missing, loading, unverified, and failed states each shown as such.
                 NameCard { visible: nftItemPage.deed && nftItemPage.shown && root.nftItemDeed !== ""; name: root.nftItemDeed; side: root.px(320) }
-                Avatar {
+                NftArt {
                     visible: !nftItemPage.deed && nftItemPage.row !== null
-                    Layout.preferredWidth: root.px(240)
-                    Layout.preferredHeight: root.px(240)
-                    pixels: root.nftImages[nftItemPage.key] || null
-                    owner: nftItemPage.definition
-                    letter: nftItemPage.title.charAt(0)
+                    side: root.px(240)
+                    compact: false
+                    media: nftItemPage.media
                 }
-                Link {
-                    visible: !nftItemPage.deed && nftItemPage.row !== null && nftItemPage.collection !== null && !root.nftImages[nftItemPage.key] && root.nftConsentFor !== nftItemPage.consentKey
-                    text: "Show its image…"
-                    onPressed: { root.nftConsentFor = nftItemPage.consentKey; root.nftConsentUri = nftItemPage.collection.uri || ""; root.nftConsentTicked = false }
-                }
-                ColumnLayout {
-                    visible: nftItemPage.consentKey !== "" && root.nftConsentFor === nftItemPage.consentKey
-                    Layout.fillWidth: true
-                    spacing: 6
-                    readonly property var consent: Nft.imageConsent(root.nftConsentUri, Nft.privateOnly(root.nftRead ? root.nftRead.programs : [], nftItemPage.program, nftItemPage.definition))
-                    Hint { color: root.ink; text: parent.consent.text }
-                    Tick { visible: parent.consent.allowed; checked: root.nftConsentTicked; text: "Load images of this collection."; onToggled: root.nftConsentTicked = !checked }
-                    RowLayout {
-                        spacing: 10
-                        Action { visible: parent.parent.consent.allowed; label: "Load it"; enabledNow: root.nftConsentTicked; onPressed: root.nftAllowImage(nftItemPage.program, nftItemPage.definition, root.nftConsentUri) }
-                        Action { label: "Don't load it"; onPressed: root.nftConsentFor = "" }
-                    }
+                NftMediaConsent {
+                    visible: !nftItemPage.deed && nftItemPage.row !== null
+                    program: nftItemPage.program
+                    definition: nftItemPage.definition
+                    consentKey: nftItemPage.consentKey
+                    collection: nftItemPage.collection
+                    media: nftItemPage.media
                 }
 
-                // 2. Its name, and 3. its description (only when the collection has one).
+                // 2. Its name, Public/Private label, and 3. its description.
                 Text {
                     visible: nftItemPage.shown
                     Layout.fillWidth: true
@@ -12126,6 +12490,21 @@ Item {
                     font.pixelSize: root.px(28)
                     font.weight: Font.DemiBold
                     wrapMode: Text.Wrap
+                }
+                RowLayout {
+                    visible: !nftItemPage.deed && nftItemPage.row !== null
+                    Layout.fillWidth: true
+                    spacing: 8
+                    NftPrivacyBadge { isPrivate: nftItemPage.row !== null && nftItemPage.row.isPrivate }
+                    Text {
+                        Layout.fillWidth: true
+                        text: nftItemPage.row === null ? "" : nftItemPage.row.isPrivate ? "Private · held by a private account of this wallet" : "Public · visible on the chain"
+                        textFormat: Text.PlainText
+                        color: root.dim
+                        font.family: root.sans
+                        font.pixelSize: root.px(15)
+                        wrapMode: Text.Wrap
+                    }
                 }
                 Text {
                     visible: nftItemPage.shown && text !== ""

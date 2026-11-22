@@ -1349,6 +1349,10 @@ pub trait NamesModule: Send + 'static {
     fn nft_media(&mut self, program_id: String, definition: String, allow: bool) -> String;
     /// A collection's image as pixels, once allowed: `{allowed: false}` or `{width, height, pixels}`.
     fn nft_image(&mut self, program_id: String, definition: String, uri: String) -> String;
+    /// The loopback URL of this computer's Logos Storage node: `{url, default}`.
+    fn nft_storage_node(&mut self) -> String;
+    /// Sets the loopback URL of this computer's Logos Storage node (empty resets to default): `{url, default}`.
+    fn set_nft_storage_node(&mut self, url: String) -> String;
     /// The waiting NFT requests of other apps (`nft_list`, `nft_transfer`).
     fn pending_nft_requests(&mut self) -> String;
     /// Approves an NFT request: a list with the accounts ticked (comma-separated), a transfer
@@ -8902,6 +8906,20 @@ impl NamesModule for Names {
             return reply(Err(refused));
         }
         self.nft_image_now(&program_id, &definition, &uri)
+    }
+
+    fn nft_storage_node(&mut self) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_storage_node_get())
+    }
+
+    fn set_nft_storage_node(&mut self, url: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        reply(self.nft_storage_node_set(&url))
     }
 
     fn pending_nft_requests(&mut self) -> String {
@@ -19545,7 +19563,7 @@ mod tests {
     fn nft_calls_are_the_names_apps_and_need_a_listed_program() {
         let (mut names, dir) = nft_cli("nft-guard", false);
         as_caller(app("gallery_ui"));
-        for refused in [names.nft_programs(), names.nft_holdings(), names.nft_program_add(NFT_PROGRAM.into(), String::new()), names.nft_sheet(NFT_PROGRAM.into(), send_action()), names.pending_nft_requests(), names.nft_grants()] {
+        for refused in [names.nft_programs(), names.nft_holdings(), names.nft_program_add(NFT_PROGRAM.into(), String::new()), names.nft_sheet(NFT_PROGRAM.into(), send_action()), names.nft_storage_node(), names.set_nft_storage_node("http://127.0.0.1:8080".into()), names.pending_nft_requests(), names.nft_grants()] {
             assert!(parsed(&refused)["error"].as_str().unwrap().contains("only the Names app"), "{refused}");
         }
         as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
@@ -19913,6 +19931,76 @@ mod tests {
         std::thread::sleep(nft::PLAN_EVERY + std::time::Duration::from_millis(300));
         let during = parsed(&names.nft_sheet(NFT_PROGRAM.into(), action.clone()));
         assert_eq!(during["busy"], true, "an old plan is not shown while a newer one is read: {during}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn nft_storage_node_and_logos_storage_media_require_opt_in_and_verify_hash() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::{Read as _, Write as _};
+
+        let (mut names, dir) = nft_cli("nft-storage-media", false);
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        names.nft_program_add(NFT_PROGRAM.into(), String::new());
+
+        // Default node URL is loopback; non-loopback is refused.
+        let initial = parsed(&names.nft_storage_node());
+        assert_eq!(initial["value"]["url"], nft::DEFAULT_STORAGE_URL, "{initial}");
+        let remote = parsed(&names.set_nft_storage_node("http://192.168.1.9:8080".into()));
+        assert_eq!(remote["success"], false, "{remote}");
+
+        // Tiny valid 2x2 PNG served by a local loopback stand-in for Logos Storage.
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&[255; 16]).unwrap();
+        }
+        let cid = "zDvZRwzm78buYYJGskHsMFmAQ9PbhZRRg8DgLUMhiGoUAqKewsiC";
+        let sha256 = registry::hex(&Sha256::digest(&png_bytes));
+        let good_uri = format!("logos:{cid}#sha256={sha256}");
+        let bad_uri = format!("logos:{cid}#sha256={}", "00".repeat(32));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served_png = png_bytes.clone();
+        let server = std::thread::spawn(move || {
+            let mut hits = 0usize;
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                hits += 1;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    served_png.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&served_png);
+                let _ = stream.flush();
+            }
+            hits
+        });
+
+        let saved = parsed(&names.set_nft_storage_node(format!("http://{addr}/")));
+        assert_eq!(saved["value"]["url"], format!("http://{addr}"), "{saved}");
+
+        // Before opt-in: returns {allowed: false} without hitting the node.
+        let before = parsed(&names.nft_image(NFT_PROGRAM.into(), NFT_ART.into(), good_uri.clone()));
+        assert_eq!(before["value"], json!({ "allowed": false }), "{before}");
+
+        // Opt in, then fetch: succeeds and decodes pixels; mismatched hash is refused as unverified.
+        assert_eq!(parsed(&names.nft_media(NFT_PROGRAM.into(), NFT_ART.into(), true))["value"]["allowed"], true);
+        let ok = parsed(&names.nft_image(NFT_PROGRAM.into(), NFT_ART.into(), good_uri));
+        assert_eq!((ok["success"].as_bool(), ok["value"]["width"].as_u64(), ok["value"]["height"].as_u64()), (Some(true), Some(2), Some(2)), "{ok}");
+        let bad = parsed(&names.nft_image(NFT_PROGRAM.into(), NFT_ART.into(), bad_uri));
+        assert_eq!(bad["success"], false, "{bad}");
+        let err = bad["error"].as_str().unwrap_or_default();
+        assert!(err.contains("SHA-256") && err.contains("unverified"), "{bad}");
+
+        assert_eq!(server.join().unwrap(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

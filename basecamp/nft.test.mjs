@@ -1,5 +1,5 @@
 // Checks Collectibles' rules (qml/nft.mjs). Run with: node basecamp/nft.test.mjs
-import { capabilityTitle, VPK_HEX, leftLine, splitRunningJobs, payerLinkLine, listAccounts, tickedFor, pruneTicks, proofLine, proofKind, proofPublicLine, proofGoodToKnow, proofChecksLine, capabilityVerb, readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
+import { capabilityTitle, VPK_HEX, MAX_MEDIA_URI, DEFAULT_STORAGE_URL, privacyLabel, parseMediaUri, mediaState, errorIsUnverified, storageNodeProblem, collectionCards, leftLine, splitRunningJobs, payerLinkLine, listAccounts, tickedFor, pruneTicks, proofLine, proofKind, proofPublicLine, proofGoodToKnow, proofChecksLine, capabilityVerb, readyRows, privateOnly, accountShown, idShown, tokenLine, collectionTitle, metadataRows, accountGroups, collectionCounts, receiveChoices, collectionLink, linkOf, toProblem, toTheirKeys, approveWhy, defaultPayer, jobLine, jobEnded, imageConsent, burnConfirm } from "./qml/nft.mjs";
 import { itemOf, deedNameOf, isDeed, itemDescription, itemFields, editionLines, registryLine, ownerShown, toName, nameStep, namePreview, itemSendWhy, GRACE_MS } from "./qml/nft.mjs";
 import { readFileSync } from "node:fs";
 
@@ -199,6 +199,70 @@ check("itemSendWhy", [
 const code = source.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
 check("nft.mjs: no BigInt literals or calls", /\b\d+n\b|\bBigInt\s*\(/.test(code), false);
 check("nft.mjs: no variables named like Java's reserved words", /\b(?:const|let|var|function)\s+(?:short|int|long|byte|char|float|double|boolean|native|package|private|protected|public|static|synchronized|throws|transient|volatile|goto|abstract|final|implements|interface)\b/.test(code), false);
+
+// ── Phase 2 NFT viewing: Logos Storage media, privacy consent, media states, collection grid ──
+const STORAGE_CID = "zDvZRwzm78buYYJGskHsMFmAQ9PbhZRRg8DgLUMhiGoUAqKewsiC";
+const STORAGE_HASH = "a1b2c3d4".repeat(8);
+const STORAGE_URI = "logos:" + STORAGE_CID + "#sha256=" + STORAGE_HASH;
+
+check("privacyLabel", [privacyLabel(false), privacyLabel(true)], ["Public", "Private"]);
+check("parseMediaUri: valid Logos Storage URI normalizes hash", parseMediaUri("logos:" + STORAGE_CID + "#sha256=" + STORAGE_HASH.toUpperCase()),
+  { kind: "storage", state: "opt_in", cid: STORAGE_CID, sha256: STORAGE_HASH });
+check("parseMediaUri: max 256 UTF-8 bytes enforced", [
+  parseMediaUri("logos:" + "z".repeat(MAX_MEDIA_URI - "logos:".length - "#sha256=".length - 64) + "#sha256=" + STORAGE_HASH).kind,
+  parseMediaUri("logos:" + "z".repeat(MAX_MEDIA_URI - "logos:".length - "#sha256=".length - 63) + "#sha256=" + STORAGE_HASH).state,
+  parseMediaUri("https://img.example.com/" + "é".repeat(120)).state,
+], ["storage", "unverified", "unverified"]);
+check("parseMediaUri: missing/bad sha256 is unverified, empty is missing", [
+  parseMediaUri("").state,
+  parseMediaUri("logos:" + STORAGE_CID).state,
+  parseMediaUri("logos:" + STORAGE_CID + "#sha256=deadbeef").state,
+  parseMediaUri("logos:short#sha256=" + STORAGE_HASH).state,
+  parseMediaUri("ipfs://bafy").state,
+], ["missing", "unverified", "unverified", "unverified", "unverified"]);
+
+check("imageConsent: Logos Storage is opt-in, names node and network disclosure, checks SHA-256",
+  ((c) => [c.allowed, c.kind, c.secondAsk, c.text.includes("127.0.0.1:9090"), c.text.includes("Logos Storage network"), c.text.includes("SHA-256")])(imageConsent(STORAGE_URI, false, "http://127.0.0.1:9090")),
+  [true, "storage", false, true, true, true]);
+check("imageConsent: private-only requires second ask for both https and Logos Storage",
+  [imageConsent("https://img.example.com/a.png", true).secondAsk, imageConsent(STORAGE_URI, true).secondAsk, imageConsent("https://img.example.com/a.png", false).secondAsk, imageConsent(STORAGE_URI, false).secondAsk],
+  [true, true, false, false]);
+check("imageConsent: unverified logos URI is refused", [imageConsent("logos:" + STORAGE_CID, false).allowed, imageConsent("logos:" + STORAGE_CID, false).unverified], [false, true]);
+
+check("mediaState: missing, unverified, not_loaded, loading, failed, hash-unverified, ready", [
+  mediaState(null, null).state,
+  mediaState({ uri: "" }, null).state,
+  mediaState({ uri: "logos:" + STORAGE_CID }, null).state,
+  mediaState({ uri: STORAGE_URI }, null).state,
+  mediaState({ uri: STORAGE_URI }, { state: "loading" }).state,
+  mediaState({ uri: STORAGE_URI }, { state: "failed", error: "Logos Storage couldn't be reached." }).state,
+  mediaState({ uri: STORAGE_URI }, { state: "unverified", error: "SHA-256 mismatch." }).state,
+  mediaState({ uri: STORAGE_URI }, { state: "ready", pixels: { width: 2, height: 2, pixels: "AAAA" } }).state,
+], ["missing", "missing", "unverified", "not_loaded", "loading", "failed", "unverified", "ready"]);
+check("errorIsUnverified", [errorIsUnverified("didn't match its SHA-256 hash (unverified)"), errorIsUnverified("couldn't reach Logos Storage")], [true, false]);
+
+check("storageNodeProblem: loopback http only", [
+  storageNodeProblem(""),
+  storageNodeProblem(DEFAULT_STORAGE_URL),
+  storageNodeProblem("HTTP://127.0.0.1:8080"),
+  storageNodeProblem("http://localhost:9090/"),
+  storageNodeProblem("http://[::1]:8080"),
+  storageNodeProblem("http://192.168.1.5:8080") !== "",
+  storageNodeProblem("http://127.00.0.1:8080") !== "",
+  storageNodeProblem("https://127.0.0.1:8080") !== "",
+  storageNodeProblem("http://127.0.0.1:0") !== "",
+  storageNodeProblem("http://127.0.0.1:8080/path") !== "",
+], ["", "", "", "", "", true, true, true, true, true]);
+
+const cards = collectionCards(programs);
+check("collectionCards: art metadata, count, Public/Private breakdown, firstAccount",
+  cards.map((c) => [c.title, c.count, c.publicCount, c.privateCount, c.isPrivateOnly, c.countLabel, c.firstAccount]),
+  [["Art", 2, 1, 1, false, "2 held · 1 Public, 1 Private", "Public/" + BOB]]);
+
+// UI guardrails for Phase 2 NFT viewing: Public/Private labels, second ask tick, no Make private/public actions yet.
+check("Main.qml Collectibles: no Make private / Make public actions added yet", /\bMake private\b|\bMake public\b/i.test(block), false);
+check("Main.qml Collectibles: second ask tick for private-only media", block.includes("nftConsentSecondTicked"), true);
+check("Main.qml Collectibles: Public / Private badge and collection grid present", [block.includes("NftPrivacyBadge"), block.includes("NftArt"), block.includes("nftCollectionCards")].every(Boolean), true);
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures === 0 ? 0 : 1);
