@@ -4494,6 +4494,20 @@ impl Names {
     /// Checks that the open wallet can sign and pay for `change`, has it sign
     /// and send it, and returns `{name, signer, tx}` with the change's extras.
     fn send(&self, registry: &Registry, held: &Held, name: &str, change: &Change) -> Result<Value, String> {
+        self.send_with_reserve(registry, held, name, change, None)
+    }
+
+    /// Like [`Self::send`], and when `commit_reveal_fee_max` is `Some(max_fee)` (before sending a
+    /// registration commitment) checks that the paying account holds the deposit plus the most the
+    /// reveal's fee can hold while it runs, refusing with the exact shortfall before anything is sent.
+    fn send_with_reserve(
+        &self,
+        registry: &Registry,
+        held: &Held,
+        name: &str,
+        change: &Change,
+        commit_reveal_fee_max: Option<u128>,
+    ) -> Result<Value, String> {
         self.names_here()?;
         if !held.public.contains(&change.signer) {
             return Err(format!(
@@ -4502,7 +4516,9 @@ impl Names {
             ));
         }
         let balance = registry.balance(&change.signer)?;
-        if balance <= change.needs {
+        if let Some(reveal_fee_max) = commit_reveal_fee_max {
+            check_enough_to_finish(balance, change.needs, reveal_fee_max)?;
+        } else if balance <= change.needs {
             return Err(if change.needs == 0 {
                 format!("{} has no funds to pay the fee", registry::account_text(&change.signer))
             } else {
@@ -4513,15 +4529,35 @@ impl Names {
                 )
             });
         }
-        let tx = wallet::send(&self.cli_setup()?, change)?;
+        let (tx, tx_fee) = wallet::send_with_fee(&self.cli_setup()?, change)?;
         Ok(merged(
             json!({
                 "name": name,
                 "signer": registry::account_text(&change.signer),
                 "tx": tx,
+                "tx_fee": tx_fee,
             }),
             &change.extra,
         ))
+    }
+
+    /// The most the reveal's fee can hold while it runs, from the names tool's `prover-status`
+    /// (`unchecked_max_fee.register`, cached in `tool_status` or read locally from the tool).
+    fn reveal_max_fee(&self, setup: &cli::Setup) -> u128 {
+        let cached = self
+            .tool_status
+            .lock()
+            .ok()
+            .and_then(|seen| seen.get(&setup.program).map(|(_, tool)| tool.clone()));
+        let tool = cached.or_else(|| (self.net == Net::Lez04).then(|| cli::prover_status(&setup.program).ok()).flatten());
+        tool.as_ref().map_or(0, |value| parse_fee_u128(&value["unchecked_max_fee"]["register"]))
+    }
+
+    /// Records a settled or failed action in the Activity history for the zone in use.
+    fn log_activity(&self, entry: Value) {
+        if let Some(dir) = config_dir() {
+            activity::add(&dir, now(), activity::in_zone(entry, &self.zones_now().current_id()));
+        }
     }
 
     /// Has the wallet sign and send the change `build` makes from the open
@@ -4658,9 +4694,12 @@ impl Names {
             })
         };
 
-        if let Some(record) = registry.resolve(&name, &derived)? {
+        let found = registry
+            .resolve(&name, &derived)
+            .map_err(|why| format!("couldn't check whether {name} is already registered ({why}), so nothing was sent"))?;
+        if let Some(record) = found {
             if !record.is_held_by(&derived.id, &owner) {
-                return Err(format!("{name}{} is already registered", registry::NAME_SUFFIX));
+                return Err(format!("{name}{} is already registered, so nothing was sent", registry::NAME_SUFFIX));
             }
             // An earlier reveal has landed.
             if saved.is_some() {
@@ -4673,6 +4712,18 @@ impl Names {
 
         let chain_now = registry.now()?;
         if !may_commit && !saved.as_ref().is_some_and(|saved| saved.usable_at(chain_now)) {
+            if let Some(expired) = saved.as_ref() {
+                self.log_activity(json!({
+                    "kind": "name_reveal",
+                    "chain": "lez",
+                    "from": format!("Public/{}", registry::account_text(&expired.owner)),
+                    "name": name,
+                    "state": "expired",
+                    "problem": "the 24-hour reveal window passed before the reveal was sent",
+                }));
+                commitments.remove(&registry.program, &name);
+                commitments.save();
+            }
             return Err(no_new("has a commitment still usable"));
         }
         if let Some(mut saved) = saved.filter(|saved| saved.usable_at(chain_now)) {
@@ -4725,7 +4776,20 @@ impl Names {
                 } else {
                     Some(wallet::private_keys(&self.cli_setup()?, &choice)?)
                 };
-                let change = registry.reveal(&name, &derived, &owner, &saved.secret, keys)?;
+                let change = match registry.reveal(&name, &derived, &owner, &saved.secret, keys) {
+                    Ok(change) => change,
+                    Err(why) => {
+                        self.log_activity(json!({
+                            "kind": "name_reveal",
+                            "chain": "lez",
+                            "from": format!("Public/{}", registry::account_text(&owner)),
+                            "name": name,
+                            "state": "failed",
+                            "problem": why,
+                        }));
+                        return Err(why);
+                    }
+                };
                 // Marked as in flight before it is sent, and saved: if the send fails after the
                 // transaction left (a timeout), a second ask within TIME_WINDOW_MS sends nothing
                 // (it answers "revealed" until then) instead of a second, failing, charged reveal.
@@ -4735,9 +4799,33 @@ impl Names {
                 saved.revealed_at = Some(chain_now);
                 commitments.put(&registry.program, &name, &saved);
                 commitments.save_checked()?;
-                let sent = self.send(&registry, &held, &name, &change).map_err(|why| {
-                    format!("{why}; the reveal is not sent again for {} minutes, in case it went through", registry::TIME_WINDOW_MS / 60_000)
-                })?;
+                let sent = match self.send(&registry, &held, &name, &change) {
+                    Ok(sent) => sent,
+                    Err(why) => {
+                        self.log_activity(json!({
+                            "kind": "name_reveal",
+                            "chain": "lez",
+                            "from": format!("Public/{}", registry::account_text(&owner)),
+                            "name": name,
+                            "amount": change.extra["deposit"].as_str().or_else(|| change.extra["fee"].as_str()),
+                            "charge": if change.extra["deposit"].is_string() { json!("deposit") } else if change.extra["fee"].is_string() { json!("fee") } else { Value::Null },
+                            "state": "failed",
+                            "problem": why,
+                        }));
+                        return Err(format!("{why}; the reveal is not sent again for {} minutes, in case it went through", registry::TIME_WINDOW_MS / 60_000));
+                    }
+                };
+                self.log_activity(json!({
+                    "kind": "name_reveal",
+                    "chain": "lez",
+                    "from": format!("Public/{}", registry::account_text(&owner)),
+                    "name": name,
+                    "amount": sent["deposit"].as_str().or_else(|| sent["fee"].as_str()),
+                    "charge": if sent["deposit"].is_string() { json!("deposit") } else if sent["fee"].is_string() { json!("fee") } else { Value::Null },
+                    "hash": sent["tx"],
+                    "fee": sent["tx_fee"],
+                    "state": "done",
+                }));
                 saved.revealed = sent["tx"].as_str().map(str::to_owned);
                 saved.revealed_at = Some(chain_now);
                 commitments.put(&registry.program, &name, &saved);
@@ -4753,7 +4841,17 @@ impl Names {
 
         let secret: [u8; 32] = registry::fresh_bytes()?;
         let (change, made) = registry.commit(&name, &derived, &owner, &secret)?;
-        let sent = self.send(&registry, &held, &name, &change)?;
+        let reveal_fee_max = self.cli_setup().ok().map_or(0, |setup| self.reveal_max_fee(&setup));
+        let sent = self.send_with_reserve(&registry, &held, &name, &change, Some(reveal_fee_max))?;
+        self.log_activity(json!({
+            "kind": "name_commit",
+            "chain": "lez",
+            "from": format!("Public/{}", registry::account_text(&owner)),
+            "name": name,
+            "hash": sent["tx"],
+            "fee": sent["tx_fee"],
+            "state": "done",
+        }));
         let saved = Commitment {
             owner,
             secret,
@@ -4859,6 +4957,26 @@ impl Names {
             None => Err(format!("{name} is not registered, so nothing was sent")),
             Some(_) => Ok(()),
         }
+    }
+
+    /// Refuses registering `name` when it is already registered and not lapsed, or when
+    /// the lookup fails: nothing is sent.
+    fn not_already_registered(&mut self, name: &str, start: &mut Start) -> Result<(), String> {
+        let Some(program) = self.program else {
+            return Err("no registry is configured, so nothing was sent".to_owned());
+        };
+        let derived = self.derived(name);
+        start.not_down()?;
+        let record = registry::Registry::by(&self.home_sequencer(), program, start.deadline)
+            .resolve(name, &derived)
+            .map_err(|why| format!("couldn't check whether {name} is already registered ({why}), so nothing was sent"))?;
+        start.record_read = Some(name.to_owned());
+        if let Some(record) = record {
+            if !record.lapsed(registry::local_now()) {
+                return Err(format!("{name}{} is already registered, so nothing was sent", registry::NAME_SUFFIX));
+            }
+        }
+        Ok(())
     }
 
     /// Refuses an account nobody can use what is sent to it: the empty account (all 1s)
@@ -5307,6 +5425,58 @@ fn wallet_read(setup: &cli::Setup, registry: &Registry, home: bool) -> Result<Va
         private.sort_by_key(|account| account["funded"] != true);
         Ok(json!({ "accounts": accounts, "private_accounts": private }))
     }
+}
+
+/// Formats a non-negative integer with thousands commas (e.g. `1246360` -> `"1,246,360"`).
+fn grouped_u128(n: u128) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+/// Parses a fee figure encoded as decimal string or unsigned JSON integer.
+fn parse_fee_u128(value: &Value) -> u128 {
+    value
+        .as_str()
+        .and_then(|s| s.parse::<u128>().ok())
+        .or_else(|| value.as_u64().map(u128::from))
+        .unwrap_or(0)
+}
+
+/// Checks before sending a commitment that `balance` holds `deposit` plus the most the reveal's
+/// fee can hold while it runs (`reveal_fee_max`). Refuses in plain words with the exact shortfall
+/// so nothing is sent when the reveal would later fail for funds.
+fn check_enough_to_finish(balance: u128, deposit: u128, reveal_fee_max: u128) -> Result<(), String> {
+    if reveal_fee_max > 0 {
+        let needed = deposit.saturating_add(reveal_fee_max);
+        if balance < needed {
+            let short = needed - balance;
+            return Err(format!(
+                "Not enough to finish: needs {} more (holds {}, needs {} for the deposit plus up to {} held for the reveal fee). Add funds and try again; nothing was sent.",
+                grouped_u128(short),
+                grouped_u128(balance),
+                grouped_u128(deposit),
+                grouped_u128(reveal_fee_max),
+            ));
+        }
+        return Ok(());
+    }
+    if balance <= deposit {
+        let short = deposit.saturating_sub(balance).saturating_add(1);
+        return Err(format!(
+            "Not enough to finish: needs at least {} more (holds {}, needs {} for the deposit plus the reveal fee). Add funds and try again; nothing was sent.",
+            grouped_u128(short),
+            grouped_u128(balance),
+            grouped_u128(deposit),
+        ));
+    }
+    Ok(())
 }
 
 /// `mine`'s reads: the names CLI's accounts, then each remembered name's record (together) and
@@ -5763,7 +5933,20 @@ impl NamesModule for Names {
             let mut under_way = Vec::new();
             let mut changed = false;
             for (name, saved) in commitments.all(&registry.program) {
-                if landed.contains(&name) || saved.expired_by_local_clock(local) {
+                if landed.contains(&name) {
+                    commitments.remove(&registry.program, &name);
+                    changed = true;
+                    continue;
+                }
+                if saved.expired_by_local_clock(local) {
+                    self.log_activity(json!({
+                        "kind": "name_reveal",
+                        "chain": "lez",
+                        "from": format!("Public/{}", registry::account_text(&saved.owner)),
+                        "name": name,
+                        "state": "expired",
+                        "problem": "the 24-hour reveal window passed before the reveal was sent",
+                    }));
                     commitments.remove(&registry.program, &name);
                     changed = true;
                     continue;
@@ -5975,7 +6158,26 @@ impl NamesModule for Names {
         if let Err(refused) = only_the_names_app() {
             return reply(Err(refused));
         }
-        self.change_name(&name, |registry, name, derived, held| registry.release(name, derived, held))
+        let out = self.change_name(&name, |registry, name, derived, held| registry.release(name, derived, held));
+        if let Ok(parsed) = serde_json::from_str::<Value>(&out) {
+            if parsed["success"] == true {
+                let value = &parsed["value"];
+                let signer = value["signer"].as_str().map(|s| format!("Public/{s}"));
+                let refund = value["refund"].as_str().filter(|r| !r.is_empty() && *r != "0");
+                self.log_activity(json!({
+                    "kind": "name_release",
+                    "chain": "lez",
+                    "to": signer,
+                    "from": signer,
+                    "name": value["name"],
+                    "amount": refund,
+                    "hash": value["tx"],
+                    "fee": value["tx_fee"],
+                    "state": "done",
+                }));
+            }
+        }
+        out
     }
 
     fn repair_name(&mut self, name: String) -> String {
@@ -6882,10 +7084,12 @@ impl NamesModule for Names {
                     self.forget_tokens();
                 }
             }
-            // Each read's balances go to the History once.
+            // Each read's balances go to the History once. When LEZ 0.4 is already the active
+            // home network, `note_lez` owns native LEZ marks and reconciliation; skip native LEZ
+            // here so an arrival is not listed twice (once under Home and once under bridge-0.4).
             if let Some(at) = read["value"]["read_at"].as_u64() {
                 if bridge_net::LAST_NOTED.fetch_max(at, std::sync::atomic::Ordering::SeqCst) < at {
-                    bridge_net::note(&dir, &read["value"]);
+                    bridge_net::note_with_native(&dir, &read["value"], !(self.net == Net::Lez04 && self.on_home()));
                 }
             }
             Ok(json!({
@@ -6956,7 +7160,7 @@ impl NamesModule for Names {
             let here = zones.current_id();
             let lez_page = account.trim().starts_with("Public/") || account.trim().starts_with("Private/");
             let list = Value::from(
-                activity::all(&dir)
+                activity::dedupe_home_bridge_arrivals(activity::all(&dir))
                     .into_iter()
                     .filter(|entry| activity::involves(entry, &account))
                     .filter(|entry| !(lez_page && activity::on_lez(entry) && activity::zone_of(entry) != here))
@@ -7018,11 +7222,20 @@ impl NamesModule for Names {
         if !as_public && self.net == Net::Lez04 {
             return reply(Err(PRIVATE_OFF_04.to_owned()));
         }
+        let parsed = match registry::parse_name(&name) {
+            Ok(parsed) => parsed,
+            Err(error) => return reply(Err(error)),
+        };
         let command = match cli::register_args(&name, as_public) {
             Ok(command) => command,
             Err(error) => return reply(Err(error)),
         };
-        self.cli_job(&name, "register", |_, _, _| Ok((command, None, Value::Null)))
+        // A name already registered, or one whose lookup fails, starts no job and sends nothing.
+        let mut start = Start::new(&self.home_sequencer());
+        if let Err(refused) = self.not_already_registered(&parsed, &mut start) {
+            return reply(Err(refused));
+        }
+        self.cli_job_by(&name, "register", &mut start, |_, _, _| Ok((command, None, Value::Null)))
     }
 
     fn board_feed(&mut self, following: bool) -> String {
@@ -20001,6 +20214,67 @@ mod tests {
         assert!(err.contains("SHA-256") && err.contains("unverified"), "{bad}");
 
         assert_eq!(server.join().unwrap(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_register_refuses_taken_name_and_failed_lookup_before_commitment() {
+        let (mut names, dir) = with_wallet("no-taken-name", "echo 'should not run'; exit 1");
+        as_caller(logos_rust_sdk::LogosCaller::HostAnchor);
+        let derived = registry::derive("taken");
+        let taken_record = registry::Resolved {
+            owner: [9; 32],
+            expires: registry::NEVER,
+            profile: registry::Profile::bare("taken"),
+            claimed: false,
+            deed: None,
+            sealed: registry::Sealed::Empty,
+        };
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, taken_record)));
+        // Registered and not lapsed: refused in plain words, no job started.
+        let refused = parsed(&names.cli_register("taken".into(), true));
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(refused["error"].as_str().unwrap_or_default().contains("already registered"), "{refused}");
+        assert!(no_jobs(&dir), "no commitment job started for a taken name");
+        registry::RECORDS.with(|records| records.borrow_mut().clear());
+
+        // Lookup fails (sequencer down): refused in plain words, no job started.
+        registry::SEQUENCER_DOWN.with(|down| down.set(true));
+        let failed = parsed(&names.cli_register("freshname".into(), true));
+        assert_eq!(failed["success"], false, "{failed}");
+        assert!(no_jobs(&dir), "no commitment job started when lookup fails");
+        registry::SEQUENCER_DOWN.with(|down| down.set(false));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn enough_to_finish_checked_before_commitment() {
+        // Balance covers the deposit (1,000,000) alone, but not deposit + reveal max fee (4,455,000).
+        let refused = check_enough_to_finish(2_195_104, 1_000_000, 4_455_000).unwrap_err();
+        assert!(refused.contains("Not enough to finish: needs 3,259,896 more"), "{refused}");
+        assert!(refused.contains("holds 2,195,104"), "{refused}");
+        assert!(refused.contains("1,000,000"), "{refused}");
+        assert!(refused.contains("4,455,000"), "{refused}");
+        assert!(refused.contains("nothing was sent"), "{refused}");
+
+        // Exact sum is accepted.
+        assert!(check_enough_to_finish(5_455_000, 1_000_000, 4_455_000).is_ok());
+
+        // When reveal_fee_max is unknown (0), holding only the exact deposit still refuses.
+        let exact_dep = check_enough_to_finish(1_000_000, 1_000_000, 0).unwrap_err();
+        assert!(exact_dep.contains("Not enough to finish: needs at least 1 more"), "{exact_dep}");
+        assert!(check_enough_to_finish(1_000_001, 1_000_000, 0).is_ok());
+
+        // Cached tool_status provides unchecked_max_fee.register to reveal_max_fee.
+        let (names, dir) = with_wallet("reveal-max-fee", "exit 0");
+        let setup = names.cli_setup().unwrap();
+        let modified = std::fs::metadata(&setup.program).and_then(|m| m.modified()).unwrap();
+        names.tool_status.lock().unwrap().insert(
+            setup.program.clone(),
+            (modified, json!({ "bare": true, "unchecked_max_fee": { "commit": "1200000", "register": "4455000", "change": "1500000" } })),
+        );
+        assert_eq!(names.reveal_max_fee(&setup), 4_455_000);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

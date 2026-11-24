@@ -454,7 +454,7 @@ check("subDigits", [subDigits("1000", "1"), subDigits("210939029", "210939029"),
   const A = "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", P = "Private/yGrPEbP3Go89i1Cy5EDMqtXxUFjKbe6FuA5VNiRfe4Z";
   const paid = { kind: "pay_account", chain: "lez", from: P, to: A, amount: "1000", private: true, fee: { about: null, at_most: null, paid: "70000" }, state: "done", at: 1794200000 };
   check("payment on the payee's page", onPage(paid, A), [["Received from Private yGrPEbP3…fe4Z", "+1,000", "on LEZ 0.3"]]);
-  check("payment on the payer's page", onPage(paid, P), [["Paid Public CCVd76Tk…pKnk", "-1,000", "on LEZ 0.3, from your private account · fee 70,000"]]);
+  check("payment on the payer's page", onPage(paid, P), [["Paid Public CCVd76Tk…pKnk", "-71,000", "on LEZ 0.3, from your private account · fee 70,000"]]);
   check("token on the payee's page", onPage({ kind: "token_send", chain: "lez", from: P, to: A, amount: "50", state: "done", at: 1794200000 }, A)[0].slice(0, 2), ["Received a token from Private yGrPEbP3…fe4Z", "+50"]);
   // A bridge in a block hasn't reached LEZ yet: no "+" until it arrives.
   check("bridge on the LEZ account's page", onPage(Object.assign({}, bridge, { to: A, fee: "100000" }), A)[0].slice(1), ["1,000,000", "from key 7a6223ab…2a2a into Public CCVd76Tk…pKnk"]);
@@ -511,7 +511,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     can({ plan: { fee_estimate: null } }), can({ request: Object.assign({}, request, { node: "Your Logos Blockchain node isn't running." }) }), can({ request: null })],
     [true, false, false, false, false, false, true, true, false, false]);
   check("history: an inscription", [activityLine({ kind: "inscribe", chain: "logos", from: K1, hash: "ab".repeat(32), fee: "1086", state: "in_block", at: 1794200000 }, 1794205600000)].map(l => [l.title, l.sub, l.amount, l.sign, l.state]),
-    [["Inscribed a testimonial", "on the Logos Blockchain, from key e3635f20…ce07 · fee 1,086", "", "", "In a block"]]);
+    [["Inscribed a testimonial", "on the Logos Blockchain, from key e3635f20…ce07 · fee 1,086", "1,086", "-", "In a block"]]);
 }
 
 // The bridge test network (LEZ 0.4): accounts asked about, amounts with decimals, status lines.
@@ -576,9 +576,9 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     check("revealNext: before ready_at nothing; a failed ask and an unanswered one don't stop it", sent, [60000]);
   }
   check("revealLine", revealLine({ name: "a", display: "a", stage: "committed", ready_at: 900000, reveal_by: 86000000 }, 0, (ms) => String(Math.round(ms / 60000)) + "m"),
-    "a: the reveal goes out at 15m (in 15 min); it can still be sent for 23 h.");
+    "a: the reveal goes out at 15m (in 15 min). If Names is closed, you can finish until 1433m" + (new Date(86000000).getDate() !== new Date(0).getDate() ? " tomorrow" : "") + "; after that, start again.");
   check("revealLine near the end", revealLine({ name: "a", stage: "committed", ready_at: 0, reveal_by: 30 * 60000 }, 0, (ms) => String(Math.round(ms / 60000)) + "m"),
-    "a: the reveal is due now and goes out while Names is open; it must be sent by 30m (30 min left).");
+    "a: the reveal is due now and goes out while Names is open. It must be finished by 30m (30 min left); after that, start again.");
   check("cliOutdatedLine 0.3", cliOutdatedLine("0.3", "names 0.1.0"), "The names tool this app uses for LEZ 0.3 (names 0.1.0) is too old for that network as it is now, so creating a wallet there doesn't work with it. LEZ 0.4 is unaffected: switch to it under Settings → Network.");
   check("cliOutdatedLine no reset, no install", ["0.3", "0.4"].map((n) => /reset|Install/.test(cliOutdatedLine(n, ""))), [false, false]);
   check("bridgeNetRows two bridges", bridgeNetRows({ bridges: [{ program: "A" }, { program: "B" }], accounts: [{ account: "Public/" + OTHER, found: true, native: "0",
@@ -2152,7 +2152,7 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
   check("a cold start reads LEZ 0.4 only once the module said its network", /readonly property bool bridgeNetOnView: configKnown && walletNet === "0\.4"/.test(qml), true);
   check("a reset seen by the balance read checks the network file too", /rereadAfterReset\(resetAt\)\n(\s*\/\/[^\n]*\n)*\s*checkNetworkNow\(\)/.test(qml), true);
   check("the claim button says Claiming… at once and only for a name that can have one",
-    [/label: root\.deedClaiming\(myName\.modelData\.name\) \? "Claiming…" : "Claim NFT \(free\)"/.test(qml), /deedInfo\.deed === null && deedInfo\.normal === true/.test(qml), /FontLoader \{ id: gloockFont; source: "fonts\/Gloock-Regular\.ttf" \}/.test(qml)],
+    [/label: root\.deedClaiming\(myName\.modelData\.name\) \? "Claiming…" : "Claim NFT"/.test(qml), /deedInfo\.deed === null && deedInfo\.normal === true/.test(qml), /FontLoader \{ id: gloockFont; source: "fonts\/Gloock-Regular\.ttf" \}/.test(qml)],
     [true, true, true]);
   check("every network button says what it is doing at once",
     [/label: root\.customChecking \? "Checking…" : "Check"/.test(qml), /root\.customSwitching \? "Switching…"/.test(qml), /label: root\.netChecking \? "Checking…" : "Check the network now"/.test(qml),
@@ -2260,6 +2260,134 @@ check("the deed retry has a 20-try cap and shows the failure line", [
     [{ plain: "This call reads the network clock, which needs the names tool 0.18 or later; nothing was sent.", raw: "" }, { plain: "It wasn't sent.", raw: "" }]);
   check("History: a refused call in plain words",
     activityLine({ kind: "app_call", app: "vesting_ui", state: "failed", problem: refusedRaw, at: 1 }, 2000, "", (a) => "Vest").sub.indexOf("The program refused it") === 0, true);
+}
+
+// 0.18.6 UX: registration & release activity rows, My names progress line, first-receive key.
+{
+  const { activityLine, registerProgressLine, publicReceivingKey, FIRST_RECEIVE_KEY_NOTE } = await import("./qml/logic.mjs");
+  const ACC = "Public/FLBC4VrQ12UDpbG2ArnRgcwrZTz5cabKbT9oY1M7BE2Z";
+  const commitPaid = activityLine({ kind: "name_commit", chain: "lez", from: ACC, name: "alice", fee: { paid: "4200" }, state: "done", at: 1 }, 2000);
+  check("activity: name_commit with recorded fee", [commitPaid.title, commitPaid.amount, commitPaid.sign, commitPaid.state], ["Committed alice", "4,200", "-", "Done"]);
+  const commitNoFee = activityLine({ kind: "name_commit", chain: "lez", from: ACC, name: "alice", fee: null, state: "done", at: 1 }, 2000);
+  check("activity: name_commit without fee invents no amount", [commitNoFee.title, commitNoFee.amount, commitNoFee.sign], ["Committed alice", "", ""]);
+  const revealDone = activityLine({ kind: "name_reveal", chain: "lez", from: ACC, name: "alice", amount: "1000000", charge: "deposit", fee: { paid: "5100" }, state: "done", at: 1 }, 2000);
+  check("activity: name_reveal with deposit and tx fee",
+    [revealDone.title, revealDone.amount, revealDone.sign, revealDone.sub.includes("deposit held"), revealDone.sub.includes("fee 5,100"), revealDone.state],
+    ["Registered alice", "1,005,100", "-", true, true, "Done"]);
+  const revealRefused = activityLine({ kind: "name_reveal", chain: "lez", from: ACC, name: "alice", state: "failed", problem: "alice is already registered", at: 1 }, 2000);
+  check("activity: name_reveal refused says what was lost and why",
+    [revealRefused.title, revealRefused.state, revealRefused.tone, revealRefused.amount, revealRefused.sign, revealRefused.sub.includes("Deposit not taken; only the commitment fee was spent")],
+    ["Reveal refused for alice", "Refused", "bad", "", "", true]);
+  const revealExpired = activityLine({ kind: "name_reveal", chain: "lez", from: ACC, name: "alice", state: "expired", problem: "the 24-hour reveal window passed before the reveal was sent", at: 1 }, 2000);
+  check("activity: name_reveal expired says what was lost and why",
+    [revealExpired.title, revealExpired.state, revealExpired.tone, revealExpired.amount, revealExpired.sign, revealExpired.sub.includes("Deposit not taken; only the commitment fee was spent")],
+    ["Registration expired for alice", "Expired", "warn", "", "", true]);
+  const released = activityLine({ kind: "name_release", chain: "lez", to: ACC, from: ACC, name: "alice", amount: "1000000", fee: { paid: "3000" }, state: "done", at: 1 }, 2000);
+  check("activity: name_release shows deposit refunded",
+    [released.title, released.amount, released.sign, released.sub.includes("deposit refunded"), released.sub.includes("fee 3,000"), released.state],
+    ["Released alice", "1,000,000", "+", true, true, "Done"]);
+
+  check("registerProgressLine: pending shows Step 1 of 2 sent with HH:MM",
+    registerProgressLine({ name: "alice", ready_at: 1700000000000 }, () => "14:25", null),
+    "Step 1 of 2 sent. Finishing at 14:25. Keep Names open.");
+  check("registerProgressLine: result shown after reveal lands",
+    registerProgressLine({ name: "alice", ready_at: 1700000000000 }, () => "14:25", { text: "alice is yours.", kind: "done" }),
+    "alice is yours.");
+
+  const KEY = "a".repeat(64);
+  const accts = [{ account: ACC, kind: "public", balance: "0", public_key: KEY }];
+  check("publicReceivingKey: never-used public account returns key; used or private returns empty",
+    [publicReceivingKey(accts, ACC, "0"), publicReceivingKey(accts, ACC, "500"), publicReceivingKey(accts, ACC, "0", true), publicReceivingKey(accts, "Private/xyz", "0"), FIRST_RECEIVE_KEY_NOTE.includes("receiving key")],
+    [KEY, "", "", "", true]);
+
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("Main.qml: My names uses registerProgressLine and Receive shows FIRST_RECEIVE_KEY_NOTE",
+    [qml.includes("Logic.registerProgressLine("), qml.includes("Logic.FIRST_RECEIVE_KEY_NOTE")], [true, true]);
+}
+
+// 0.18.6, what a new user hit (24 Nov): spends shown as a minus, a stopped registration says
+// why, an arrival told once, no "free" for a call that pays a network fee.
+{
+  const { activityLine: line, activityDeduped, registerFailedLine } = await import("./qml/logic.mjs");
+  const deed = line({ kind: "deed_claim", name: "jefmacbook", state: "done", at: 1, fee: { about: "1248088", at_most: "2094948", paid: "1246360" } }, 2000);
+  check("a deed claim's fee leaves the balance, shown as a minus", [deed.amount, deed.sign, /free/.test(deed.sub)], ["1,246,360", "-", false]);
+  const reveal = line({ kind: "name_reveal", name: "a", state: "done", at: 1, amount: "1000000", fee: { paid: "1448680" } }, 2000);
+  check("a registration shows its deposit plus its fee as a minus", [reveal.amount, reveal.sign], ["2,448,680", "-"]);
+  const sending = line({ kind: "deed_claim", name: "a", state: "sending", at: 1, fee: { about: "5" } }, 2000);
+  check("nothing shown as spent while it is still sending", sending.amount, "");
+  const arrived = line({ kind: "arrived", chain: "lez", to: "Public/X", amount: "5000000", state: "arrived", at: 1 }, 2000);
+  check("an arrival keeps its plus", [arrived.amount, arrived.sign], ["5,000,000", "+"]);
+  check("a stopped registration short of funds says how much more",
+    registerFailedLine("Public/39P holds 2195104; this takes 1000000, and about 2427426 more is held for the fee while it runs"),
+    "Not enough to finish: needs about 1,232,322 more. Add funds, then press Register on it again.");
+  check("a stopped registration with another reason says it",
+    registerFailedLine("Error: the commitment expired\nmore"), "Didn't register: the commitment expired. Press Register on it to try again.");
+  check("a stopped registration with no reason recorded", registerFailedLine(""), "Didn't register. Press Register on it to try again.");
+  const zone = { kind: "arrived", chain: "lez", zone: "bridge-0.4", to: "Public/X", amount: "5000000", at: 1795540200 };
+  const net = { kind: "arrived", chain: "lez-0.4", network: "bridge-0.4", to: "Public/X", amount: "5000000", at: 1795540258 };
+  const later = { kind: "arrived", chain: "lez-0.4", network: "bridge-0.4", to: "Public/X", amount: "5000000", at: 1795549258 };
+  check("one arrival seen by both watchers is listed once", activityDeduped([net, zone]).length, 1);
+  check("a second arrival hours later is still listed", activityDeduped([later, net, zone]).length, 2);
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("no button or hint calls a fee-paying call free", [/Claim NFT \(free\)"/.test(qml), /Free: only gas/.test(qml)], [false, false]);
+}
+
+// 0.18.6 UX Round 2: enough-to-finish precheck (item 7), failedNameLine (item 8), actionFeeNote (item 9),
+// and spend-in-amount-column edge cases (item 1b).
+{
+  const { activityLine, subDigitsOrZero: subDigits, registerShortfall, failedNameLine, actionFeeNote } = await import("./qml/logic.mjs");
+  const ACC = "Public/FLBC4VrQ12UDpbG2ArnRgcwrZTz5cabKbT9oY1M7BE2Z";
+
+  const split = activityLine({ kind: "split", chain: "logos", from: "ab".repeat(32), amount: "1000000", fee: "2018", state: "in_block", at: 1 }, 2000);
+  check("activity: split puts only its fee in amount column as minus", [split.amount, split.sign], ["2,018", "-"]);
+  const tokenSend = activityLine({ kind: "token_send", chain: "lez", from: ACC, to: ACC, amount: "50", fee: { paid: "5000" }, state: "done", at: 1 }, 2000);
+  check("activity: token_send never adds LEZ fee to token units", [tokenSend.amount, tokenSend.sign], ["50", "-"]);
+
+  check("subDigits", [subDigits("5455000", "2195104"), subDigits("100", "100"), subDigits("50", "100"), subDigits("340282366920938463463374607431768211455", "1")],
+    ["3259896", "0", "0", "340282366920938463463374607431768211454"]);
+  const short = registerShortfall("2195104", { deposit: "1000000" }, { unchecked_max_fee: { register: "4455000" } }, null);
+  check("registerShortfall refuses when balance < deposit + reveal max fee",
+    [short.enough, short.needed, short.short, short.line.includes("Not enough to finish: needs 3,259,896 more")],
+    [false, "5455000", "3259896", true]);
+  const ok = registerShortfall("5455000", { deposit: "1000000" }, { unchecked_max_fee: { register: "4455000" } }, null);
+  check("registerShortfall allows exact deposit + reveal max fee", [ok.enough, ok.line], [true, ""]);
+  const byQuote = registerShortfall("1500000", { deposit: "1000000" }, null, { public_transfer: { about: "400000", at_most: "1000000" } });
+  check("registerShortfall falls back to feeQuote.public_transfer.at_most", [byQuote.enough, byQuote.short], [false, "500000"]);
+
+  check("failedNameLine: CLI two-part fee reserve shortfall",
+    failedNameLine({ name: "alice", failed: true, state: "NOT registered: Public/X holds 2195104; this takes 1000000, and about 2427426 more is held for the fee while it runs" }),
+    "Not enough to finish: needs about 1,232,322 more. Add funds and register it again.");
+  check("failedNameLine: module shortfall passes through",
+    failedNameLine({ name: "alice", failed: true, state: "NOT registered: Public/X holds 2195104; this takes 5455000" }),
+    "Not enough to finish: needs 3,259,896 more. Add funds and register it again.");
+  check("failedNameLine: already registered",
+    failedNameLine({ name: "alice", failed: true, state: "NOT registered: alice is already registered" }),
+    "Already registered to someone else. Pick another name.");
+  check("failedNameLine: expired window",
+    failedNameLine({ name: "alice", failed: true, state: "NOT registered: the 24-hour reveal window passed" }),
+    "The 24-hour window passed before it finished. Register it again.");
+  check("failedNameLine: empty fallback still explains and gives next step",
+    failedNameLine({ name: "alice", failed: true, state: "" }),
+    "Registration stopped before it finished. Open it to try again.");
+
+  check("actionFeeNote: a public registration, from the chain's base fee and both steps' cycles",
+    actionFeeNote({ base_fee_exec: 8, public_transfer: { about: "4088", at_most: "6464000" } }, { unchecked_max_fee: { register: "38080000" } }, "register", false),
+    "Network fee: about 1,604,000, for both steps.");
+  check("actionFeeNote: a deed claim", actionFeeNote({ base_fee_exec: 8 }, null, "deed", false), "Network fee: about 1,229,000.");
+  check("actionFeeNote never shows the tool's cap as a fee", actionFeeNote(null, { unchecked_max_fee: { register: "38080000" } }, "register", false), "Plus a network fee.");
+  check("actionFeeNote: a private call uses the private estimate",
+    actionFeeNote({ private_transfer: { about: "3169135" } }, null, "change", true), "Network fee: about 3,169,135.");
+
+  const qml = readFileSync(new URL("./qml/Main.qml", import.meta.url), "utf8");
+  check("Main.qml Round 2: uses registerShortfall, failedNameLine, actionFeeNote; no bare didn't register or take it back for free",
+    [
+      qml.includes("Logic.registerShortfall("),
+      qml.includes("Logic.failedNameLine("),
+      qml.includes("Logic.actionFeeNote("),
+      !qml.includes('"didn\'t register"'),
+      !qml.includes("take it back for free"),
+    ],
+    [true, true, true, true, true]);
 }
 
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");

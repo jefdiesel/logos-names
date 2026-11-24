@@ -773,14 +773,14 @@ var BRIDGE_ARRIVES_MS = 12 * 3600 * 1000
 /// whose page shows the entry: the direction and amount are then that account's own
 /// (incoming-payment-shown-as-outgoing-on-receiving-accounts-page,
 /// claim-entry-not-on-credited-accounts-page-and-shown-as-credit-on-payer).
-export function activityLine(entry, now, account, labelOf) {
+export function activityLine(entry, now, account, labelOf, asItWas) {
     var e = entry || {}
     var page = String(account || "")
     var kind = String(e.kind || "")
     if (page !== "") {
         var own = accountSide(e, kind, page)
         if (own)
-            return lezNamed(own(activityLine(e, now)), e)
+            return lezNamed(own(activityLine(e, now, "", undefined, true)), e)
     }
     var amount = e.amount ? grouped(e.amount) : ""
     var title = "", sub = "", sign = "-"
@@ -802,10 +802,42 @@ export function activityLine(entry, now, account, labelOf) {
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
-    case "deed_claim": title = "Claimed the NFT of " + (e.name || "a name"); sub = "on LEZ 0.4, free: its LNS name card"; sign = ""; break
+    case "deed_claim": title = "Claimed the NFT of " + (e.name || "a name"); sub = "on LEZ 0.4, its LNS name card"; sign = ""; break
     // Names did this by itself: the name had no account to be paid at (handed to this wallet,
     // or registered before Names wrote it), so its profile now points at its holder.
     case "address_repair": title = (e.name || "A name") + " now points at your account"; sub = "on LEZ, done by Names: people can pay and message it" + (e.from ? ", from " + whoShown(e.from) : ""); sign = ""; break
+    case "name_commit":
+        title = "Committed " + (e.name || "a name")
+        sub = "on LEZ, step 1 of 2" + (e.from ? " · from " + whoShown(e.from) : "")
+        var commitFee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
+        amount = commitFee ? grouped(commitFee) : ""
+        sign = commitFee ? "-" : ""
+        break
+    case "name_reveal":
+        if (e.state === "failed") {
+            title = "Reveal refused for " + (e.name || "a name")
+            sub = (e.problem ? bridgeText(callProblemShown(e.problem).plain, 200) + " · " : "") + "Deposit not taken; only the commitment fee was spent"
+            amount = ""
+            sign = ""
+        } else if (e.state === "expired") {
+            title = "Registration expired for " + (e.name || "a name")
+            var why = e.problem ? String(e.problem).trim() : ""
+            if (why !== "")
+                why = why.charAt(0).toUpperCase() + why.slice(1).replace(/\.$/, "") + "."
+            sub = (why !== "" ? why + " · " : "") + "Deposit not taken; only the commitment fee was spent"
+            amount = ""
+            sign = ""
+        } else {
+            title = "Registered " + (e.name || "a name")
+            sub = "on LEZ, " + (e.charge === "fee" ? "registration fee" : "deposit held") + (e.from ? " · from " + whoShown(e.from) : "")
+            sign = amount ? "-" : ""
+        }
+        break
+    case "name_release":
+        title = "Released " + (e.name || "a name")
+        sub = "on LEZ, " + (amount ? "deposit refunded" : "released") + (e.to ? " into " + whoShown(e.to) : "")
+        sign = "+"
+        break
     case "arrived":
         title = "Arrived"
         sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : e.chain === "lez-0.4" ? " on LEZ 0.4, the bridge test network" : " on LEZ")
@@ -837,9 +869,13 @@ export function activityLine(entry, now, account, labelOf) {
     // version matched by amount.
     case "arrived": stateText = kind !== "bridge" ? "" : e.maybe === true ? "A credit of the same total as your bridges reached LEZ" : e.late === true ? "Arrived on LEZ, late" : "Arrived on LEZ"; tone = "good"; break
     // A bridge LEZ hasn't credited within 2 days; it is still followed, and arrives if LEZ credits it.
-    case "expired": stateText = e.followed === false ? "Not seen on LEZ after 2 days · check the balance" : "Not credited on LEZ after 2 days · still followed; check the balance"; tone = "warn"; break
+    // A name registration commitment whose 24-hour reveal window passed.
+    case "expired":
+        stateText = kind === "name_reveal" ? "Expired"
+            : e.followed === false ? "Not seen on LEZ after 2 days · check the balance" : "Not credited on LEZ after 2 days · still followed; check the balance"
+        tone = "warn"; break
     case "done": stateText = "Done"; tone = "good"; break
-    case "failed": stateText = "Didn't go through"; tone = "bad"; break
+    case "failed": stateText = kind === "name_reveal" ? "Refused" : "Didn't go through"; tone = "bad"; break
     // Some of its steps landed and the rest stopped (partial-claim-job-and-pages-say-nothing-true).
     case "partial": stateText = "Partly done · see what's left"; tone = "warn"; break
     // The module restarted while it ran, or its record is gone: it may have gone through.
@@ -847,11 +883,23 @@ export function activityLine(entry, now, account, labelOf) {
     }
     // A LEZ job's fee is {about, at_most, paid}; a Logos Blockchain send's is the paid fee itself.
     var fee = e.fee && typeof e.fee === "object" ? e.fee.paid : e.fee
-    if (fee && kind !== "split" && e.state !== "sending")
+    if (fee && kind !== "split" && kind !== "name_commit" && e.state !== "sending")
         sub += " · fee " + grouped(fee)
     // Money came in only once it landed; a failed or unknown change moved nothing known.
     if ((sign === "+" && !landedIn(e)) || e.state === "failed" || e.state === "unknown")
         sign = ""
+    // What this wallet sent shows what left the balance on the right, as a minus: the fee plus
+    // any amount or deposit sent (activity-spend-in-amount-column), once the
+    // change landed; nothing is shown while it is still sending, failed, expired or unknown,
+    // and never added to token quantities (`token_send`).
+    // An account's own page tells its side itself (accountSide), from the line as it was.
+    var paidOut = asItWas !== true && /^[0-9]+$/.test(String(fee || "")) && e.state !== "sending" && e.state !== "unknown" && e.state !== "failed" && e.state !== "expired"
+        && sign !== "+" && kind !== "token_send" && kind !== "receive" && kind !== "arrived" && kind !== "name_release"
+    if (paidOut) {
+        var sentOut = sign === "-" && /^[0-9]+$/.test(String(e.amount || "")) ? String(e.amount) : "0"
+        amount = grouped(addDigits(sentOut, String(fee)))
+        sign = "-"
+    }
     // Which zone, once there is more than one to tell apart (the module gives `zone_name`
     // then; null for a zone removed since).
     if (typeof e.zone_name === "string" && e.zone_name !== "")
@@ -952,14 +1000,199 @@ function accountSide(e, kind, page) {
                 line.sub = "on LEZ"
             else if (fee)
                 line.sub = line.sub.replace(" · fee " + grouped(fee), "")
+            line.amount = e.amount ? grouped(e.amount) : ""
             line.sign = line.amount === "" || !landed ? "" : "+"
             return line
         }
     return null
 }
 
+/// One line on a name in My names while its two-step registration is under way,
+/// and the result after the reveal lands or fails.
+export function registerProgressLine(item, clock, result) {
+    if (result && typeof result === "object" && result.text)
+        return String(result.text)
+    if (!item || typeof item !== "object")
+        return ""
+    var at = item.ready_at ? (typeof clock === "function" ? String(clock(Number(item.ready_at))) : "") : ""
+    return at !== "" ? "Step 1 of 2 sent. Finishing at " + at + ". Keep Names open." : "Step 1 of 2 sent. Finishing soon. Keep Names open."
+}
+
+/// Plain note shown beside a never-used public account's address when receiving on it.
+export const FIRST_RECEIVE_KEY_NOTE = "This public account hasn't been used on the chain yet. A first payment needs its receiving key as well as its address."
+
+/// The receiving key (`public_key`) of `account` when it is a never-used public account in
+/// `cliAccounts`, or "" otherwise.
+export function publicReceivingKey(cliAccounts, account, balance, found) {
+    var raw = String(account || "").trim()
+    if (raw === "" || raw.indexOf("Private/") === 0)
+        return ""
+    var full = raw.indexOf("Public/") === 0 ? raw : "Public/" + raw
+    var list = Array.isArray(cliAccounts) ? cliAccounts : []
+    var row = null
+    for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].account === full && list[i].kind !== "private") {
+            row = list[i]
+            break
+        }
+    }
+    if (!row || !row.public_key)
+        return ""
+    var bal = balance !== undefined && balance !== null ? String(balance) : (row.balance !== undefined && row.balance !== null ? String(row.balance) : "")
+    var neverUsed = found === false || (found !== true && (bal === "0" || bal === ""))
+    return neverUsed ? String(row.public_key) : ""
+}
+
+/// Exact decimal subtraction `a - b` for non-negative integer strings without BigInt.
+/// Unlike `subDigits` (null when b > a), returns `"0"` when `a <= b` or either input is not decimal digits.
+export function subDigitsOrZero(a, b) {
+    var x = String(a || "").replace(/^0+(?=\d)/, "")
+    var y = String(b || "").replace(/^0+(?=\d)/, "")
+    if (!/^[0-9]+$/.test(x) || !/^[0-9]+$/.test(y) || !atLeast(x, y))
+        return "0"
+    var i = x.length - 1, j = y.length - 1, borrow = 0, out = []
+    while (i >= 0) {
+        var d = (x.charCodeAt(i) - 48) - (j >= 0 ? y.charCodeAt(j) - 48 : 0) - borrow
+        if (d < 0) { d += 10; borrow = 1 } else { borrow = 0 }
+        out.push(String(d))
+        i -= 1; j -= 1
+    }
+    return out.reverse().join("").replace(/^0+(?=\d)/, "")
+}
+
+/// Checks before committing a public registration whether `balance` holds the deposit plus the
+/// most the reveal's fee can hold while it runs (from `tool.unchecked_max_fee.register` or
+/// `feeQuote.public_transfer.at_most`). Returns `{enough, needed, short, deposit, revealMax, line}`.
+export function registerShortfall(balance, deposit, tool, feeQuote) {
+    var bal = balance !== undefined && balance !== null ? String(balance).trim() : ""
+    var depRaw = deposit && deposit.deposit !== null && deposit.deposit !== undefined ? String(deposit.deposit)
+        : (deposit && deposit.fee !== null && deposit.fee !== undefined ? String(deposit.fee) : "0")
+    var dep = /^[0-9]+$/.test(depRaw) ? depRaw : "0"
+    var toolMax = tool && tool.unchecked_max_fee && tool.unchecked_max_fee.register !== undefined && tool.unchecked_max_fee.register !== null
+        ? String(tool.unchecked_max_fee.register) : ""
+    var quoteMax = feeQuote && feeQuote.public_transfer && feeQuote.public_transfer.at_most !== undefined && feeQuote.public_transfer.at_most !== null
+        ? String(feeQuote.public_transfer.at_most) : ""
+    var revealMax = /^[0-9]+$/.test(toolMax) && !/^0+$/.test(toolMax) ? toolMax
+        : (/^[0-9]+$/.test(quoteMax) && !/^0+$/.test(quoteMax) ? quoteMax : "0")
+    var needed = addDigits(dep, revealMax)
+    if (!/^[0-9]+$/.test(bal))
+        return { enough: true, needed: needed, short: "0", deposit: dep, revealMax: revealMax, line: "" }
+    if (revealMax !== "0") {
+        if (!atLeast(bal, needed)) {
+            var short = subDigitsOrZero(needed, bal)
+            return {
+                enough: false,
+                needed: needed,
+                short: short,
+                deposit: dep,
+                revealMax: revealMax,
+                line: "Not enough to finish: needs " + grouped(short) + " more (holds " + grouped(bal) + ", needs " + grouped(dep) + " for the deposit plus up to " + grouped(revealMax) + " held for the reveal fee). Add funds first."
+            }
+        }
+        return { enough: true, needed: needed, short: "0", deposit: dep, revealMax: revealMax, line: "" }
+    }
+    if (dep !== "0" && !atLeast(bal, addDigits(dep, "1"))) {
+        var minShort = subDigitsOrZero(addDigits(dep, "1"), bal)
+        return {
+            enough: false,
+            needed: addDigits(dep, "1"),
+            short: minShort,
+            deposit: dep,
+            revealMax: "0",
+            line: "Not enough to finish: needs at least " + grouped(minShort) + " more (holds " + grouped(bal) + ", needs " + grouped(dep) + " plus the reveal fee). Add funds first."
+        }
+    }
+    return { enough: true, needed: needed, short: "0", deposit: dep, revealMax: revealMax, line: "" }
+}
+
+/// Plain-words reason and next step for a failed name registration entry (`cliPending` / `myNames`).
+/// Never shows only "didn't register".
+export function failedNameLine(entry) {
+    var e = entry || {}
+    var raw = clean(e.problem || e.state || "")
+        .replace(/^NOT registered\s*:?\s*/i, "")
+        .replace(/^the names CLI failed\s*:?\s*/i, "")
+        .replace(/^Error\s*:?\s*/i, "")
+        .trim()
+    if (/^Not enough to finish:/i.test(raw)) {
+        var cleaned = raw.replace(/[.!?]+$/, "") + "."
+        return /try again|register.*again|add funds/i.test(cleaned) ? cleaned : cleaned + " Add funds and register it again."
+    }
+    var heldFeeMatch = /holds\s+([0-9,]+)[^0-9]+takes\s+([0-9,]+)[^0-9]+about\s+([0-9,]+)\s+more/i.exec(raw)
+    if (heldFeeMatch) {
+        var h0 = heldFeeMatch[1].replace(/,/g, "")
+        var t0 = heldFeeMatch[2].replace(/,/g, "")
+        var f0 = heldFeeMatch[3].replace(/,/g, "")
+        if (/^[0-9]+$/.test(h0) && /^[0-9]+$/.test(t0) && /^[0-9]+$/.test(f0)) {
+            var totalNeed = addDigits(t0, f0)
+            if (!atLeast(h0, totalNeed))
+                return "Not enough to finish: needs about " + grouped(subDigitsOrZero(totalNeed, h0)) + " more. Add funds and register it again."
+        }
+        return "Not enough funds to finish. Add funds and register it again."
+    }
+    var shortMatch = /holds\s+([0-9,]+)[^0-9]+(?:takes|needs|less than)\s+([0-9,]+)/i.exec(raw)
+    if (shortMatch) {
+        var held = shortMatch[1].replace(/,/g, "")
+        var req = shortMatch[2].replace(/,/g, "")
+        if (/^[0-9]+$/.test(held) && /^[0-9]+$/.test(req) && !atLeast(held, req)) {
+            return "Not enough to finish: needs " + grouped(subDigitsOrZero(req, held)) + " more. Add funds and register it again."
+        }
+        return "Not enough funds to finish. Add funds and register it again."
+    }
+    if (/not enough|insufficient|no funds|balance/i.test(raw))
+        return "Not enough funds to finish. Add funds and register it again."
+    if (/already registered/i.test(raw))
+        return "Already registered to someone else. Pick another name."
+    if (/expired|window|too old/i.test(raw))
+        return "The 24-hour window passed before it finished. Register it again."
+    if (raw !== "") {
+        var first = raw.charAt(0).toUpperCase() + raw.slice(1).replace(/[.!?]+$/, "") + "."
+        return first + " Open it to register again."
+    }
+    return "Registration stopped before it finished. Open it to try again."
+}
+
+/// About how many cycles each kind of registry call runs on LEZ 0.4, as measured on 24 Nov
+/// (a register is both steps: the commit, 23,214, and the reveal, 177,257).
+export const CALL_CYCLES = { register: 200500, commit: 23300, deed: 153600, transfer: 52000, change: 52000, release: 52000 }
+
+/// Fee estimate line shown before a button that sends (never says "free"): the chain's base
+/// fee now times what the call runs (`CALL_CYCLES`), for a public call; a private one uses the
+/// quote's private estimate. The tool's `unchecked_max_fee` is a safety cap, not a fee, and is
+/// never shown as one (24 Nov: "Fee: at most 38,080,000" for a ~1.6M registration).
+export function actionFeeNote(feeQuote, tool, kind, fromPrivate) {
+    var k = String(kind || "change")
+    if (fromPrivate) {
+        var est = feeQuote ? feeQuote.private_transfer : null
+        var about = est && est.about !== null && est.about !== undefined ? String(est.about) : ""
+        return /^[0-9]+$/.test(about) ? "Network fee: about " + grouped(about) + "." : "Plus a network fee."
+    }
+    var base = feeQuote ? Number(feeQuote.base_fee_exec) : NaN
+    var cycles = CALL_CYCLES[k] || CALL_CYCLES.change
+    if (base > 0 && isFinite(base))
+        return "Network fee: about " + grouped(String(Math.ceil(cycles * base / 1000) * 1000)) + (k === "register" ? ", for both steps." : ".")
+    return "Plus a network fee."
+}
+
 /// The entries that involve `who` (a LEZ account, a node key or a name): as payer, payee,
 /// name, or an account a claim credited.
+/// The activity list with one arrival told once: the zone's watcher and the bridge test
+/// network's watcher can each record the same credit to the same account (a "lez" entry in
+/// zone bridge-0.4 and a "lez-0.4" one). The bridge-network copy is dropped when the zone's
+/// entry has the same account and amount within 10 minutes (activity-arrival-told-twice).
+export function activityDeduped(rows) {
+    var list = Array.isArray(rows) ? rows : []
+    var secs = function(at) { var n = Number(at); return n > 1e12 ? n / 1000 : n }
+    return list.filter(function(e) {
+        if (!e || e.kind !== "arrived" || e.chain !== "lez-0.4" || !e.amount) return true
+        return !list.some(function(o) {
+            return o !== e && o && o.kind === "arrived" && o.chain === "lez" && o.to === e.to
+                && String(o.amount) === String(e.amount) && (!o.zone || !e.network || o.zone === e.network)
+                && Math.abs(secs(o.at) - secs(e.at)) <= 600
+        })
+    })
+}
+
 export function activityFor(rows, who, zone) {
     var list = Array.isArray(rows) ? rows : []
     // The same keys make the same LEZ account ID on every zone, and what it holds there
@@ -1344,6 +1577,23 @@ export function askAgainAfter(message, busy, noAnswer) {
     return message === busy || message === noAnswer
 }
 
+/// Why a registration stopped, in plain words, from the reason the names tool recorded
+/// (`failed` in `names mine`): a short account says how much more it needs.
+export function registerFailedLine(reason) {
+    var why = String(reason || "").trim()
+    var short = /holds ([0-9]+); this takes ([0-9]+), and about ([0-9]+) more is held/.exec(why)
+    if (short) {
+        var more = Number(short[2]) + Number(short[3]) - Number(short[1])
+        if (more > 0)
+            return "Not enough to finish: needs about " + grouped(String(more)) + " more. Add funds, then press Register on it again."
+    }
+    if (why === "")
+        return "Didn't register. Press Register on it to try again."
+    why = why.split("\n")[0].replace(/^Error: */, "")
+    if (why.length > 160) why = why.slice(0, 157) + "…"
+    return "Didn't register: " + why + (/[.!?]$/.test(why) ? "" : ".") + " Press Register on it to try again."
+}
+
 /// A registration under way as a line: when its reveal goes out and by when it must have.
 /// `clock` turns milliseconds into a time of day.
 export function revealLine(item, now, clock) {
@@ -1357,8 +1607,8 @@ export function revealLine(item, now, clock) {
         line += "the reveal is due now and goes out while Names is open"
     if (item.reveal_by) {
         var left = Math.max(0, Math.floor((item.reveal_by - now) / 60000))
-        line += left > 120 ? "; it can still be sent for " + Math.floor(left / 60) + " h"
-                           : "; it must be sent by " + clock(item.reveal_by) + " (" + left + " min left)"
+        line += left > 120 ? ". If Names is closed, you can finish until " + clock(item.reveal_by) + (new Date(item.reveal_by).getDate() !== new Date(now).getDate() ? " tomorrow" : "") + "; after that, start again"
+                           : ". It must be finished by " + clock(item.reveal_by) + " (" + left + " min left); after that, start again"
     }
     return line + "."
 }

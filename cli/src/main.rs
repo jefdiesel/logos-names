@@ -1722,11 +1722,18 @@ impl Client {
                 let steps = self.registration_steps(name, owner, fee, deposit, public).await?;
                 let job = if public { format!("registering {name}{NAME_SUFFIX} and making it public") } else { format!("registering {name}{NAME_SUFFIX}") };
                 self.plan_private(&job, &steps).await?;
-            } else if fee > 0 {
+            } else {
+                // A public registration pays two fees besides the deposit: the commit's now and
+                // the reveal's 15 minutes on, whose reserve the sequencer holds while it runs. All
+                // are checked before the commit, so a short account sends nothing and waits for
+                // nothing (register-commits-without-enough-to-finish, 24 Nov: a commit went out,
+                // and after the wait its reveal was refused for 1,232,322 more).
                 let have = self.spendable(owner).await?;
-                if have < fee {
+                let need = registration_need(&self.wallet.client().get_fee_state().await?, fee);
+                if have < need {
+                    let more = need - have;
                     bail!(
-                        "{owner} holds {have}, less than the {fee} that registering {name}{NAME_SUFFIX} takes; add funds to it first"
+                        "Not enough to register {name}{NAME_SUFFIX}: it needs about {need} ({fee} deposit or fee, plus the two steps' network fees) and {owner} holds {have}. Add about {more} first; nothing was sent"
                     );
                 }
             }
@@ -3474,6 +3481,16 @@ fn image_bytes(id: lee_core::program::ProgramId) -> [u8; 32] {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     bytes
+}
+
+/// What a public registration needs in the paying account before its commit: the deposit
+/// or fee `fee`, plus the most the commit's and the reveal's network fees can hold. The
+/// reveal's cycles are priced a fifth above [`REVEAL_CYCLES`] (one ran 177,257 on 24 Nov).
+fn registration_need(quote: &sequencer_service_rpc::FeeStateQuote, fee: u128) -> u128 {
+    let commit = fees::public(quote, COMMIT_CYCLES, gas_limit_for(COMMIT_CYCLES), 512).at_most;
+    let reveal_cycles = REVEAL_CYCLES.saturating_add(REVEAL_CYCLES / 5);
+    let reveal = fees::public(quote, reveal_cycles, gas_limit_for(reveal_cycles), 512).at_most;
+    fee.saturating_add(commit).saturating_add(reveal)
 }
 
 /// A commitment's cycles (see [`call_cycles`]).
@@ -5653,5 +5670,37 @@ mod address_tests {
         let mut private = Profile { name: "anon".to_owned(), ..Profile::default() };
         assert!(!complete_account(&mut private, holder, true));
         assert_eq!(private.account, None, "a private holder is never published");
+    }
+}
+
+#[cfg(test)]
+mod registration_need_tests {
+    use super::registration_need;
+
+    fn quote(exec: u64, stor: u64) -> sequencer_service_rpc::FeeStateQuote {
+        sequencer_service_rpc::FeeStateQuote {
+            height: 7,
+            base_fee_exec: exec,
+            base_fee_stor: stor,
+            next_base_fee_exec_floor: exec,
+            next_base_fee_exec_ceiling: exec + 1,
+            next_base_fee_stor_floor: stor,
+            next_base_fee_stor_ceiling: stor + 1,
+            max_gas_exec: fee_core::market::MAX_GAS_EXEC,
+            max_gas_stor: fee_core::market::MAX_GAS_STOR,
+        }
+    }
+
+    /// 24 Nov: an account of 2,195,104 committed to a name with a 1,000,000 deposit, and after
+    /// the 15 minutes its reveal was refused: it held 2,427,426 for the fee. The check before
+    /// the commit now asks for at least that much, and refuses such an account up front.
+    #[test]
+    fn a_public_registration_needs_the_deposit_and_both_fees_before_its_commit() {
+        let need = registration_need(&quote(8, 8), 1_000_000);
+        assert!(need > 1_000_000 + 2_427_426, "{need}");
+        assert!(need < 5_000_000, "{need}");
+        assert!(2_195_104 < need);
+        // An admin's registration has no deposit, but still pays both fees.
+        assert!(registration_need(&quote(8, 8), 0) > 2_427_426);
     }
 }

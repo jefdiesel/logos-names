@@ -1129,11 +1129,22 @@ pub fn marks(read: &Value) -> Option<Vec<(String, Vec<(String, u128)>, Option<Va
 /// `network` and, for a token, `token`, `symbol` and `decimals`. The first read of an account
 /// on a chain only sets its marks. Returns the entries added.
 pub fn note(dir: &Path, read: &Value) -> Vec<String> {
+    note_with_native(dir, read, true)
+}
+
+/// Like [`note`], with `include_native` controlling whether native LEZ balances are also noted
+/// here. When LEZ 0.4 is already the active home network, `note_lez` owns native LEZ balance
+/// marks and reconciliation, so setting `include_native` to `false` avoids logging the same
+/// native LEZ arrival twice (once under zone Home and once under the bridge test network).
+pub fn note_with_native(dir: &Path, read: &Value, include_native: bool) -> Vec<String> {
     let (Some(marks), Some(at)) = (marks(read), read["read_at"].as_u64()) else {
         return Vec::new();
     };
     let mut added = Vec::new();
     for (scope, rows, about) in marks {
+        if !include_native && about.is_none() {
+            continue;
+        }
         for id in crate::activity::note_network_balances(dir, at, CHAIN, &scope, ZONE, &rows) {
             let mut fields = json!({ "network": ZONE, "network_name": NAME });
             if let Some(about) = &about {

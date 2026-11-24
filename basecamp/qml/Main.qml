@@ -31,6 +31,9 @@ Item {
     property var myNames: []           // [{name, display, owner, expires, never, lapsed}]: names the wallet holds; owner is the wallet account
     property var pendingNames: []      // [{name, display, owner, stage, ready_at, tx}]: registrations still finishing
     property real clockTick: Date.now()  // now, updated every few seconds for elapsed times
+    /// Whether the public account holds the deposit plus both registration fees (Register panel).
+    readonly property var regShortfall: Logic.registerShortfall(
+        wallet.length > fromIndex ? wallet[fromIndex].balance : null, deposit, toolNow, feeQuote)
     property var cliPending: []        // [{name, display, state, registering, failed}]: the CLI's registrations still finishing, or stopped
     property var cliNames: []          // [{name, display, signer: "cli", state, lapsed}]: names the names CLI's wallet holds
     property string cliPath: ""        // the names CLI the module runs, and its wallet folder
@@ -145,6 +148,31 @@ Item {
     // "My names": the LEZ wallet's, then the CLI's, each with the signer that applies. The one
     // list of the names this wallet holds, wherever they are shown (Settings, the Names tab, the
     // "No name yet" card). A name the LEZ wallet holds is held by one of its public accounts.
+    /// Which public account each name this wallet holds is paid at (`resolve`'s `account`), so
+    /// an account row can be titled by its name: {name: "base58 id"}. Each name is looked up once.
+    property var nameAccounts: ({})
+    onAllMineChanged: loadNameAccounts()
+    function loadNameAccounts() {
+        allMine.slice(0, 12).forEach(function(entry) {
+            var name = String(entry.name || "")
+            if (name === "" || nameAccounts[name] !== undefined)
+                return
+            var asked = Object.assign({}, nameAccounts); asked[name] = ""; nameAccounts = asked
+            askLater("resolve", [name], function(found) {
+                var next = Object.assign({}, nameAccounts)
+                next[name] = found && found.account ? String(found.account).replace(/^Public\//, "") : ""
+                nameAccounts = next
+            }, function() {})
+        })
+    }
+    /// The title of a wallet account row: the main name when it is paid there, else another name
+    /// paid there, else `fallback` ("Public account 39Pn…SR1h").
+    function accountNamed(account, fallback) {
+        var id = String(account || "").replace(/^Public\//, "")
+        var named = Object.keys(nameAccounts).filter(function(name) { return id !== "" && nameAccounts[name] === id })
+        if (named.length === 0) return fallback
+        return named.indexOf(mainName) >= 0 ? mainName : named.sort()[0]
+    }
     readonly property var allMine: {
         var all = myNames.map(function(entry) { return Object.assign({ signer: "wallet", "private": false }, entry) })
         for (var i = 0; i < cliNames.length; i++)
@@ -4348,7 +4376,7 @@ Item {
 
     function loadActivity() {
         askLater("activity", [""], function(value) {
-            activityRows = Array.isArray(value) ? value : []
+            activityRows = Logic.activityDeduped(Array.isArray(value) ? value : [])
         }, function(message) {
             console.log("names_ui: activity:", message)
         }, 30000)
@@ -5445,6 +5473,14 @@ Item {
             var before = pendingNames
             myNames = value.names
             pendingNames = value.pending ? value.pending : []
+            before.forEach(function(p) {
+                if (pendingNames.some(function(q) { return q.name === p.name }))
+                    return
+                if (myNames.some(function(n) { return n.name === p.name }))
+                    setRegisterResult(p.name, p.name + " is yours.", "done")
+                else if (!registerResults[p.name])
+                    setRegisterResult(p.name, p.name + ": registration didn't land; register it again.", "problem")
+            })
             // LEZ 0.4: a registration that was under way and is now a name of this wallet with no
             // public account gets its holder account published (the default; the person unticks
             // it on Register). The reveal answers "revealed", never "registered": the name shows
@@ -5498,6 +5534,7 @@ Item {
             askLater("reveal_name", [item.name, item.owner, root.namesNet === "0.4" ? "" : "auto"], function(value) {
                 revealing = false
                 if (value && value.stage === "registered") {
+                    setRegisterResult(item.name, item.name + " is yours.", "done")
                     say(item.name + " is yours.", false)
                     if (root.namesNet === "0.4" && !root.addressRepair)
                         publishAfterRegister(item.name, item.owner)
@@ -5515,6 +5552,7 @@ Item {
                     var refused = revealRefused
                     refused[item.name] = Date.now() + Logic.REVEAL_REFUSED_RETRY_MS
                     revealRefused = refused
+                    setRegisterResult(item.name, Logic.failedNameLine({ name: item.name, problem: message }), "problem")
                 }
                 // Read the registrations again: a failed ask never drops one.
                 loadMine()
@@ -5522,6 +5560,13 @@ Item {
         }
     }
     property real revealAskedAt: 0
+    property var registerResults: ({})   // name → { text, kind } after reveal lands or fails
+    property string walletTab: "assets"  // Wallet home tabs on LEZ 0.4: assets | bridge | watch | accounts
+    function setRegisterResult(name, text, kind) {
+        var next = Object.assign({}, registerResults)
+        next[name] = { text: text, kind: kind }
+        registerResults = next
+    }
 
     // ── A name is an address (Jef, 2026-11-21): no step to publish it ──────
     /// The module seals the holder's account and this installation's chat address into every
@@ -6079,7 +6124,7 @@ Item {
     /// A short line for a registration under way, from what the CLI says.
     function pendingLine(entry) {
         if (entry.failed)
-            return "Stopped. Open it to try again"
+            return Logic.failedNameLine(entry)
         var minutes = /about (\d+) minutes/.exec(entry.state)
         if (/finishing now/.test(entry.state))
             return "Step 3 of 3 · usually 5–12 min"
@@ -7946,7 +7991,7 @@ Item {
     onDeedsOnViewChanged: if (deedsOnView) loadDeeds()
     onMineKeyChanged: if (deedsOnView) loadDeeds()
 
-    /// "Claim NFT (free)": the name's card, claimed by its holder (a job of the names tool).
+    /// "Claim NFT": the name's card, claimed by its holder (a job of the names tool).
     function claimDeed(name) {
         if (boardJob !== null)
             return
@@ -11994,7 +12039,7 @@ Item {
                 StatusLine { visible: root.namesNet !== "0.4"; kind: ""; text: "Collectibles work on LEZ 0.4. Switch to it in Settings → Network to see them." }
                 // LNS name cards: each name held whose NFT was claimed, drawn here with its name.
                 Part { visible: root.namesNet === "0.4"; text: "LNS name cards" }
-                Hint { visible: root.namesNet === "0.4" && root.deededNames.length === 0; text: "None yet. Each name you hold of 5 to 32 characters can have one, free: Names → My names → Claim NFT (free)." }
+                Hint { visible: root.namesNet === "0.4" && root.deededNames.length === 0; text: "None yet. Each name you hold of 5 to 32 characters can have one: Names → My names → Claim NFT. No price, but you pay the network fee." }
                 Flow {
                     visible: root.namesNet === "0.4" && root.deededNames.length > 0
                     Layout.fillWidth: true
@@ -13090,38 +13135,55 @@ Item {
                         kind: "problem"
                         text: root.cliStatus !== null && root.cliStatus.unavailable ? root.sentence(root.cliStatus.unavailable) : ""
                     }
+
                     // A wallet with no name yet: a name is offered, never required (the bridge needs none).
                     Card {
-                        visible: root.cliKnown && root.allMine.length === 0 && root.cliPending.length === 0 && !root.nameCardAway && root.zoneHome
+                        visible: root.cliKnown && root.allMine.length === 0 && root.cliPending.length === 0 && root.pendingNames.length === 0 && !root.nameCardAway && root.zoneHome
                         Layout.fillWidth: true
-                        Part { Layout.topMargin: 0; text: "No name yet" }
-                        Hint { text: "A name lets people pay and message you by it. You don't need one to hold, send or bridge tokens." }
                         RowLayout {
-                            spacing: 14
-                            Action { label: "Pick a name"; strong: true; onPressed: root.openWallet("names") }
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Hint { Layout.fillWidth: true; color: root.ink; text: "No name yet. A name lets people pay and message you by it; you don't need one to hold, send or bridge tokens." }
+                            Action { label: "Pick a name"; onPressed: root.openWallet("names") }
                             Link { text: "Not now"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.nameCardAway = true }
                         }
                     }
 
-                    // ── LEZ 0.4, the bridge test network: balances, and claiming a deposit ──
+                    // ── LEZ 0.4, the bridge test network: tabs for Assets, Bridge, Watch, Accounts ──
+                    Flow {
+                        visible: root.walletNet === "0.4"
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Tab { label: "Assets"; current: root.walletTab === "assets"; onPressed: root.walletTab = "assets" }
+                        Tab { label: "Bridge"; current: root.walletTab === "bridge"; onPressed: root.walletTab = "bridge" }
+                        Tab { label: "Watch"; current: root.walletTab === "watch"; onPressed: root.walletTab = "watch" }
+                        Tab { label: "Accounts"; current: root.walletTab === "accounts"; onPressed: root.walletTab = "accounts" }
+                    }
+
                     Card {
                         visible: root.walletNet === "0.4"
                         Layout.fillWidth: true
-                        RowLayout {
+                        // ── Bridge tab header & actions ──
+                        ColumnLayout {
+                            visible: root.walletTab === "bridge"
                             Layout.fillWidth: true
                             spacing: 10
-                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: "Bridge test network"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
-                            Text { textFormat: Text.PlainText; text: "LEZ 0.4"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
-                        }
-                        Hint { font.pixelSize: root.px(15); text: "Our own chain for the bridge, where bridged Sepolia tokens arrive. It is reset now and then." }
-                        // The card's one yellow button: Receive, unless a receive has arrived (its
-                        // Claim is then the one) or the bridge setup blocks everything.
-                        Flow {
-                            Layout.fillWidth: true
-                            spacing: 10
-                            Action { label: "Receive from Ethereum"; strong: !root.cardSetupBlocks && !arrivingPanel.anyClaim; onPressed: root.openEthReceive() }
-                            Action { label: "Claim a bridge deposit"; onPressed: root.openClaim() }
-                            Action { label: "Bridge to Ethereum"; onPressed: root.openSendBack("", null) }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: "Bridge test network"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Text { textFormat: Text.PlainText; text: "LEZ 0.4"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                            }
+                            Hint { font.pixelSize: root.px(15); text: "Our own chain for the bridge, where bridged Sepolia tokens arrive. It is reset now and then." }
+                            // The card's one yellow button: Receive, unless a receive has arrived (its
+                            // Claim is then the one) or the bridge setup blocks everything.
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Action { label: "Receive from Ethereum"; strong: !root.cardSetupBlocks && !arrivingPanel.anyClaim; onPressed: root.openEthReceive() }
+                                Action { label: "Claim a bridge deposit"; onPressed: root.openClaim() }
+                                Action { label: "Bridge to Ethereum"; onPressed: root.openSendBack("", null) }
+                            }
                         }
                         // Arriving from Ethereum: this wallet's receives in their own panel, in the
                         // third tone; amount large, the account short, the state under it; Claim
@@ -13135,7 +13197,7 @@ Item {
                             readonly property var view: ({ rows: root.olderOpen ? split.rows.concat(split.older) : split.rows, hidden: full.hidden })
                             readonly property var headRows: split.rows.concat(split.older)   // what the folded header counts
                             readonly property bool anyClaim: view.rows.some(function(x) { return x.progress.claim })
-                            visible: view.rows.length > 0 || view.hidden > 0 || split.older.length > 0
+                            visible: root.walletTab === "bridge" && (view.rows.length > 0 || view.hidden > 0 || split.older.length > 0)
                             // Folds to its header, which still says how many and any Claim ready.
                             PanelHead {
                                 title: "Arriving from Ethereum"
@@ -13216,7 +13278,7 @@ Item {
                         // Each row can be hidden from the card (Hide; kept across restarts), and one the
                         // bridge says can't be finished says why in one line.
                         UnderwayPanel {
-                            visible: root.sbCard.rows.length > 0 || root.sbSplit.older.length > 0
+                            visible: root.walletTab === "bridge" && (root.sbCard.rows.length > 0 || root.sbSplit.older.length > 0)
                             PanelHead {
                                 title: "Bridging to Ethereum"
                                 folded: root.foldBridging
@@ -13278,42 +13340,42 @@ Item {
                         }
                         // Withdrawals hidden from the card: how many, and Show to see them again.
                         RowLayout {
-                            visible: root.sbCard.hidden > 0
+                            visible: root.walletTab === "bridge" && root.sbCard.hidden > 0
                             Layout.fillWidth: true
                             spacing: 12
                             Hint { font.pixelSize: root.px(15); text: Tidy.hiddenLine(root.sbCard.hidden) }
                             Link { text: root.sbShowHidden ? "Hide them again" : "Show them"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.sbShowHidden = !root.sbShowHidden }
                         }
                         // What Hide did: at once, then whether it was kept.
-                        StatusLine { visible: root.sbHideLine !== ""; kind: root.sbHideKind; text: root.sbHideLine }
+                        StatusLine { visible: root.walletTab === "bridge" && root.sbHideLine !== ""; kind: root.sbHideKind; text: root.sbHideLine }
                         // What Remove checked, and whether it removed: stays after the row (or the panel) is gone.
-                        StatusLine { visible: root.bridgeRemoveLine !== ""; kind: root.bridgeRemoveKind; text: root.bridgeRemoveLine }
-                        BridgeSetupBox { visible: root.walletView === "home" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
+                        StatusLine { visible: root.walletTab === "bridge" && root.bridgeRemoveLine !== ""; kind: root.bridgeRemoveKind; text: root.bridgeRemoveLine }
+                        BridgeSetupBox { visible: root.walletView === "home" && root.walletTab === "bridge" && root.bridgeSetup.state !== ""; primary: root.cardSetupBlocks }
                         StatusLine {
-                            visible: root.bridgeNetStatusNow.tone === "bad" || root.bridgeNetStatusNow.tone === "warn"
+                            visible: root.walletTab === "assets" && (root.bridgeNetStatusNow.tone === "bad" || root.bridgeNetStatusNow.tone === "warn")
                             kind: root.bridgeNetStatusNow.tone === "bad" ? "problem" : "waiting"
                             text: root.bridgeNetProblem !== "" ? root.bridgeNetProblem : root.bridgeNetStatusNow.line
                         }
                         Hint {
-                            visible: !(root.bridgeNetStatusNow.tone === "bad" || root.bridgeNetStatusNow.tone === "warn")
+                            visible: root.walletTab === "assets" && !(root.bridgeNetStatusNow.tone === "bad" || root.bridgeNetStatusNow.tone === "warn")
                             font.pixelSize: root.px(15)
                             text: root.bridgeNetProblem !== "" ? root.bridgeNetProblem : root.bridgeNetStatusNow.line
                         }
-                        Hint { visible: root.bridgeNetStatusNow.reset !== ""; font.pixelSize: root.px(15); color: root.ink; text: root.bridgeNetStatusNow.reset }
+                        Hint { visible: root.walletTab === "assets" && root.bridgeNetStatusNow.reset !== ""; font.pixelSize: root.px(15); color: root.ink; text: root.bridgeNetStatusNow.reset }
                         Hint {
-                            visible: root.bridgeNet !== null && root.bridgeNet.read && root.bridgeNet.read.token_problem
+                            visible: root.walletTab === "assets" && root.bridgeNet !== null && root.bridgeNet.read && root.bridgeNet.read.token_problem
                             font.pixelSize: root.px(15)
                             color: root.ink
                             text: root.bridgeNet !== null && root.bridgeNet.read && root.bridgeNet.read.token_problem ? "Can't read the bridge's token list, so bridged tokens aren't shown." : ""
                         }
                         Hint {
-                            visible: root.bridgeNetAccounts.length === 0
+                            visible: root.walletTab === "assets" && root.bridgeNetAccounts.length === 0
                             font.pixelSize: root.px(15)
                             text: root.cliBalance === undefined ? "Reading your accounts…" : "Your wallet has no public account to check here."
                         }
                         // One block per public account: native LEZ, then each bridged token.
                         Repeater {
-                            model: root.bridgeNetView.shown
+                            model: root.walletTab === "assets" ? root.bridgeNetView.shown : []
                             ColumnLayout {
                                 id: netAccount
                                 required property var modelData
@@ -13324,7 +13386,7 @@ Item {
                                     Layout.fillWidth: true
                                     Layout.topMargin: 4
                                     spacing: 14
-                                    Text { Layout.fillWidth: true; text: netAccount.modelData.title; textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); font.weight: Font.DemiBold }
+                                    Text { Layout.fillWidth: true; text: netAccount.modelData.watched || netAccount.modelData.viewOnly ? netAccount.modelData.title : root.accountNamed(netAccount.modelData.account, netAccount.modelData.title); textFormat: Text.PlainText; color: root.ink; font.family: root.sans; font.pixelSize: root.px(17); font.weight: Font.DemiBold }
                                     Link { visible: netAccount.modelData.watched; text: "Stop watching"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.bridgeNetWatch(netAccount.modelData.account, false) }
                                     // A LEZ 0.3 account the 0.4 wallet can't sign for has no Copy.
                                     Link { visible: netAccount.modelData.copyable !== false; text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(netAccount.modelData.account, "The account ID") }
@@ -13383,10 +13445,10 @@ Item {
                             }
                         }
                         // The faucet closed for now: its reason, once.
-                        StatusLine { visible: root.faucetInfo !== null && root.faucetInfo.available === false; kind: "waiting"; text: root.faucetInfo !== null && root.faucetInfo.reason ? "Test LEZ: " + String(root.faucetInfo.reason) : "The test LEZ faucet is closed just now." }
+                        StatusLine { visible: root.walletTab === "assets" && root.faucetInfo !== null && root.faucetInfo.available === false; kind: "waiting"; text: root.faucetInfo !== null && root.faucetInfo.reason ? "Test LEZ: " + String(root.faucetInfo.reason) : "The test LEZ faucet is closed just now." }
                         // The wallet's accounts this network has never seen, in one line.
                         RowLayout {
-                            visible: root.bridgeNetView.empty > 0 || root.bridgeNetShowEmpty
+                            visible: (root.walletTab === "assets" || root.walletTab === "accounts") && (root.bridgeNetView.empty > 0 || root.bridgeNetShowEmpty)
                             Layout.fillWidth: true
                             spacing: 12
                             Hint {
@@ -13396,37 +13458,71 @@ Item {
                             Link { text: root.bridgeNetShowEmpty ? "Hide empty accounts" : "Show them"; color: root.dim; font.pixelSize: root.px(15); onPressed: root.bridgeNetShowEmpty = !root.bridgeNetShowEmpty }
                         }
                         Hint {
-                            visible: root.bridgeNet !== null && root.bridgeNet.not_read > 0
+                            visible: (root.walletTab === "assets" || root.walletTab === "accounts") && root.bridgeNet !== null && root.bridgeNet.not_read > 0
                             font.pixelSize: root.px(14)
                             text: root.bridgeNet !== null && root.bridgeNet.not_read > 0 ? root.bridgeNet.not_read + (root.bridgeNet.not_read === 1 ? " more account wasn't" : " more accounts weren't") + " read: at most 24 are read here." : ""
                         }
-                        Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: root.line }
-                        // Any public account can be watched here, the wallet's or not.
-                        RowLayout {
+                        // Watch tab: watch any public account, the wallet's or not.
+                        ColumnLayout {
+                            visible: root.walletTab === "watch"
                             Layout.fillWidth: true
                             spacing: 10
-                            Field { id: bridgeNetWatchField; Layout.fillWidth: true; size: 15; code: true; hint: "Watch a public account: paste its ID"; onAccepted: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
-                            Action { label: "Watch"; onPressed: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
+                            Part { Layout.topMargin: 0; text: "Watch a public account" }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Field { id: bridgeNetWatchField; Layout.fillWidth: true; size: 15; code: true; hint: "Watch a public account: paste its ID"; onAccepted: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
+                                Action { label: "Watch"; onPressed: root.bridgeNetWatch(bridgeNetWatchField.text, true) }
+                            }
+                            StatusLine { visible: root.bridgeNetWatchProblem !== ""; kind: Logic.noticeKind(root.bridgeNetWatchProblem, true); text: root.bridgeNetWatchProblem }
+                            Repeater {
+                                model: root.bridgeNetView.shown.filter(function(a) { return !!a.watched })
+                                RowLayout {
+                                    id: watchedRow
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: watchedRow.modelData.title; color: root.ink; font.family: root.sans; font.pixelSize: root.px(16) }
+                                    Link { text: "Stop watching"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.bridgeNetWatch(watchedRow.modelData.account, false) }
+                                }
+                            }
                         }
-                        StatusLine { visible: root.bridgeNetWatchProblem !== ""; kind: Logic.noticeKind(root.bridgeNetWatchProblem, true); text: root.bridgeNetWatchProblem }
-                        Hint { font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
-                        Hint { font.pixelSize: root.px(14); text: root.moveCan ? "Move beside a wrapped token sends it to another account here. Sending test LEZ isn't in the wallet yet." : "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
+                        // Accounts tab: this wallet's accounts with Copy and quick link to Settings.
+                        ColumnLayout {
+                            visible: root.walletTab === "accounts"
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Part { Layout.topMargin: 0; text: "Your accounts" }
+                            Repeater {
+                                model: root.cliAccounts || []
+                                ColumnLayout {
+                                    id: walletAcctRow
+                                    required property var modelData
+                                    readonly property bool isPriv: modelData.kind === "private"
+                                    readonly property string recvKey: isPriv ? "" : Logic.publicReceivingKey(root.cliAccounts, modelData.account, modelData.balance)
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: (walletAcctRow.modelData.label ? walletAcctRow.modelData.label + " · " : "") + walletAcctRow.modelData.account; color: root.ink; font.family: root.mono; font.pixelSize: root.px(14); elide: Text.ElideMiddle }
+                                        Link { visible: !walletAcctRow.isPriv; text: "Copy"; color: root.dim; font.pixelSize: root.px(14); onPressed: root.copy(walletAcctRow.modelData.account, "The account ID") }
+                                    }
+                                    RowLayout {
+                                        visible: walletAcctRow.recvKey !== ""
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        Hint { Layout.fillWidth: true; font.pixelSize: root.px(13); text: Logic.FIRST_RECEIVE_KEY_NOTE }
+                                        Link { text: "Copy key"; font.pixelSize: root.px(13); onPressed: root.copy(walletAcctRow.recvKey, "Receiving key") }
+                                    }
+                                }
+                            }
+                            Link { text: "Manage accounts in Settings ›"; color: root.dim; font.pixelSize: root.px(15); onPressed: { root.go("settings"); root.loadAccounts() } }
+                        }
+                        Hint { visible: root.walletTab === "assets" || root.walletTab === "accounts"; font.pixelSize: root.px(14); text: "Private balances on the bridge test network are not shown yet." }
+                        Hint { visible: root.walletTab === "assets"; font.pixelSize: root.px(14); text: root.moveCan ? "Move beside a wrapped token sends it to another account here. Sending test LEZ isn't in the wallet yet." : "Sending on the bridge test network isn't in the wallet yet, apart from paying a name and bridging to Ethereum." }
                     }
                     // What runs on LEZ 0.3 only, unavailable while LEZ 0.4 is shown.
-                    ColumnLayout {
-                        visible: root.walletNet === "0.4"
-                        Layout.fillWidth: true
-                        spacing: 8
-                        RowLayout {
-                            spacing: 10
-                            Action { label: "LNS names"; onPressed: root.walletView = "names" }
-                            Action { label: "Send"; enabledNow: false }
-                            Action { label: "Receive"; enabledNow: false }
-                            Action { label: "Add a token"; enabledNow: false }
-                        }
-                        RunsOn { net: "0.4"; prefix: "LNS names run on" }
-                        Hint { font.pixelSize: root.px(15); text: "Send, Receive and Add a token run on LEZ 0.3 only, the public Logos testnet. Switch to LEZ 0.3 in Settings → Network to use them. A name can be paid on LEZ 0.4 from its page (Pay)." }
-                    }
 
                     // Which zone the LEZ balances below are on, once there is more than one.
                     RowLayout {
@@ -14025,6 +14121,8 @@ Item {
                         }
                     }
                     Card {
+                        id: receivePublicCard
+                        readonly property string receivingKey: root.cliPublic !== null ? Logic.publicReceivingKey(root.cliAccounts, root.cliPublic.account, root.cliPublic.balance) : ""
                         visible: root.receiveKind !== "chain" && root.cliPublic !== null
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "Your public account" }
@@ -14038,6 +14136,22 @@ Item {
                             wrapMode: Text.WrapAnywhere
                         }
                         Link { text: "Copy"; onPressed: root.copy("Public/" + root.cliPublic.account, "Your public account") }
+                        ColumnLayout {
+                            visible: receivePublicCard.receivingKey !== ""
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Hint { font.pixelSize: root.px(15); color: root.ink; text: Logic.FIRST_RECEIVE_KEY_NOTE }
+                            Text {
+                                textFormat: Text.PlainText
+                                Layout.fillWidth: true
+                                text: receivePublicCard.receivingKey
+                                color: root.ink
+                                font.family: root.mono
+                                font.pixelSize: root.px(14)
+                                wrapMode: Text.WrapAnywhere
+                            }
+                            Link { text: "Copy receiving key"; onPressed: root.copy(receivePublicCard.receivingKey, "Receiving key") }
+                        }
                         Hint { font.pixelSize: root.px(15); text: "For apps, exchanges and the bridge. Anyone can see what it receives." }
                     }
 
@@ -14263,17 +14377,6 @@ Item {
                     spacing: 14
                     PageHeader { title: "Names"; onBack: root.walletView = "home" }
                     RunsOn {}
-                    // Public registrations under way: when each reveal goes out, and by when it must.
-                    Repeater {
-                        model: root.pendingNames
-                        Hint {
-                            required property var modelData
-                            Layout.fillWidth: true
-                            color: root.waitTone
-                            font.pixelSize: root.px(16)
-                            text: root.revealRefused[modelData.name] ? modelData.name + ": this registration didn't land; register it again." : Logic.revealLine(modelData, Math.max(root.clockTick, Date.now()), root.clock)
-                        }
-                    }
                     Hint { text: "Your wallet can hold many names. Names held privately can't be linked to each other on chain; a name held publicly shows its holder. Each name is paid into its own private account unless it publishes a public one." }
                     // On another zone the names are still listed, and changed only on Home.
                     Card {
@@ -14296,7 +14399,7 @@ Item {
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "My names" }
                         Hint { visible: root.namesNote !== ""; color: root.ink; text: root.namesNote }
-                        Hint { visible: root.allMine.length === 0 && root.cliPending.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
+                        Hint { visible: root.allMine.length === 0 && root.cliPending.length === 0 && root.pendingNames.length === 0; text: root.cliKnown ? "None yet." : "Reading your names…" }
                         Repeater {
                             model: root.allMine
                             ColumnLayout {
@@ -14332,6 +14435,11 @@ Item {
                                 Link { text: "Copy"; font.pixelSize: root.px(15); onPressed: root.copy(myName.modelData.name, "Your name") }
                                 Link { text: "Transfer…"; font.pixelSize: root.px(15); onPressed: root.openTransfer(myName.modelData.name) }
                             }
+                                StatusLine {
+                                    visible: !!(root.registerResults[myName.modelData.name])
+                                    kind: root.registerResults[myName.modelData.name] ? root.registerResults[myName.modelData.name].kind : "done"
+                                    text: root.registerResults[myName.modelData.name] ? root.registerResults[myName.modelData.name].text : ""
+                                }
                                 // Its NFT (LNS deeds, LEZ 0.4): the card when it has one; a free claim when
                                 // it is of the normal tier and has none.
                                 RowLayout {
@@ -14343,11 +14451,11 @@ Item {
                                     Link { visible: !!parent.deedInfo.deed; text: "See it in Collectibles"; font.pixelSize: root.px(15); onPressed: root.openCollectibles() }
                                     Action {
                                         visible: !parent.deedInfo.deed
-                                        label: root.deedClaiming(myName.modelData.name) ? "Claiming…" : "Claim NFT (free)"
+                                        label: root.deedClaiming(myName.modelData.name) ? "Claiming…" : "Claim NFT"
                                         enabledNow: root.boardJob === null
                                         onPressed: root.claimDeed(myName.modelData.name)
                                     }
-                                    Hint { visible: !parent.deedInfo.deed; Layout.fillWidth: true; font.pixelSize: root.px(14); text: root.deedClaiming(myName.modelData.name) ? "Claiming its NFT card on LEZ 0.4: about a minute. Only gas is paid." : "A card with your name on it. Free: only gas." }
+                                    Hint { visible: !parent.deedInfo.deed; Layout.fillWidth: true; font.pixelSize: root.px(14); text: root.deedClaiming(myName.modelData.name) ? "Claiming its NFT card on LEZ 0.4: about a minute. " + Logic.actionFeeNote(root.feeQuote, root.toolNow, "deed", false) : "A card with your name on it. " + Logic.actionFeeNote(root.feeQuote, root.toolNow, "deed", false) }
                                 }
                                 // A tier read that failed or never finished: one plain line, never a blank.
                                 StatusLine {
@@ -14360,13 +14468,68 @@ Item {
                                 StatusLine { visible: root.notice !== "" && root.noticeAt === "publish:" + myName.modelData.name; kind: root.noticeKind; text: root.notice }
                             }
                         }
+                        // Public registrations under way: visible right in My names until the reveal lands.
+                        Repeater {
+                            model: root.pendingNames
+                            ColumnLayout {
+                                id: pendingNameRow
+                                required property var modelData
+                                readonly property var res: root.registerResults[pendingNameRow.modelData.name] || null
+                                Layout.fillWidth: true
+                                spacing: 4
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { textFormat: Text.PlainText; text: pendingNameRow.modelData.name; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
+                                    Text { textFormat: Text.PlainText; text: "Public"; color: root.dim; font.family: root.sans; font.pixelSize: root.px(14) }
+                                }
+                                StatusLine {
+                                    kind: root.revealRefused[pendingNameRow.modelData.name] ? "problem" : pendingNameRow.res !== null ? pendingNameRow.res.kind : "waiting"
+                                    text: root.revealRefused[pendingNameRow.modelData.name]
+                                        ? (pendingNameRow.res !== null ? pendingNameRow.res.text : pendingNameRow.modelData.name + ": this registration didn't land; register it again.")
+                                        : Logic.registerProgressLine(pendingNameRow.modelData, root.clock, pendingNameRow.res)
+                                }
+                            }
+                        }
+                        // Registrations that failed or expired after leaving pendingNames: keep the result visible.
+                        Repeater {
+                            model: Object.keys(root.registerResults).filter(function(n) {
+                                return !root.allMine.some(function(x) { return x.name === n }) && !root.pendingNames.some(function(x) { return x.name === n })
+                            })
+                            ColumnLayout {
+                                id: finishedRegRow
+                                required property string modelData
+                                Layout.fillWidth: true
+                                spacing: 4
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { textFormat: Text.PlainText; text: finishedRegRow.modelData; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
+                                    Link { text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(finishedRegRow.modelData) } }
+                                }
+                                StatusLine {
+                                    kind: root.registerResults[finishedRegRow.modelData] ? root.registerResults[finishedRegRow.modelData].kind : "problem"
+                                    text: root.registerResults[finishedRegRow.modelData] ? root.registerResults[finishedRegRow.modelData].text : ""
+                                }
+                            }
+                        }
                         Repeater {
                             model: root.cliPending
-                            RowLayout {
+                            ColumnLayout {
+                                id: cliPendingRow
                                 required property var modelData
-                                spacing: 14
-                                Text { textFormat: Text.PlainText; text: modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
-                                Text { textFormat: Text.PlainText; text: modelData.failed ? "didn't register" : "registering"; color: modelData.failed ? root.alarm : root.waitTone; font.family: root.sans; font.pixelSize: root.px(14) }
+                                Layout.fillWidth: true
+                                spacing: 4
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { textFormat: Text.PlainText; text: cliPendingRow.modelData.name; color: root.dim; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.Bold }
+                                    Link { visible: !!cliPendingRow.modelData.failed; text: "Open"; font.pixelSize: root.px(15); onPressed: { root.go("search"); root.show(cliPendingRow.modelData.name) } }
+                                }
+                                StatusLine {
+                                    kind: cliPendingRow.modelData.failed ? "problem" : "waiting"
+                                    text: cliPendingRow.modelData.failed ? Logic.failedNameLine(cliPendingRow.modelData) : root.pendingLine(cliPendingRow.modelData)
+                                }
                             }
                         }
                         // A name this wallet holds that isn't listed (handed to it, or registered
@@ -14454,6 +14617,7 @@ Item {
                                 color: root.ink
                                 text: "Give " + root.transferTarget + " to " + Logic.keyShown(transferToField.text.trim().replace(/^(Public|Private)\//, "")) + "? It's proven on this computer, usually 5–12 minutes, and then it's theirs."
                                     + (root.nameDeeds[root.transferTarget] && root.nameDeeds[root.transferTarget].deed ? " Its NFT card goes with it, in the same step." : "")
+                                    + " " + Logic.actionFeeNote(root.feeQuote, root.toolNow, "transfer", root.namesNet !== "0.4")
                             }
                             RowLayout {
                                 spacing: 8
@@ -15559,6 +15723,22 @@ Item {
                         code: true
                         value: accountPage.row ? Logic.keyShown(accountPage.row.address) : ""
                         full: accountPage.row ? accountPage.row.address : ""
+                    }
+                    ColumnLayout {
+                        id: accountFirstReceive
+                        readonly property string receivingKey: accountPage.row !== null && accountPage.row.kind === "lez" && !accountPage.row.fromPrivate && !accountPage.row.later
+                            ? Logic.publicReceivingKey(root.cliAccounts, accountPage.row.address, accountPage.row.balance)
+                            : ""
+                        visible: receivingKey !== ""
+                        Layout.fillWidth: true
+                        spacing: 4
+                        Hint { font.pixelSize: root.px(14); color: root.ink; text: Logic.FIRST_RECEIVE_KEY_NOTE }
+                        Fact {
+                            label: "Receiving key"
+                            code: true
+                            value: Logic.keyShown(accountFirstReceive.receivingKey)
+                            full: accountFirstReceive.receivingKey
+                        }
                     }
                     Flow {
                         Layout.fillWidth: true
@@ -16742,128 +16922,6 @@ Item {
                             Action { label: "Cancel"; onPressed: root.accountNewKind = "" }
                         }
                     }
-                    Part { text: "Zones" }
-                    Hint { text: "A zone is a LEZ chain with its own sequencer. Each has its own wallet here, and one is in use at a time. Your names are kept on " + root.homeName + "." }
-                    Repeater {
-                        model: root.zones
-                        ColumnLayout {
-                            id: zoneRow
-                            required property var modelData
-                            readonly property bool open: root.zoneOpen === modelData.id
-                            Layout.fillWidth: true
-                            spacing: 8
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 12
-                                Rectangle { Layout.preferredWidth: 10; Layout.preferredHeight: 10; radius: 5; color: zoneRow.modelData.current ? root.good : "transparent"; border.width: 1; border.color: zoneRow.modelData.current ? root.good : root.line }
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 2
-                                    Text {
-                                        Layout.fillWidth: true
-                                        textFormat: Text.PlainText
-                                        text: zoneRow.modelData.name + (zoneRow.modelData.current ? "  ·  in use" : "") + (zoneRow.modelData.home ? "  ·  names are kept here" : "")
-                                        color: root.ink
-                                        font.family: root.sans
-                                        font.pixelSize: root.px(17)
-                                        font.weight: Font.DemiBold
-                                        elide: Text.ElideRight
-                                    }
-                                    Text {
-                                        Layout.fillWidth: true
-                                        textFormat: Text.PlainText
-                                        text: zoneRow.modelData.sequencer + (zoneRow.modelData.channel ? "  ·  channel " + Logic.keyShown(zoneRow.modelData.channel) : "")
-                                        color: root.dim
-                                        font.family: root.mono
-                                        font.pixelSize: root.px(13)
-                                        elide: Text.ElideMiddle
-                                    }
-                                }
-                                Action { visible: !zoneRow.modelData.current; label: "Use"; enabledNow: !root.zoneBusy; onPressed: root.zoneUse(zoneRow.modelData.id) }
-                                Link {
-                                    text: zoneRow.open ? "Close" : "Change"
-                                    color: root.dim
-                                    font.pixelSize: root.px(15)
-                                    onPressed: { root.zoneOpen = zoneRow.open ? "" : zoneRow.modelData.id; root.zoneRemoving = false; root.zoneOtherChain = null; root.zoneNote = "" }
-                                }
-                            }
-                            Card {
-                                visible: zoneRow.open
-                                Layout.fillWidth: true
-                                Hint { font.pixelSize: root.px(15); text: "Name" }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 8
-                                    Field { id: zoneNameField; Layout.fillWidth: true; size: 16; text: zoneRow.modelData.name; hint: "What you call this zone"; onAccepted: root.zoneRename(zoneRow.modelData.id, zoneNameField.text) }
-                                    Action { label: "Rename"; enabledNow: !root.zoneBusy && zoneNameField.text.trim() !== "" && zoneNameField.text.trim() !== zoneRow.modelData.name; onPressed: root.zoneRename(zoneRow.modelData.id, zoneNameField.text) }
-                                }
-                                Hint { font.pixelSize: root.px(15); text: "Sequencer. Another one serving the same chain can be used at any time: the wallet, its accounts and its history stay as they are." }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 8
-                                    Field { id: zoneSequencerField; Layout.fillWidth: true; size: 16; text: zoneRow.modelData.sequencer; hint: "https://…" }
-                                    Action {
-                                        label: root.zoneBusy ? "Asking it…" : "Change sequencer"
-                                        enabledNow: !root.zoneBusy && zoneSequencerField.text.trim() !== "" && zoneSequencerField.text.trim() !== zoneRow.modelData.sequencer
-                                        onPressed: root.zoneSequencer(zoneRow.modelData.id, zoneSequencerField.text, false)
-                                    }
-                                }
-                                // Home's sequencer names another chain: said first, done only on a yes.
-                                ColumnLayout {
-                                    visible: zoneRow.modelData.home && root.zoneOtherChain !== null
-                                    Layout.fillWidth: true
-                                    spacing: 8
-                                    StatusLine {
-                                        kind: "problem"
-                                        text: root.zoneOtherChain === null ? "" : "That sequencer serves another chain (channel " + Logic.keyShown(root.zoneOtherChain.channel) + "). "
-                                            + zoneRow.modelData.name + " would become that chain: your names and balances are read there from then on, and what you hold on the present chain stays behind on it. To keep both, add it as a zone instead."
-                                    }
-                                    RowLayout {
-                                        spacing: 8
-                                        Action { label: "Add it as a zone"; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneAdd("", root.zoneOtherChain.url) }
-                                        Action { label: "Make " + zoneRow.modelData.name + " that chain"; grave: true; enabledNow: !root.zoneBusy; onPressed: root.zoneSequencer("home", root.zoneOtherChain.url, true) }
-                                        Action { label: "Cancel"; onPressed: { root.zoneOtherChain = null; zoneSequencerField.text = zoneRow.modelData.sequencer } }
-                                    }
-                                }
-                                Fact { label: "Wallet folder"; code: true; value: zoneRow.modelData.wallet_dir ? zoneRow.modelData.wallet_dir + (zoneRow.modelData.has_wallet ? "" : "  (no wallet in it yet)") : "The names program's own"; full: zoneRow.modelData.wallet_dir || "" }
-                                Fact { visible: !!zoneRow.modelData.channel; label: "Channel"; code: true; value: zoneRow.modelData.channel || ""; full: zoneRow.modelData.channel || "" }
-                                // Removing forgets the zone here; nothing on its chain changes and its wallet folder stays.
-                                Hint {
-                                    visible: !zoneRow.modelData.home
-                                    font.pixelSize: root.px(15)
-                                    text: zoneRow.modelData.current ? "This is the zone in use. To remove it, use another zone first."
-                                        : "Removing a zone forgets it here. Nothing changes on its chain, and its wallet folder is kept."
-                                }
-                                RowLayout {
-                                    visible: !zoneRow.modelData.home && !zoneRow.modelData.current
-                                    spacing: 8
-                                    Action { visible: !root.zoneRemoving; label: "Remove this zone"; grave: true; enabledNow: !root.zoneBusy; onPressed: root.zoneRemoving = true }
-                                    Action { visible: root.zoneRemoving; label: "Yes, remove " + zoneRow.modelData.name; grave: true; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneRemove(zoneRow.modelData.id) }
-                                    Action { visible: root.zoneRemoving; label: "Cancel"; onPressed: root.zoneRemoving = false }
-                                }
-                            }
-                        }
-                    }
-                    StatusLine { visible: root.zoneNote !== ""; kind: root.zoneNoteBad ? "problem" : "done"; text: root.zoneNote }
-                    Action {
-                        visible: !root.zoneAdding
-                        label: "+  Add a zone"
-                        enabledNow: !root.zoneBusy && root.zones.length > 0 && root.zones.length < root.zoneMax
-                        onPressed: { root.zoneAdding = true; root.zoneNote = ""; newZoneName.text = ""; newZoneSequencer.text = "" }
-                    }
-                    Hint { visible: root.zones.length >= root.zoneMax; font.pixelSize: root.px(15); text: "At most " + root.zoneMax + " zones are kept. Remove one to add another." }
-                    Card {
-                        visible: root.zoneAdding
-                        Layout.fillWidth: true
-                        Hint { color: root.ink; text: "Give the address of the zone's sequencer. It is asked which chain it serves, and that chain becomes a zone here with an empty wallet folder of its own. Nothing is sent." }
-                        Field { id: newZoneSequencer; Layout.fillWidth: true; size: 16; hint: "Sequencer: https://… (http:// only on this computer)" }
-                        Field { id: newZoneName; Layout.fillWidth: true; size: 16; hint: "Name (optional)"; onAccepted: root.zoneAdd(newZoneName.text, newZoneSequencer.text) }
-                        RowLayout {
-                            spacing: 8
-                            Action { label: root.zoneBusy ? "Asking it…" : "Add zone"; strong: true; enabledNow: !root.zoneBusy && newZoneSequencer.text.trim() !== ""; onPressed: root.zoneAdd(newZoneName.text, newZoneSequencer.text) }
-                            Action { label: "Cancel"; enabledNow: !root.zoneBusy; onPressed: root.zoneAdding = false }
-                        }
-                    }
                     Part { text: "Bridge" }
                     StatusLine { visible: root.bridgeListAsking && root.bridgeList === null; kind: "working"; text: "Reading the bridges…" }
                     Hint { visible: !root.bridgeListAsking && root.bridgeConfig !== null && !root.bridgeChoosable; text: "Update the LEZ Bridge to choose the bridge here (Wallet → Receive from Ethereum offers the update)." }
@@ -17183,7 +17241,7 @@ Item {
                         text: root.registry
                         hint: "Program ID of the registry"
                     }
-                    Hint { font.pixelSize: root.px(15); text: "Sequencers are set per zone: Settings, Zones." }
+                    Hint { font.pixelSize: root.px(15); text: "Sequencers are set per zone, below." }
                     // Saved only on purpose: a slip here points every read and change elsewhere (M-7).
                     RowLayout {
                         visible: !root.networkConfirm
@@ -17220,6 +17278,128 @@ Item {
                             }
                         }
                     }
+                    Part { text: "Zones" }
+                    Hint { text: "A zone is a LEZ chain with its own sequencer. Each has its own wallet here, and one is in use at a time. Your names are kept on " + root.homeName + "." }
+                    Repeater {
+                        model: root.zones
+                        ColumnLayout {
+                            id: zoneRow
+                            required property var modelData
+                            readonly property bool open: root.zoneOpen === modelData.id
+                            Layout.fillWidth: true
+                            spacing: 8
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 12
+                                Rectangle { Layout.preferredWidth: 10; Layout.preferredHeight: 10; radius: 5; color: zoneRow.modelData.current ? root.good : "transparent"; border.width: 1; border.color: zoneRow.modelData.current ? root.good : root.line }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Text {
+                                        Layout.fillWidth: true
+                                        textFormat: Text.PlainText
+                                        text: zoneRow.modelData.name + (zoneRow.modelData.current ? "  ·  in use" : "") + (zoneRow.modelData.home ? "  ·  names are kept here" : "")
+                                        color: root.ink
+                                        font.family: root.sans
+                                        font.pixelSize: root.px(17)
+                                        font.weight: Font.DemiBold
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        textFormat: Text.PlainText
+                                        text: zoneRow.modelData.sequencer + (zoneRow.modelData.channel ? "  ·  channel " + Logic.keyShown(zoneRow.modelData.channel) : "")
+                                        color: root.dim
+                                        font.family: root.mono
+                                        font.pixelSize: root.px(13)
+                                        elide: Text.ElideMiddle
+                                    }
+                                }
+                                Action { visible: !zoneRow.modelData.current; label: "Use"; enabledNow: !root.zoneBusy; onPressed: root.zoneUse(zoneRow.modelData.id) }
+                                Link {
+                                    text: zoneRow.open ? "Close" : "Change"
+                                    color: root.dim
+                                    font.pixelSize: root.px(15)
+                                    onPressed: { root.zoneOpen = zoneRow.open ? "" : zoneRow.modelData.id; root.zoneRemoving = false; root.zoneOtherChain = null; root.zoneNote = "" }
+                                }
+                            }
+                            Card {
+                                visible: zoneRow.open
+                                Layout.fillWidth: true
+                                Hint { font.pixelSize: root.px(15); text: "Name" }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Field { id: zoneNameField; Layout.fillWidth: true; size: 16; text: zoneRow.modelData.name; hint: "What you call this zone"; onAccepted: root.zoneRename(zoneRow.modelData.id, zoneNameField.text) }
+                                    Action { label: "Rename"; enabledNow: !root.zoneBusy && zoneNameField.text.trim() !== "" && zoneNameField.text.trim() !== zoneRow.modelData.name; onPressed: root.zoneRename(zoneRow.modelData.id, zoneNameField.text) }
+                                }
+                                Hint { font.pixelSize: root.px(15); text: "Sequencer. Another one serving the same chain can be used at any time: the wallet, its accounts and its history stay as they are." }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Field { id: zoneSequencerField; Layout.fillWidth: true; size: 16; text: zoneRow.modelData.sequencer; hint: "https://…" }
+                                    Action {
+                                        label: root.zoneBusy ? "Asking it…" : "Change sequencer"
+                                        enabledNow: !root.zoneBusy && zoneSequencerField.text.trim() !== "" && zoneSequencerField.text.trim() !== zoneRow.modelData.sequencer
+                                        onPressed: root.zoneSequencer(zoneRow.modelData.id, zoneSequencerField.text, false)
+                                    }
+                                }
+                                // Home's sequencer names another chain: said first, done only on a yes.
+                                ColumnLayout {
+                                    visible: zoneRow.modelData.home && root.zoneOtherChain !== null
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    StatusLine {
+                                        kind: "problem"
+                                        text: root.zoneOtherChain === null ? "" : "That sequencer serves another chain (channel " + Logic.keyShown(root.zoneOtherChain.channel) + "). "
+                                            + zoneRow.modelData.name + " would become that chain: your names and balances are read there from then on, and what you hold on the present chain stays behind on it. To keep both, add it as a zone instead."
+                                    }
+                                    RowLayout {
+                                        spacing: 8
+                                        Action { label: "Add it as a zone"; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneAdd("", root.zoneOtherChain.url) }
+                                        Action { label: "Make " + zoneRow.modelData.name + " that chain"; grave: true; enabledNow: !root.zoneBusy; onPressed: root.zoneSequencer("home", root.zoneOtherChain.url, true) }
+                                        Action { label: "Cancel"; onPressed: { root.zoneOtherChain = null; zoneSequencerField.text = zoneRow.modelData.sequencer } }
+                                    }
+                                }
+                                Fact { label: "Wallet folder"; code: true; value: zoneRow.modelData.wallet_dir ? zoneRow.modelData.wallet_dir + (zoneRow.modelData.has_wallet ? "" : "  (no wallet in it yet)") : "The names program's own"; full: zoneRow.modelData.wallet_dir || "" }
+                                Fact { visible: !!zoneRow.modelData.channel; label: "Channel"; code: true; value: zoneRow.modelData.channel || ""; full: zoneRow.modelData.channel || "" }
+                                // Removing forgets the zone here; nothing on its chain changes and its wallet folder stays.
+                                Hint {
+                                    visible: !zoneRow.modelData.home
+                                    font.pixelSize: root.px(15)
+                                    text: zoneRow.modelData.current ? "This is the zone in use. To remove it, use another zone first."
+                                        : "Removing a zone forgets it here. Nothing changes on its chain, and its wallet folder is kept."
+                                }
+                                RowLayout {
+                                    visible: !zoneRow.modelData.home && !zoneRow.modelData.current
+                                    spacing: 8
+                                    Action { visible: !root.zoneRemoving; label: "Remove this zone"; grave: true; enabledNow: !root.zoneBusy; onPressed: root.zoneRemoving = true }
+                                    Action { visible: root.zoneRemoving; label: "Yes, remove " + zoneRow.modelData.name; grave: true; strong: true; enabledNow: !root.zoneBusy; onPressed: root.zoneRemove(zoneRow.modelData.id) }
+                                    Action { visible: root.zoneRemoving; label: "Cancel"; onPressed: root.zoneRemoving = false }
+                                }
+                            }
+                        }
+                    }
+                    StatusLine { visible: root.zoneNote !== ""; kind: root.zoneNoteBad ? "problem" : "done"; text: root.zoneNote }
+                    Action {
+                        visible: !root.zoneAdding
+                        label: "+  Add a zone"
+                        enabledNow: !root.zoneBusy && root.zones.length > 0 && root.zones.length < root.zoneMax
+                        onPressed: { root.zoneAdding = true; root.zoneNote = ""; newZoneName.text = ""; newZoneSequencer.text = "" }
+                    }
+                    Hint { visible: root.zones.length >= root.zoneMax; font.pixelSize: root.px(15); text: "At most " + root.zoneMax + " zones are kept. Remove one to add another." }
+                    Card {
+                        visible: root.zoneAdding
+                        Layout.fillWidth: true
+                        Hint { color: root.ink; text: "Give the address of the zone's sequencer. It is asked which chain it serves, and that chain becomes a zone here with an empty wallet folder of its own. Nothing is sent." }
+                        Field { id: newZoneSequencer; Layout.fillWidth: true; size: 16; hint: "Sequencer: https://… (http:// only on this computer)" }
+                        Field { id: newZoneName; Layout.fillWidth: true; size: 16; hint: "Name (optional)"; onAccepted: root.zoneAdd(newZoneName.text, newZoneSequencer.text) }
+                        RowLayout {
+                            spacing: 8
+                            Action { label: root.zoneBusy ? "Asking it…" : "Add zone"; strong: true; enabledNow: !root.zoneBusy && newZoneSequencer.text.trim() !== ""; onPressed: root.zoneAdd(newZoneName.text, newZoneSequencer.text) }
+                            Action { label: "Cancel"; enabledNow: !root.zoneBusy; onPressed: root.zoneAdding = false }
+                        }
+                    }
                     Part { text: "Wallet files" }
                     Hint { text: "Not used on this chain: your names program's own wallet signs for your names." }
                     Field {
@@ -17241,7 +17421,7 @@ Item {
                         onPressed: root.saveWalletFiles(walletConfigField.text.trim(), walletStorageField.text.trim())
                     }
                     Part { text: "names CLI" }
-                    Hint { text: "Names your names CLI holds privately are edited through it. Each change is proven on this machine and takes a few minutes." }
+                    Hint { text: "The bundled names tool is used by default, with no path to type. Leave these blank unless you want to use another tool or wallet folder." }
                     StatusLine { visible: root.proofWarning !== ""; kind: Logic.noticeKind(root.proofWarning, true); text: root.proofWarning }
                     Field {
                         id: cliPathField
@@ -17413,9 +17593,16 @@ Item {
                     }
                     // A private registration through the names CLI, under way or stopped.
                     StatusLine {
-                        visible: root.cliPendingFor(root.missing) !== null && root.cliPendingFor(root.missing).failed
-                        kind: "problem"
-                        text: root.cliPendingFor(root.missing) === null ? "" : "It stopped: " + root.cliPendingFor(root.missing).state + "."
+                        id: stoppedLine
+                        readonly property var stopped: root.cliPendingFor(root.missing)
+                        // Stopped for funds, and the account holds enough now: said so, not the old error.
+                        readonly property bool fundedSince: stopped !== null && root.regShortfall.enough
+                            && /holds [0-9]+; this takes/.test(String(stopped.state || "") + " " + String(stopped.failed || ""))
+                        visible: stopped !== null && !!stopped.failed
+                        kind: fundedSince ? "working" : "problem"
+                        text: stopped === null ? "" : fundedSince
+                            ? "It stopped earlier because the account was short. It holds enough now: press Register below to finish it (step 1 is already done)."
+                            : Logic.failedNameLine(stopped)
                     }
                     Card {
                         visible: root.registerStepOf(root.missing) > 0
@@ -17470,7 +17657,7 @@ Item {
                         }
                         Link {
                             visible: root.claimsUntil !== null && root.claimsUntil !== undefined && !root.claimBusy
-                            text: "This was my name on the earlier chain: take it back for free"
+                            text: "This was my name on the earlier chain: take it back"
                             font.pixelSize: root.px(16)
                             onPressed: root.claimName(root.missing)
                         }
@@ -17556,7 +17743,11 @@ Item {
                             font.pixelSize: root.px(14)
                             text: root.registerPublic
                                 ? "Registered privately first, so nobody sees who registered it, then moved to a new public account funded privately with 10,000,000 for gas. Posts take about 30 seconds; nothing links that account to you. About 10 more minutes."
-                                : "Posts take 5–12 minutes each, free, and nobody can find which account holds it. You can make it public later in Settings."
+                                : "Posts take 5–12 minutes each, and nobody can find which account holds it. You can make it public later in Settings."
+                        }
+                        Hint {
+                            font.pixelSize: root.px(14)
+                            text: Logic.actionFeeNote(root.feeQuote, root.toolNow, "register", true)
                         }
                         Action {
                             Layout.topMargin: 6
@@ -17612,12 +17803,18 @@ Item {
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.publishOnRegister = !root.publishOnRegister }
                             }
                         }
+                        StatusLine {
+                            visible: !root.regShortfall.enough
+                            kind: "problem"
+                            text: root.regShortfall.line
+                        }
                         Hint { textFormat: Text.PlainText; visible: text !== ""; color: root.ink; font.pixelSize: root.px(15); text: Logic.uncheckedLine(root.toolNow, ["commit", "register"]) }
+                        Hint { font.pixelSize: root.px(14); text: Logic.actionFeeNote(root.feeQuote, root.toolNow, "register", false) }
                         Action {
                             label: "Register " + root.missing + " publicly"
-                            strong: root.cliPath === ""
+                            strong: true
                             changes: true
-                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
+                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured" && root.regShortfall.enough
                             onPressed: { root.noticeAt = "register"; root.registerName() }
                         }
                         StatusLine { visible: root.notice !== "" && root.noticeAt === "register"; kind: root.noticeKind; text: root.notice }
@@ -17928,6 +18125,7 @@ Item {
                                 }
                             }
                         }
+                        Hint { font.pixelSize: root.px(14); text: Logic.actionFeeNote(root.feeQuote, root.toolNow, "change", root.cliHeld && root.namesNet !== "0.4") }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
@@ -18170,6 +18368,7 @@ Item {
                             interval: 400
                             onTriggered: root.previewPage()
                         }
+                        Hint { font.pixelSize: root.px(14); text: Logic.actionFeeNote(root.feeQuote, root.toolNow, "change", root.cliHeld && root.namesNet !== "0.4") }
                         RowLayout {
                             Layout.fillWidth: true
                             Layout.topMargin: 6
@@ -18230,6 +18429,7 @@ Item {
                                         wrapMode: Text.Wrap
                                     }
                                 }
+                                Hint { font.pixelSize: root.px(14); text: Logic.actionFeeNote(root.feeQuote, root.toolNow, "change", false) }
                                 Action {
                                     label: root.record !== null ? "Transfer " + root.shown(root.record.name) : ""
                                     changes: true
@@ -18249,6 +18449,7 @@ Item {
                                     value: root.record !== null && Logic.someAmount(root.record.deposit) ? root.grouped(root.record.deposit) : ""
                                     note: "To the account that holds it"
                                 }
+                                Hint { font.pixelSize: root.px(14); text: Logic.actionFeeNote(root.feeQuote, root.toolNow, "release", false) }
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 8

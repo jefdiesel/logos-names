@@ -157,13 +157,20 @@ fn submitted(output: &str) -> Option<&str> {
 }
 
 /// Signs `change` with its signer, tries it, sends it and waits for its block.
-/// Returns the transaction's hash. A change that was refused or reverted is an
-/// error: on LEZ 0.4 a failed transaction is charged, so it isn't one to repeat
-/// blindly.
-pub fn send(setup: &Setup, change: &Change) -> Result<String, String> {
+/// Returns the transaction's hash and any fee lines the CLI printed (never guessed).
+/// A change that was refused or reverted is an error: on LEZ 0.4 a failed transaction
+/// is charged, so it isn't one to repeat blindly.
+pub fn send_with_fee(setup: &Setup, change: &Change) -> Result<(String, Value), String> {
     let input = change_json(change).to_string();
     let output = cli::run_with_input(setup, request(&["send"]), &input, SEND)?;
-    submitted(&output).map(str::to_owned).ok_or_else(|| "the names CLI sent nothing".to_owned())
+    let tx = submitted(&output).map(str::to_owned).ok_or_else(|| "the names CLI sent nothing".to_owned())?;
+    Ok((tx, cli::parse_fee(&output)))
+}
+
+/// Signs `change` with its signer, tries it, sends it and waits for its block.
+/// Returns the transaction's hash.
+pub fn send(setup: &Setup, change: &Change) -> Result<String, String> {
+    send_with_fee(setup, change).map(|(tx, _)| tx)
 }
 
 #[cfg(test)]

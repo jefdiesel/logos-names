@@ -241,7 +241,7 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
     let state = entry["state"].as_str().unwrap_or_default();
     let to = entry["to"].as_str() == Some(account);
     let from = entry["from"].as_str() == Some(account);
-    if state == "failed" {
+    if state == "failed" || (entry["kind"] == "name_reveal" && state == "expired") {
         return (0, true);
     }
     // A bridge that hasn't arrived moved nothing into its LEZ account, whatever is known of
@@ -257,8 +257,9 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
         return (0, false);
     }
     let kind = entry["kind"].as_str().unwrap_or_default();
-    // A split pays itself; a token send moves a token, not the native one; a transfer moves a name.
-    let native = !matches!(kind, "split" | "token_send" | "transfer" | "receive_privately");
+    // A split pays itself; a token send moves a token, not the native one; a transfer moves a name;
+    // a name commitment pays only its transaction fee.
+    let native = !matches!(kind, "split" | "token_send" | "transfer" | "receive_privately" | "name_commit");
     let amount = number(&entry["amount"]);
     let mut certain = state != "unknown" && (amount.is_some() || !native || !(to || from));
     let mut delta: i128 = 0;
@@ -267,6 +268,18 @@ fn effect(entry: &Value, account: &str) -> (i128, bool) {
         let credited = received(entry, account);
         let mut delta = i128::try_from(credited.unwrap_or(0)).unwrap_or(i128::MAX);
         let mut known = true;
+        if from {
+            match fee_paid(entry) {
+                Some(fee) => delta -= i128::try_from(fee).unwrap_or(i128::MAX),
+                None => known = false,
+            }
+        }
+        return (delta, known);
+    }
+    // Releasing a name refunds its deposit to the holder and pays only the transaction fee.
+    if kind == "name_release" {
+        let mut delta = if to { i128::try_from(amount.unwrap_or(0)).unwrap_or(i128::MAX) } else { 0 };
+        let mut known = amount.is_some() || !to;
         if from {
             match fee_paid(entry) {
                 Some(fee) => delta -= i128::try_from(fee).unwrap_or(i128::MAX),
@@ -578,6 +591,50 @@ fn note(dir: &Path, at: u64, chain: &str, scope: &str, zone: Option<&str>, balan
         save(&balances_file(dir), &seen);
     }
     added
+}
+
+/// Deduplicates native LEZ arrivals that were recorded both under zone Home (`chain: "lez"`)
+/// and under the bridge test network (`chain: "lez-0.4"`, `token: null`) for the same account
+/// and amount within 5 minutes, keeping a single row.
+pub fn dedupe_home_bridge_arrivals(entries: Vec<Value>) -> Vec<Value> {
+    const WINDOW_S: u64 = 300;
+    let is_native_bridge = |e: &Value| {
+        e["kind"] == "arrived" && e["chain"] == "lez-0.4" && e["token"].is_null() && e["to"].is_string()
+    };
+    let is_home_lez = |e: &Value| {
+        e["kind"] == "arrived"
+            && e["chain"] == "lez"
+            && e["token"].is_null()
+            && e["to"].is_string()
+            && (zone_of(e) == crate::zones::HOME || zone_of(e) == "bridge-0.4")
+    };
+    let same_credit = |a: &Value, b: &Value| -> bool {
+        let same_to = a["to"].as_str().is_some_and(|t| !t.is_empty() && b["to"].as_str() == Some(t));
+        let same_amt = match (a["amount"].as_str(), b["amount"].as_str()) {
+            (Some(x), Some(y)) => x == y,
+            (None, None) => a["at_least"].as_str().is_some_and(|x| b["at_least"].as_str() == Some(x)),
+            _ => false,
+        };
+        let a_at = a["at"].as_u64().unwrap_or(0);
+        let b_at = b["at"].as_u64().unwrap_or(0);
+        same_to && same_amt && a_at.abs_diff(b_at) <= WINDOW_S
+    };
+    let mut matched = vec![false; entries.len()];
+    let mut out = Vec::with_capacity(entries.len());
+    for (idx, entry) in entries.iter().enumerate() {
+        if is_home_lez(entry) {
+            if let Some(pos) = entries
+                .iter()
+                .enumerate()
+                .position(|(j, other)| j != idx && !matched[j] && is_native_bridge(other) && same_credit(entry, other))
+            {
+                matched[pos] = true;
+                continue;
+            }
+        }
+        out.push(entry.clone());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1065,5 +1122,38 @@ mod tests {
         assert_eq!(rows.len(), MAX_ENTRIES);
         assert_eq!(rows.last().unwrap()["at"], 5, "the oldest went first");
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn name_registration_and_release_entries_explain_balances() {
+        let d = dir("name-reg-release");
+        note(&d, 1, &[("Public/A", 2_000_000)]);
+        // Commitment: only the recorded fee leaves Public/A.
+        add(&d, 2, json!({ "kind": "name_commit", "chain": "lez", "from": "Public/A", "name": "alice", "fee": { "paid": "4000" }, "state": "done" }));
+        assert!(note(&d, 3, &[("Public/A", 1_996_000)]).is_empty(), "{:?}", arrivals(&d));
+        // Reveal: deposit + fee leave Public/A.
+        add(&d, 4, json!({ "kind": "name_reveal", "chain": "lez", "from": "Public/A", "name": "alice", "amount": "1000000", "charge": "deposit", "fee": { "paid": "5000" }, "state": "done" }));
+        assert!(note(&d, 5, &[("Public/A", 991_000)]).is_empty(), "{:?}", arrivals(&d));
+        // Expired and refused reveals move nothing.
+        add(&d, 6, json!({ "kind": "name_reveal", "chain": "lez", "from": "Public/A", "name": "bob", "state": "expired", "problem": "the 24-hour reveal window passed" }));
+        add(&d, 7, json!({ "kind": "name_reveal", "chain": "lez", "from": "Public/A", "name": "carol", "state": "failed", "problem": "carol is already registered" }));
+        assert!(note(&d, 8, &[("Public/A", 991_000)]).is_empty(), "{:?}", arrivals(&d));
+        // Release: deposit is refunded to Public/A minus the recorded fee, never logged as an unexplained arrival.
+        add(&d, 9, json!({ "kind": "name_release", "chain": "lez", "to": "Public/A", "from": "Public/A", "name": "alice", "amount": "1000000", "fee": { "paid": "3000" }, "state": "done" }));
+        assert!(note(&d, 10, &[("Public/A", 1_988_000)]).is_empty(), "{:?}", arrivals(&d));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn home_and_bridge_net_arrivals_for_same_credit_are_listed_once() {
+        let entries = vec![
+            json!({ "id": "b1", "at": 1005, "kind": "arrived", "chain": "lez-0.4", "network": "bridge-0.4", "to": "Public/A", "amount": "5000000", "state": "arrived" }),
+            json!({ "id": "h1", "at": 1000, "kind": "arrived", "chain": "lez", "to": "Public/A", "amount": "5000000", "state": "arrived" }),
+            json!({ "id": "t1", "at": 1005, "kind": "arrived", "chain": "lez-0.4", "network": "bridge-0.4", "token": "DbPG", "to": "Public/A", "amount": "5000000", "state": "arrived" }),
+            json!({ "id": "h2", "at": 2000, "kind": "arrived", "chain": "lez", "to": "Public/A", "amount": "5000000", "state": "arrived" }),
+        ];
+        let deduped = dedupe_home_bridge_arrivals(entries);
+        let ids: Vec<&str> = deduped.iter().filter_map(|e| e["id"].as_str()).collect();
+        assert_eq!(ids, vec!["b1", "t1", "h2"]);
     }
 }
