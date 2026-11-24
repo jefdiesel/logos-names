@@ -2934,9 +2934,9 @@ export function bridgeSetupState(s) {
 
 // ── What's new: three lines at the top of Settings after an update (change them with each build) ──
 export const WHATS_NEW = [
-    "A new icon: the white eta on Logos orange that all our apps now share.",
-    "Collectibles: a grid of your collections, with images from your own Logos Storage node once you allow it.",
-    "Corrected: paying or sending to receiving keys from a public account shows the private account's ID.",
+    "Registering checks you can pay the deposit and both steps' fees before step 1, and says why a name stopped.",
+    "Activity shows what each send took from your balance, and each arrival once.",
+    "A cleaner Wallet: your accounts titled by their names, with tabs for Bridge, Watch and Accounts.",
 ]
 
 /// Receive from Ethereum, the deposit step: what to do, in order (owner, 2026-11-16: "this page
