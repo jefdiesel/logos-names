@@ -8,3 +8,14 @@ license.workspace = true
 names_core.workspace = true
 lee_core.workspace = true
 risc0-zkvm.workspace = true
+
+# The guest is built with fat LTO and one codegen unit: every public call is charged by the
+# guest's cycles, and these cut them by 5-10% per call. They are given as the guest's rustc
+# flags because risc0-build hands those to every build of this guest, the local one
+# (methods/build.rs) and the reproducible Docker one (`cargo risczero build`, which runs cargo
+# from the repository root, so it reads no methods/.cargo/config.toml, and cargo ignores a
+# profile in a workspace member). They apply only to what is compiled for the guest target,
+# never to the workspace's host crates or the other guests. embed-bitcode=yes undoes cargo's
+# embed-bitcode=no, its default for a profile without LTO, which fat LTO cannot work with.
+[package.metadata.risc0]
+rustc-flags = ["-C", "lto=fat", "-C", "embed-bitcode=yes", "-C", "codegen-units=1"]
