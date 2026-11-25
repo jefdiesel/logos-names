@@ -43,7 +43,7 @@ set -euo pipefail
 for v in SEQ_BIN SEQ_CONFIG NAMES WORK RPC_PORT METRICS_PORT; do [ -n "${!v:-}" ] || { echo "set $v" >&2; exit 2; }; done
 RPC=http://127.0.0.1:$RPC_PORT
 # LEZ's published local-test key (PRIVATE_KEY_PUB_ACC_A): a fresh local chain funds it. Local chains only.
-LOCAL_TEST_KEY=10a26a9aec7d34b82364eeae45c5294dbb0a764b000b94eeb9b58511dc487c4d
+LOCAL_TEST_KEY=$("$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/tools/lez-test-key.sh" PRIVATE_KEY_PUB_ACC_A)
 rpc() { curl -sf -m 10 -X POST "$RPC" -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}"; }
 say() { echo; echo "## $(date -u +%H:%M:%S) $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
