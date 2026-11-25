@@ -41,6 +41,10 @@ struct Run {
     program: AccountId,
     block: u64,
     seeds: Vec<PdaSeed>,
+    /// The cycles the last call that went through ran.
+    last_cycles: u64,
+    /// A digest of the last call's events and the accounts it named.
+    last_digest: u64,
 }
 
 impl Run {
@@ -77,16 +81,31 @@ impl Run {
         let witness = WitnessSet::for_message(&tx, &[&from.key]);
         let tx = PublicTransaction::new(tx, witness);
         self.block += 1;
-        self.state
-            .transition_from_public_transaction(&tx, self.block, now)
-            .map(|_| from.nonce += 1)
-            .map_err(|error| format!("{error:?}"))
+        // Metered as settlement meters it: the cycles every transition of the call ran.
+        let (diff, charge) = lee::ValidatedStateDiff::from_public_transaction_with_cycle_budget(
+            &tx,
+            &self.state,
+            self.block,
+            now,
+            lee::program::DEFAULT_PUBLIC_CYCLE_BUDGET,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let events = self.state.apply_state_diff(diff).map_err(|error| format!("{error:?}"))?;
+        self.last_cycles = charge.cycles;
+        // What the call did, to compare two builds of the guest: its events and the
+        // accounts it named, after it.
+        let after: Vec<_> = wanted.iter().map(|id| (*id, self.state.get_account_by_id(*id))).collect();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write(&mut hasher, &borsh::to_vec(&(events, after)).expect("encodes"));
+        self.last_digest = std::hash::Hasher::finish(&hasher);
+        from.nonce += 1;
+        Ok(())
     }
 
     fn send(&mut self, what: &str, from: &mut Who, instruction: Instruction, actors: Vec<Actor>, now: u64) {
         self.try_send(from, &Message::Instruction(instruction), actors, now)
             .unwrap_or_else(|error| panic!("{what}: {error}"));
-        println!("ok   {what}");
+        println!("ok   {what} (gas: {} cycles) [effects {:016x}]", self.last_cycles, self.last_digest);
     }
 
     fn refuse(&mut self, what: &str, expected: &str, from: &mut Who, message: Message, actors: Vec<Actor>, now: u64) {
@@ -205,7 +224,15 @@ fn padded(text: &[u8]) -> Vec<u8> {
 }
 
 fn main() {
-    let elf = names_methods::LOGOS_NAMES_ELF;
+    // The registry guest: the one this workspace builds, or with LNS_REGISTRY_BIN a given
+    // logos_names.bin (such as the reproducible Docker build), so the binary that ships is the one run.
+    let elf: Vec<u8> = match std::env::var_os("LNS_REGISTRY_BIN") {
+        Some(path) => std::fs::read(&path).expect("LNS_REGISTRY_BIN reads"),
+        None => names_methods::LOGOS_NAMES_ELF.to_vec(),
+    };
+    let registry = Program::new(elf.into()).expect("the guest loads");
+    let registry_image: String =
+        registry.id().iter().flat_map(|word| word.to_le_bytes()).map(|b| format!("{b:02x}")).collect();
     let mut deployer = who(9);
     let admin = who(1);
     let mut alice = who(2);
@@ -223,11 +250,11 @@ fn main() {
     let state = V03State::new()
         .with_public_account_balances([(alice.id, 10 * DEPOSIT), (bob.id, 10 * DEPOSIT), (admin.id, DEPOSIT)])
         .with_named_programs([
-            (program, Program::new(elf.into()).expect("the guest loads")),
+            (program, registry),
             (NFT_PROGRAM, nft),
         ]);
     let mut seeds = vec![settings_seed()];
-    let mut run = Run { state, program, block: 0, seeds: Vec::new() };
+    let mut run = Run { state, program, block: 0, seeds: Vec::new(), last_cycles: 0, last_digest: 0 };
 
     // Names: not on the short list, in any tier, so use an unlisted proof.
     let jef: NameId = [0xAA; 32];
@@ -604,5 +631,6 @@ fn main() {
         reveal_at,
     );
     assert_eq!(run.record(&plain).expect("held").owner, owner_tag(&plain, &alice.id));
+    println!("registry image {registry_image}");
     println!("\nall scenarios passed");
 }

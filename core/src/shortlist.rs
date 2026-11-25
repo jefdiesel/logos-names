@@ -53,20 +53,20 @@ const EMPTY_DOMAIN: &[u8] = b"logos-names/v5/short-empty";
 pub const SENTINEL_LOW: [u8; 32] = [0x00; 32];
 pub const SENTINEL_HIGH: [u8; 32] = [0xff; 32];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize)]
 pub struct Leaf {
     pub id: [u8; 32],
     pub tier: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct Membership {
     pub index: u32,
     pub tier: u8,
     pub path: Vec<[u8; 32]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct NonMembership {
     pub left: Leaf,
     pub left_path: Vec<[u8; 32]>,
@@ -80,6 +80,70 @@ pub struct NonMembership {
 pub enum LengthProof {
     Membership(Membership),
     NonMembership(NonMembership),
+}
+
+// The proof types are read by hand, field by field in the order the derive reads them
+// and with the same errors, so they decode exactly the bytes the derived readers did into
+// the same values. Only the 32-byte nodes are read differently: borsh's generic array
+// reader costs the guest about three times as many cycles for each one.
+
+/// Borsh's error for input that ends early.
+fn unexpected_length(error: borsh::io::Error) -> borsh::io::Error {
+    if error.kind() == borsh::io::ErrorKind::UnexpectedEof {
+        borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, "Unexpected length of input")
+    } else {
+        error
+    }
+}
+
+fn read_node<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<[u8; 32]> {
+    let mut node = [0u8; 32];
+    reader.read_exact(&mut node).map_err(unexpected_length)?;
+    Ok(node)
+}
+
+/// A `Vec<[u8; 32]>` as Borsh lays it out: a `u32` count, then the nodes.
+fn read_path<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Vec<[u8; 32]>> {
+    let len = u32::deserialize_reader(reader)?;
+    // At most 4096 bytes reserved before the nodes are there, as borsh does.
+    let mut path = Vec::with_capacity((len as usize).min(4096 / 32));
+    let mut left = len as usize;
+    while left > 0 {
+        let mut chunk = [[0u8; 32]; 8];
+        let take = left.min(chunk.len());
+        reader.read_exact(chunk[..take].as_flattened_mut()).map_err(unexpected_length)?;
+        path.extend_from_slice(&chunk[..take]);
+        left -= take;
+    }
+    Ok(path)
+}
+
+impl BorshDeserialize for Leaf {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        Ok(Self { id: read_node(reader)?, tier: u8::deserialize_reader(reader)? })
+    }
+}
+
+impl BorshDeserialize for Membership {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        Ok(Self {
+            index: u32::deserialize_reader(reader)?,
+            tier: u8::deserialize_reader(reader)?,
+            path: read_path(reader)?,
+        })
+    }
+}
+
+impl BorshDeserialize for NonMembership {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        Ok(Self {
+            left: Leaf::deserialize_reader(reader)?,
+            left_path: read_path(reader)?,
+            right: Leaf::deserialize_reader(reader)?,
+            right_path: read_path(reader)?,
+            left_index: u32::deserialize_reader(reader)?,
+        })
+    }
 }
 
 fn sha256(parts: &[&[u8]]) -> [u8; 32] {
@@ -109,9 +173,10 @@ pub fn empty_hash() -> [u8; 32] {
     sha256(&[EMPTY_DOMAIN])
 }
 
-fn root_from_path(leaf: [u8; 32], index: u32, path: &[[u8; 32]]) -> [u8; 32] {
-    let mut acc = leaf;
-    for (level, sibling) in path.iter().enumerate() {
+/// Folds `path` into `acc`, the node at level `from` above leaf `index`, up to
+/// level `to`.
+fn fold_path(mut acc: [u8; 32], index: u32, path: &[[u8; 32]], from: usize, to: usize) -> [u8; 32] {
+    for (level, sibling) in path.iter().enumerate().take(to).skip(from) {
         acc = if (index >> level) & 1 == 0 {
             node_hash(&acc, sibling)
         } else {
@@ -121,6 +186,17 @@ fn root_from_path(leaf: [u8; 32], index: u32, path: &[[u8; 32]]) -> [u8; 32] {
     acc
 }
 
+/// The shape checks of a path: its length and its leaf's index.
+fn check_path_shape(index: u32, path: &[[u8; 32]], depth: usize) -> Result<(), &'static str> {
+    if path.len() != depth {
+        return Err("wrong proof path length");
+    }
+    if depth < 32 && u64::from(index) >= (1u64 << depth) {
+        return Err("leaf index out of range");
+    }
+    Ok(())
+}
+
 fn check_leaf_path(
     root: &[u8; 32],
     leaf: &Leaf,
@@ -128,13 +204,37 @@ fn check_leaf_path(
     path: &[[u8; 32]],
     depth: usize,
 ) -> Result<(), &'static str> {
-    if path.len() != depth {
-        return Err("wrong proof path length");
+    check_path_shape(index, path, depth)?;
+    if &fold_path(leaf_hash(&leaf.id, leaf.tier), index, path, 0, depth) != root {
+        return Err("proof does not match the list root");
     }
-    if depth < 32 && u64::from(index) >= (1u64 << depth) {
-        return Err("leaf index out of range");
+    Ok(())
+}
+
+/// [`check_leaf_path`] for both leaves of a non-membership proof, with the same
+/// result and the same error for every input. The leaves at `index` and `index + 1`
+/// meet at the first level `meet` where their indices agree; above it, their paths
+/// lead to the root through the same nodes. So once the left path holds, the right
+/// one holds if it reaches the left one's node at `meet` and carries the same
+/// siblings above it, and the hashes above `meet` need not be done twice. A right
+/// path that doesn't match the left one there is folded to the root as before.
+fn check_adjacent_paths(root: &[u8; 32], proof: &NonMembership, right_index: u32, depth: usize) -> Result<(), &'static str> {
+    let (left, right) = (&proof.left_path, &proof.right_path);
+    check_path_shape(proof.left_index, left, depth)?;
+    // `right_index` is `left_index + 1`: they first agree above the left index's
+    // trailing ones. Past `depth` the right index is out of range, which the right
+    // path's own checks refuse.
+    let meet = (proof.left_index.trailing_ones() as usize + 1).min(depth);
+    let left_at_meet = fold_path(leaf_hash(&proof.left.id, proof.left.tier), proof.left_index, left, 0, meet);
+    if &fold_path(left_at_meet, proof.left_index, left, meet, depth) != root {
+        return Err("proof does not match the list root");
     }
-    if &root_from_path(leaf_hash(&leaf.id, leaf.tier), index, path) != root {
+    check_path_shape(right_index, right, depth)?;
+    let right_at_meet = fold_path(leaf_hash(&proof.right.id, proof.right.tier), right_index, right, 0, meet);
+    if right_at_meet == left_at_meet && right[meet..] == left[meet..] {
+        return Ok(());
+    }
+    if &fold_path(right_at_meet, right_index, right, meet, depth) != root {
         return Err("proof does not match the list root");
     }
     Ok(())
@@ -171,8 +271,7 @@ pub fn verify_depth(
                 return Err("id is not strictly between the proof leaves");
             }
             let right_index = n.left_index.checked_add(1).ok_or("leaf index out of range")?;
-            check_leaf_path(root, &n.left, n.left_index, &n.left_path, depth)?;
-            check_leaf_path(root, &n.right, right_index, &n.right_path, depth)?;
+            check_adjacent_paths(root, n, right_index, depth)?;
             Ok(TIER_NORMAL)
         }
     }
@@ -629,6 +728,213 @@ mod tests {
         // Membership at a padding index with an arbitrary id.
         let m = Membership { index: n as u32, tier: TIER_LOCKED, path: l.path(n) };
         assert!(v(&l, &id, &LengthProof::Membership(m)).is_err());
+    }
+
+    /// The verifier as it was before the shared-path check: each path folded to the root.
+    fn verify_reference(root: &[u8; 32], id: &[u8; 32], proof: &LengthProof, depth: usize) -> Result<Tier, &'static str> {
+        fn root_from_path(leaf: [u8; 32], index: u32, path: &[[u8; 32]]) -> [u8; 32] {
+            let mut acc = leaf;
+            for (level, sibling) in path.iter().enumerate() {
+                acc = if (index >> level) & 1 == 0 { node_hash(&acc, sibling) } else { node_hash(sibling, &acc) };
+            }
+            acc
+        }
+        fn check(root: &[u8; 32], leaf: &Leaf, index: u32, path: &[[u8; 32]], depth: usize) -> Result<(), &'static str> {
+            if path.len() != depth {
+                return Err("wrong proof path length");
+            }
+            if depth < 32 && u64::from(index) >= (1u64 << depth) {
+                return Err("leaf index out of range");
+            }
+            if &root_from_path(leaf_hash(&leaf.id, leaf.tier), index, path) != root {
+                return Err("proof does not match the list root");
+            }
+            Ok(())
+        }
+        if *id == SENTINEL_LOW || *id == SENTINEL_HIGH {
+            return Err("sentinel ids are not names");
+        }
+        match proof {
+            LengthProof::Membership(m) => {
+                if m.tier != TIER_LOCKED && m.tier != TIER_THREE {
+                    return Err("membership tier must be locked or three");
+                }
+                check(root, &Leaf { id: *id, tier: m.tier }, m.index, &m.path, depth)?;
+                Ok(m.tier)
+            }
+            LengthProof::NonMembership(n) => {
+                if !(n.left.id < *id && *id < n.right.id) {
+                    return Err("id is not strictly between the proof leaves");
+                }
+                let right_index = n.left_index.checked_add(1).ok_or("leaf index out of range")?;
+                check(root, &n.left, n.left_index, &n.left_path, depth)?;
+                check(root, &n.right, right_index, &n.right_path, depth)?;
+                Ok(TIER_NORMAL)
+            }
+        }
+    }
+
+    /// Every variation of a proof gets the same answer, error included, from the
+    /// verifier and from the reference.
+    fn same_as_reference(l: &ShortList, id: &[u8; 32], proof: &NonMembership) -> usize {
+        let mut variants = vec![proof.clone()];
+        for i in 0..proof.left_path.len().max(proof.right_path.len()) {
+            for (byte, bit) in [(0, 0x01), (31, 0x80)] {
+                if i < proof.left_path.len() {
+                    let mut n = proof.clone();
+                    n.left_path[i][byte] ^= bit;
+                    variants.push(n);
+                }
+                if i < proof.right_path.len() {
+                    let mut n = proof.clone();
+                    n.right_path[i][byte] ^= bit;
+                    variants.push(n);
+                }
+            }
+            // The same sibling at one level of both paths.
+            if i < proof.left_path.len() && i < proof.right_path.len() {
+                let mut n = proof.clone();
+                n.left_path[i][7] ^= 0x10;
+                n.right_path[i][7] ^= 0x10;
+                variants.push(n);
+            }
+        }
+        for index in [proof.left_index.wrapping_add(1), proof.left_index.wrapping_sub(1), proof.left_index ^ 2, u32::MAX, (1 << l.depth()) - 1, 1 << l.depth()] {
+            let mut n = proof.clone();
+            n.left_index = index;
+            variants.push(n);
+        }
+        let mut n = proof.clone();
+        std::mem::swap(&mut n.left_path, &mut n.right_path);
+        variants.push(n);
+        let mut n = proof.clone();
+        n.right_path = n.left_path.clone();
+        variants.push(n);
+        let mut n = proof.clone();
+        n.left_path = n.right_path.clone();
+        variants.push(n);
+        let mut n = proof.clone();
+        n.right.tier ^= 1;
+        variants.push(n);
+        let mut n = proof.clone();
+        n.left.tier ^= 1;
+        variants.push(n);
+        let mut n = proof.clone();
+        n.right_path.pop();
+        variants.push(n);
+        let mut n = proof.clone();
+        n.left_path.push([0; 32]);
+        variants.push(n);
+        let root = l.root();
+        let depth = l.depth();
+        for n in &variants {
+            let p = LengthProof::NonMembership(n.clone());
+            assert_eq!(verify_depth(&root, id, &p, depth), verify_reference(&root, id, &p, depth), "{n:?}");
+            let mut other = root;
+            other[0] ^= 1;
+            assert_eq!(verify_depth(&other, id, &p, depth), verify_reference(&other, id, &p, depth));
+        }
+        variants.len()
+    }
+
+    /// The derived readers the hand-written ones replace, for the same layout.
+    mod derived {
+        #[derive(Debug, PartialEq, borsh::BorshDeserialize)]
+        pub struct Leaf { pub id: [u8; 32], pub tier: u8 }
+        #[derive(Debug, PartialEq, borsh::BorshDeserialize)]
+        pub struct Membership { pub index: u32, pub tier: u8, pub path: Vec<[u8; 32]> }
+        #[derive(Debug, PartialEq, borsh::BorshDeserialize)]
+        pub struct NonMembership { pub left: Leaf, pub left_path: Vec<[u8; 32]>, pub right: Leaf, pub right_path: Vec<[u8; 32]>, pub left_index: u32 }
+        #[derive(Debug, PartialEq, borsh::BorshDeserialize)]
+        pub enum LengthProof { Membership(Membership), NonMembership(NonMembership) }
+    }
+
+    fn same_decoding(bytes: &[u8]) {
+        let ours = borsh::from_slice::<LengthProof>(bytes);
+        let theirs = borsh::from_slice::<derived::LengthProof>(bytes);
+        match (ours, theirs) {
+            (Ok(ours), Ok(theirs)) => {
+                let ours = match ours {
+                    LengthProof::Membership(m) => derived::LengthProof::Membership(derived::Membership { index: m.index, tier: m.tier, path: m.path }),
+                    LengthProof::NonMembership(n) => derived::LengthProof::NonMembership(derived::NonMembership {
+                        left: derived::Leaf { id: n.left.id, tier: n.left.tier },
+                        left_path: n.left_path,
+                        right: derived::Leaf { id: n.right.id, tier: n.right.tier },
+                        right_path: n.right_path,
+                        left_index: n.left_index,
+                    }),
+                };
+                assert_eq!(ours, theirs);
+            }
+            (Err(ours), Err(theirs)) => assert_eq!((ours.kind(), ours.to_string()), (theirs.kind(), theirs.to_string())),
+            (ours, theirs) => panic!("{ours:?} vs {theirs:?} for {bytes:?}"),
+        }
+    }
+
+    #[test]
+    fn proofs_decode_as_the_derived_readers_did() {
+        let l = sample(40, 21);
+        let mut s = 31u64;
+        let mut proofs: Vec<LengthProof> = (0..6).map(|_| l.prove(&rand_id(&mut s)).unwrap()).collect();
+        proofs.extend(l.leaves()[1..4].iter().map(|leaf| l.prove(&leaf.id).unwrap()));
+        let mut odd = non_member(&l, &rand_id(&mut s));
+        odd.left_path.truncate(3);
+        odd.right_path.extend([[9; 32]; 17]);
+        proofs.push(LengthProof::NonMembership(odd));
+        for proof in &proofs {
+            let bytes = borsh::to_vec(proof).unwrap();
+            assert_eq!(&borsh::from_slice::<LengthProof>(&bytes).unwrap(), proof);
+            // Every prefix, the whole with bytes added, and each byte changed.
+            for end in 0..bytes.len() {
+                same_decoding(&bytes[..end]);
+            }
+            let mut longer = bytes.clone();
+            longer.push(0);
+            same_decoding(&longer);
+            for i in 0..bytes.len() {
+                for x in [0x01, 0x80, 0xff] {
+                    let mut changed = bytes.clone();
+                    changed[i] ^= x;
+                    same_decoding(&changed);
+                }
+            }
+        }
+        // Huge counts fail the same way, without reserving their size.
+        let mut bytes = vec![1u8];
+        bytes.extend([7u8; 33]);
+        bytes.extend(u32::MAX.to_le_bytes());
+        bytes.extend([5u8; 64]);
+        same_decoding(&bytes);
+    }
+
+    #[test]
+    fn shared_path_check_answers_as_the_full_fold_did() {
+        let mut checked = 0;
+        for n in [0, 1, 2, 3, 5, 6, 7, 14, 15, 30, 31, 62] {
+            let l = sample(n, 300 + n as u64);
+            let leaves = l.leaves().to_vec();
+            for w in leaves.windows(2) {
+                if let Some(id) = between(&w[0].id, &w[1].id) {
+                    let proof = non_member(&l, &id);
+                    assert_eq!(v(&l, &id, &LengthProof::NonMembership(proof.clone())), Ok(TIER_NORMAL));
+                    checked += same_as_reference(&l, &id, &proof);
+                }
+            }
+            // Membership proofs and the cases a non-membership proof is refused before its paths.
+            for leaf in &leaves[1..leaves.len() - 1] {
+                let p = l.prove(&leaf.id).unwrap();
+                assert_eq!(v(&l, &leaf.id, &p), verify_reference(&l.root(), &leaf.id, &p, l.depth()));
+            }
+        }
+        // The shipped depth.
+        let l = sample(1_048_600, 9);
+        let mut s = 77u64;
+        for _ in 0..8 {
+            let id = rand_id(&mut s);
+            let proof = non_member(&l, &id);
+            checked += same_as_reference(&l, &id, &proof);
+        }
+        assert!(checked > 5_000, "{checked}");
     }
 
     #[test]
