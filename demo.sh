@@ -71,7 +71,10 @@ if [ "${DEMO_QUICK:-0}" != 1 ]; then
     rzup install cargo-risczero 3.0.5
     rzup install rust
   fi
-  ok "$(cargo risczero --version | head -1)"
+  # The local sequencer runs programs with r0vm, which rzup installs next to cargo-risczero.
+  command -v r0vm >/dev/null 2>&1 || ls "$HOME"/.risc0/extensions/*/r0vm >/dev/null 2>&1 \
+    || fail "RISC Zero's r0vm is missing (the sequencer needs it). Install it with: rzup install r0vm"
+  ok "$(cargo risczero --version | head -1), r0vm present"
 fi
 
 # ---------------------------------------------------------------------------------------------

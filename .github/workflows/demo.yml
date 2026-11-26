@@ -7,12 +7,17 @@ on:
     paths: [demo.sh, scripts/wallet-e2e.sh, .github/workflows/demo.yml]
 jobs:
   demo:
-    name: ./demo.sh from a clean clone
-    runs-on: ubuntu-24.04
+    name: ./demo.sh from a clean clone (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - name: System libraries the demo asks for (PC/SC for Keycard support)
+        if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libpcsclite-dev pkg-config
       - name: ./demo.sh
         env:
