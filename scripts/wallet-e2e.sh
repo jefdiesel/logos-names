@@ -144,14 +144,23 @@ transfer() { # from to amount [--to-pk]: --to names an account this wallet holds
   N wallet auth-transfer send --from "Public/$1" "${to[@]}" --amount "$3" | grep -vE '^(Stored|Transaction data)' | cut -c1-200
 }
 deploy_program() { # elf -> header id (the program's account ID)
-  local elf=$1 size count header segs=() i
+  local elf=$1 size count header segs=() i out want
   size=$(wc -c < "$elf" | tr -d ' ')
+  # A first guess from the file size. The loader splits the program's bytecode, not the ELF
+  # file, so its count can differ; when it does, it says how many it wants and we redo it.
   count=$(( (size + SEGMENT - 1) / SEGMENT ))
-  header=$(new_public "$MAIN")
-  for i in $(seq 1 "$count"); do segs+=("Public/$(new_public "$MAIN")"); done
-  echo "deploying $(basename "$elf") ($size bytes, $count segments) at $header" >&2
-  N wallet program-loader deploy --elf "$elf" --header "Public/$header" --segments "${segs[@]}" --payer "Public/$F" \
-    | grep -vE '^(Stored|Transaction data)' | cut -c1-200 >&2
+  for _ in 1 2; do
+    header=$(new_public "$MAIN"); segs=()
+    for i in $(seq 1 "$count"); do segs+=("Public/$(new_public "$MAIN")"); done
+    echo "deploying $(basename "$elf") ($size bytes, $count segments) at $header" >&2
+    out=$(N wallet program-loader deploy --elf "$elf" --header "Public/$header" --segments "${segs[@]}" \
+      --payer "Public/$F" 2>&1 | grep -vE '^(Stored|Transaction data)' | cut -c1-200) || true
+    echo "$out" >&2
+    want=$(echo "$out" | sed -nE 's/.*splits into ([0-9]+) segment\(s\) but [0-9]+ were supplied.*/\1/p' | head -1)
+    [ -n "$want" ] && [ "$want" != "$count" ] || break
+    echo "the loader wants $want segments, not $count: deploying again" >&2
+    count=$want
+  done
   echo "$header"
 }
 

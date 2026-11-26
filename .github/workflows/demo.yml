@@ -4,7 +4,7 @@ name: demo
 on:
   workflow_dispatch:
   push:
-    paths: [demo.sh, .github/workflows/demo.yml]
+    paths: [demo.sh, scripts/wallet-e2e.sh, .github/workflows/demo.yml]
 jobs:
   demo:
     name: ./demo.sh from a clean clone
