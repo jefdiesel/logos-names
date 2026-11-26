@@ -1,0 +1,24 @@
+# Runs ./demo.sh exactly as an evaluator would: a clean clone on a fresh machine, no caches,
+# no changes. Manual (Actions tab, "Run workflow") and on pushes that touch the demo.
+name: demo
+on:
+  workflow_dispatch:
+  push:
+    paths: [demo.sh, .github/workflows/demo.yml]
+jobs:
+  demo:
+    name: ./demo.sh from a clean clone
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries the demo asks for (PC/SC for Keycard support)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libpcsclite-dev pkg-config
+      - name: ./demo.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # rzup looks releases up through the GitHub API
+        run: ./demo.sh
+      - name: Logs
+        if: always()
+        run: |
+          for f in .demo/*.log; do echo "== $f"; tail -40 "$f"; done

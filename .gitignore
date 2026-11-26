@@ -3,3 +3,4 @@ target/
 .chain-origin
 dist/
 node_modules/
+.demo/
