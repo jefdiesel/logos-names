@@ -32,8 +32,8 @@
 //! The registry keeps no history. Releasing a name empties its record and page;
 //! transferring a name empties everything its last holder sealed.
 //!
-//! A name is claimed in two steps, commit then reveal ([`Instruction::Commit`],
-//! [`Instruction::Register`]), so that watching pending transactions doesn't let
+//! A name is claimed in two steps, commit then reveal ([`Instruction::Commit`]
+//! or [`Instruction::CommitPublic`], then [`Instruction::Register`]), so that watching pending transactions doesn't let
 //! anyone register an identifier before the person who knows its name: the
 //! commitment hides the identifier, and the reveal is bound to the committed
 //! holder and only valid a while after the commitment.
@@ -90,16 +90,30 @@ pub const MODE_FEE: u8 = 0;
 /// name is released; names never lapse.
 pub const MODE_DEPOSIT: u8 = 1;
 
-/// How far a commit or a reveal may be from the time it claims: it is valid only
-/// in a block whose timestamp is in `[now, now + TIME_WINDOW_MS)`. So a claimed
-/// time is at most this much earlier than the real one. Long enough for a
-/// private holder's proof (minutes on a laptop) to be made and included.
+/// How far a private commit, a private reveal or a claim may be from the time it
+/// claims: it is valid only in a block whose timestamp is in
+/// `[now, now + TIME_WINDOW_MS)`. So a claimed time is at most this much earlier
+/// than the real one. Long enough for a private holder's proof (minutes on a
+/// laptop) to be made and included.
 pub const TIME_WINDOW_MS: u64 = 10 * 60 * 1000;
-/// How long a commitment must wait before its reveal. With a claimed time off
-/// by at most [`TIME_WINDOW_MS`], at least `MIN_COMMIT_AGE_MS - TIME_WINDOW_MS`
-/// (five minutes) really passes between a commitment and its reveal, so a
-/// reveal seen pending can't be beaten by a commitment made after seeing it.
+/// How long a private commitment must wait before its reveal. With a claimed
+/// time off by at most [`TIME_WINDOW_MS`], at least
+/// `MIN_COMMIT_AGE_MS - TIME_WINDOW_MS` (five minutes) really passes between a
+/// commitment and its reveal, so a reveal seen pending can't be beaten by a
+/// commitment made after seeing it.
 pub const MIN_COMMIT_AGE_MS: u64 = 15 * 60 * 1000;
+/// How far a public commit ([`Instruction::CommitPublic`]) or the reveal of a
+/// public commitment may be from the time it claims: it is valid only in a block
+/// whose timestamp is in `[now, now + PUBLIC_TIME_WINDOW_MS)`. A public
+/// transaction has no slow proof to wait for, so it only needs room to reach the
+/// next block; a private holder, whose proof takes minutes, normally uses
+/// [`Instruction::Commit`] instead.
+pub const PUBLIC_TIME_WINDOW_MS: u64 = 60 * 1000;
+/// How long a public commitment ([`Instruction::CommitPublic`]) must wait before
+/// its reveal. A public commit can claim a time up to one minute old
+/// ([`PUBLIC_TIME_WINDOW_MS`]), so a five-minute wait means at least four real
+/// minutes between a commitment and its reveal.
+pub const PUBLIC_MIN_COMMIT_AGE_MS: u64 = 5 * 60 * 1000;
 /// How long a commitment can still be revealed.
 pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -136,13 +150,20 @@ pub struct NameRecord {
     pub claimed: bool,
 }
 
-/// A commitment to claim some name: when it was made. The name, its
-/// identifier and the holder are hidden in the commitment's address.
+/// A commitment to claim some name: when it was made and which clock-window path
+/// it was made under. The name, its identifier and the holder are hidden in the
+/// commitment's address.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Commitment {
     pub version: u8,
-    /// The committer's claimed time, at most [`TIME_WINDOW_MS`] early.
+    /// The committer's claimed time, at most [`PUBLIC_TIME_WINDOW_MS`] early if
+    /// `public`, or [`TIME_WINDOW_MS`] early otherwise.
     pub made: u64,
+    /// True when made by [`Instruction::CommitPublic`] under the shorter
+    /// [`PUBLIC_TIME_WINDOW_MS`] window; false when made by [`Instruction::Commit`]
+    /// under [`TIME_WINDOW_MS`]. Bound at commit time and checked at reveal time,
+    /// so a commitment only counts for the path it was made for.
+    pub public: bool,
 }
 
 /// A name's page, sealed like its record.
@@ -206,14 +227,17 @@ pub enum Instruction {
     /// past its grace period, for the payer, with its first sealed profile
     /// (which may be empty). The commitment must be
     /// [`commitment(id, owner_tag(id, payer), secret)`](commitment), made at
-    /// least [`MIN_COMMIT_AGE_MS`] and less than [`MAX_COMMIT_AGE_MS`] before
-    /// `now`; revealing uses it up. `now` is the sender's claim of the time; the
-    /// transaction is only valid in a block whose timestamp is in
-    /// `[now, now + TIME_WINDOW_MS)`. With `deposit` false (fee mode), `fee`
-    /// is the settings' price for `term`, paid to the treasury; with `deposit`
-    /// true (deposit mode), `fee` is the settings' deposit for the name's
-    /// length, paid into the name's deposit account, and `term` is ignored.
-    /// The signer pays. `treasury` is where a fee goes, in fee mode.
+    /// least [`PUBLIC_MIN_COMMIT_AGE_MS`] (for [`Instruction::CommitPublic`]) or
+    /// [`MIN_COMMIT_AGE_MS`] (for [`Instruction::Commit`]) and less than
+    /// [`MAX_COMMIT_AGE_MS`] before `now`; revealing uses it up. `now` is the
+    /// sender's claim of the time; the transaction is only valid in a block
+    /// whose timestamp is in `[now, now + PUBLIC_TIME_WINDOW_MS)` for a public
+    /// commitment or `[now, now + TIME_WINDOW_MS)` for a private one. With
+    /// `deposit` false (fee mode), `fee` is the settings' price for `term`, paid
+    /// to the treasury; with `deposit` true (deposit mode), `fee` is the
+    /// settings' deposit for the name's length, paid into the name's deposit
+    /// account, and `term` is ignored. The signer pays. `treasury` is where a
+    /// fee goes, in fee mode.
     Register {
         id: NameId,
         sealed: Vec<u8>,
@@ -265,11 +289,13 @@ pub enum Instruction {
         claims_until: u64,
         claims_program: AccountId,
     },
-    /// Commit to claiming a name: the first step of [`Instruction::Register`].
-    /// `commitment` is [`commitment`]`(id, owner_tag(id, payer), secret)` for
-    /// the account that will reveal it; nothing here names the name, its
-    /// identifier or that account. Valid only in a block whose timestamp is in
-    /// `[now, now + TIME_WINDOW_MS)`. Anyone may commit; whoever signs pays.
+    /// Commit to claiming a name on the private path: the first step of a
+    /// private [`Instruction::Register`]. `commitment` is
+    /// [`commitment`]`(id, owner_tag(id, payer), secret)` for the account that
+    /// will reveal it; nothing here names the name, its identifier or that
+    /// account. Valid only in a block whose timestamp is in
+    /// `[now, now + TIME_WINDOW_MS)`, and revealable after
+    /// [`MIN_COMMIT_AGE_MS`]. Anyone may commit; whoever signs pays.
     Commit { commitment: [u8; 32], now: u64 },
     /// Take back a name held on an earlier chain, with no deposit: the signer
     /// must be the account that held it there, shown by `proof` against the
@@ -283,6 +309,13 @@ pub enum Instruction {
         now: u64,
         proof: ClaimProof,
     },
+    /// Commit to claiming a name on the public (fast) path: the first step of a
+    /// public [`Instruction::Register`]. Same commitment format as
+    /// [`Instruction::Commit`], but valid only in a block whose timestamp is in
+    /// `[now, now + PUBLIC_TIME_WINDOW_MS)` and revealable after
+    /// [`PUBLIC_MIN_COMMIT_AGE_MS`] (also under [`PUBLIC_TIME_WINDOW_MS`]).
+    /// Anyone may commit; whoever signs pays.
+    CommitPublic { commitment: [u8; 32], now: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -353,11 +386,13 @@ pub enum Effect {
     WritePage { sealed: Vec<u8> },
     /// On the signer's own account.
     WritePrimary { name: String },
-    /// On a commitment account: record that it was made at `now`, refused if
-    /// one is there that can still be revealed.
-    Commit { now: u64 },
+    /// On a commitment account: record that it was made at `now` on the public
+    /// (`public = true`) or private (`public = false`) path, refused if one is
+    /// there that can still be revealed.
+    Commit { now: u64, public: bool },
     /// On a commitment account: use it up, refused unless it was made at least
-    /// [`MIN_COMMIT_AGE_MS`] and less than [`MAX_COMMIT_AGE_MS`] before `now`.
+    /// [`PUBLIC_MIN_COMMIT_AGE_MS`] (if public) or [`MIN_COMMIT_AGE_MS`] (if
+    /// private) and less than [`MAX_COMMIT_AGE_MS`] before `now`.
     Reveal { now: u64 },
 }
 
@@ -497,14 +532,27 @@ pub fn commitment_address(program: &AccountId, commitment: &[u8; 32]) -> Account
     AccountId::for_public_pda(program, &seed(COMMITMENT_SEED_DOMAIN, commitment))
 }
 
-/// Valid only in a block whose timestamp is in `[now, now + TIME_WINDOW_MS)`.
-fn bounded_window(response: Response, now: u64) -> Response {
+const fn commit_window_ms(public: bool) -> u64 {
+    if public { PUBLIC_TIME_WINDOW_MS } else { TIME_WINDOW_MS }
+}
+
+const fn min_commit_age_ms(public: bool) -> u64 {
+    if public { PUBLIC_MIN_COMMIT_AGE_MS } else { MIN_COMMIT_AGE_MS }
+}
+
+/// Valid only in a block whose timestamp is in `[now, now + window_ms)`.
+fn bounded_window_of(response: Response, now: u64, window_ms: u64) -> Response {
     let window = lee_core::program::TimestampValidityWindow::try_from((
         Some(now),
-        Some(after(now, TIME_WINDOW_MS)),
+        Some(after(now, window_ms)),
     ))
     .expect("a window of positive length");
     response.timestamp_window(window)
+}
+
+/// Valid only in a block whose timestamp is in `[now, now + TIME_WINDOW_MS)`.
+fn bounded_window(response: Response, now: u64) -> Response {
+    bounded_window_of(response, now, TIME_WINDOW_MS)
 }
 
 /// The leaf of a name on the claims list: the address of its record on the
@@ -735,9 +783,21 @@ pub fn handle(input: &ReceiveInput, message: Message) -> Response {
         Message::Instruction(instruction) => instruct(input, instruction),
         Message::Effect(effect) => {
             assert!(input.from_own_program(), "only this program may send an effect");
-            match apply(effect, &input.pre_state) {
+            // For a reveal, the commitment actor itself knows which path the
+            // commitment was made under and enforces the matching clock window
+            // on the reveal transaction.
+            let reveal_window = match &effect {
+                Effect::Reveal { now } => load_commitment(&input.pre_state)
+                    .map(|held| (*now, commit_window_ms(held.public))),
+                _ => None,
+            };
+            let response = match apply(effect, &input.pre_state) {
                 Some(state) => Response::set_state(state),
                 None => Response::keep_state(),
+            };
+            match reveal_window {
+                Some((now, window_ms)) => bounded_window_of(response, now, window_ms),
+                None => response,
             }
         }
         Message::RequireHolder { tag } => {
@@ -922,8 +982,15 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
         Instruction::Commit { commitment, now } => bounded_window(response, now).send(self::effect(
             commitment_address(program, &commitment),
             program,
-            Effect::Commit { now },
+            Effect::Commit { now, public: false },
         )),
+        Instruction::CommitPublic { commitment, now } => {
+            bounded_window_of(response, now, PUBLIC_TIME_WINDOW_MS).send(self::effect(
+                commitment_address(program, &commitment),
+                program,
+                Effect::Commit { now, public: true },
+            ))
+        }
         Instruction::Claim { id, sealed, now, proof } => {
             assert!(
                 sealed.len() <= MAX_SEALED_RECORD_LEN,
@@ -1159,22 +1226,22 @@ pub fn apply(effect: Effect, pre_data: &[u8]) -> Option<Vec<u8>> {
                 name,
             })
         }),
-        Effect::Commit { now } => {
+        Effect::Commit { now, public } => {
             if let Some(held) = load_commitment(pre_data) {
                 assert!(
                     after(held.made, MAX_COMMIT_AGE_MS) <= now,
                     "this commitment was already made"
                 );
             }
-            Some(to_bytes(&Commitment { version: VERSION, made: now }))
+            Some(to_bytes(&Commitment { version: VERSION, made: now, public }))
         }
         Effect::Reveal { now } => {
-            let made = load_commitment(pre_data).expect("no commitment to reveal").made;
+            let held = load_commitment(pre_data).expect("no commitment to reveal");
             assert!(
-                after(made, MIN_COMMIT_AGE_MS) <= now,
+                after(held.made, min_commit_age_ms(held.public)) <= now,
                 "the commitment is too recent; reveal it later"
             );
-            assert!(now < after(made, MAX_COMMIT_AGE_MS), "the commitment has expired");
+            assert!(now < after(held.made, MAX_COMMIT_AGE_MS), "the commitment has expired");
             Some(Vec::new())
         }
     }
@@ -1464,7 +1531,11 @@ mod tests {
             // made long enough before.
             if let (Instruction::Register { now, .. }, Some(slot)) = (&instruction, accounts.get(3)) {
                 self.actors.entry(slot.account_id).or_insert_with(|| {
-                    to_bytes(&Commitment { version: VERSION, made: now - MIN_COMMIT_AGE_MS })
+                    to_bytes(&Commitment {
+                        version: VERSION,
+                        made: now - MIN_COMMIT_AGE_MS,
+                        public: false,
+                    })
                 });
             }
             self.run_exactly(accounts, instruction);
@@ -1505,6 +1576,14 @@ mod tests {
             self.run_exactly(
                 vec![meta(commitment_address(&PROGRAM, &promised), false), meta(CAROL, true)],
                 Instruction::Commit { commitment: promised, now },
+            );
+        }
+
+        fn commit_public(&mut self, id: &NameId, holder: AccountId, now: u64) {
+            let promised = commitment(id, &owner_tag(id, &holder), &SECRET);
+            self.run_exactly(
+                vec![meta(commitment_address(&PROGRAM, &promised), false), meta(CAROL, true)],
+                Instruction::CommitPublic { commitment: promised, now },
             );
         }
 
@@ -1922,6 +2001,13 @@ mod tests {
             format!("08{}0068e5cf8b010000", "c0".repeat(32))
         );
         assert_eq!(
+            hex(&Instruction::CommitPublic {
+                commitment: [0xC0; 32],
+                now: 1_700_000_000_000,
+            }),
+            format!("0a{}0068e5cf8b010000", "c0".repeat(32))
+        );
+        assert_eq!(
             hex(&Instruction::Renew {
                 id,
                 term: 2,
@@ -2281,6 +2367,104 @@ mod tests {
             let window = plan(&input(accounts, &instruction), instruction).output().timestamp_validity_window;
             assert_eq!((window.start(), window.end()), (Some(NOW), Some(NOW + TIME_WINDOW_MS)));
         }
+    }
+
+    #[test]
+    fn a_public_name_is_claimed_after_the_public_wait() {
+        let mut chain = Chain::default();
+        chain.commit_public(&JEF, ALICE, NOW - PUBLIC_MIN_COMMIT_AGE_MS);
+        chain.reveal(&JEF, ALICE, NOW);
+        assert_eq!(chain.record(&JEF).map(|r| r.owner), Some(owner_tag(&JEF, &ALICE)));
+        assert!(chain.data(&committed(&JEF, ALICE)).is_empty(), "revealing uses the commitment up");
+    }
+
+    #[test]
+    #[should_panic(expected = "the commitment is too recent")]
+    fn a_public_reveal_before_the_public_wait_is_refused() {
+        let mut chain = Chain::default();
+        chain.commit_public(&JEF, ALICE, NOW);
+        chain.reveal(&JEF, ALICE, NOW + PUBLIC_MIN_COMMIT_AGE_MS - 1);
+    }
+
+    #[test]
+    fn a_public_commit_and_its_reveal_use_the_short_window() {
+        let promised = commitment(&JEF, &owner_tag(&JEF, &ALICE), &SECRET);
+        let commit_pub = Instruction::CommitPublic { commitment: promised, now: NOW };
+        let accounts = vec![meta(commitment_address(&PROGRAM, &promised), false), meta(CAROL, true)];
+        let window = plan(&input(accounts, &commit_pub), commit_pub).output().timestamp_validity_window;
+        assert_eq!((window.start(), window.end()), (Some(NOW), Some(NOW + PUBLIC_TIME_WINDOW_MS)));
+
+        let reveal_window = |public: bool, made: u64, now: u64| {
+            let receive = ReceiveInput {
+                receiver: Actor::new(committed(&JEF, ALICE), PROGRAM),
+                from: Some(Actor::new(ALICE, PROGRAM)),
+                is_authorized: false,
+                pre_state: to_bytes(&Commitment { version: VERSION, made, public }).into(),
+                message: Vec::new(),
+            };
+            handle(&receive, Message::Effect(Effect::Reveal { now })).validity.timestamps
+        };
+
+        let pub_reveal = NOW + PUBLIC_MIN_COMMIT_AGE_MS;
+        let w = reveal_window(true, NOW, pub_reveal);
+        assert_eq!((w.start(), w.end()), (Some(pub_reveal), Some(pub_reveal + PUBLIC_TIME_WINDOW_MS)));
+
+        let priv_reveal = NOW + MIN_COMMIT_AGE_MS;
+        let w = reveal_window(false, NOW, priv_reveal);
+        assert_eq!((w.start(), w.end()), (Some(priv_reveal), Some(priv_reveal + TIME_WINDOW_MS)));
+    }
+
+    /// A commitment made under the 10-minute private clock window cannot be
+    /// revealed after the shorter public wait: otherwise an attacker could
+    /// backdate a private `Commit` by 10 minutes and reveal immediately.
+    #[test]
+    #[should_panic(expected = "the commitment is too recent")]
+    fn a_private_commit_cannot_use_the_public_wait() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, BOB, NOW - TIME_WINDOW_MS + 1);
+        chain.reveal(&JEF, BOB, NOW);
+    }
+
+    /// Alice commits privately and broadcasts her reveal at real time `NOW`.
+    /// Bob sees Alice's pending reveal at `NOW` and submits a `CommitPublic`
+    /// maximally backdated within `PUBLIC_TIME_WINDOW_MS`. Even so, Bob cannot
+    /// reveal before four real minutes have passed, and Alice's reveal wins.
+    #[test]
+    fn a_public_attacker_racing_a_pending_private_reveal_still_waits_four_real_minutes() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
+
+        let bob_made = NOW - PUBLIC_TIME_WINDOW_MS + 1;
+        chain.commit_public(&JEF, BOB, bob_made);
+
+        // A public commit's claimed time is at most one minute early, so its
+        // five-minute wait is at least four real minutes; a private commit's is
+        // at most ten minutes early, so its fifteen-minute wait is at least five.
+        const REAL_WAIT_MS: u64 = 4 * 60 * 1000;
+        assert_eq!(PUBLIC_MIN_COMMIT_AGE_MS - PUBLIC_TIME_WINDOW_MS, REAL_WAIT_MS);
+        assert_eq!(MIN_COMMIT_AGE_MS - TIME_WINDOW_MS, 5 * 60 * 1000);
+
+        let mut bob_early = Chain { actors: chain.actors.clone() };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bob_early.reveal(&JEF, BOB, NOW + REAL_WAIT_MS);
+        }));
+        assert!(result.is_err(), "a public attacker cannot beat the four-minute real wait");
+
+        chain.reveal(&JEF, ALICE, NOW);
+        assert_eq!(chain.record(&JEF).map(|r| r.owner), Some(owner_tag(&JEF, &ALICE)));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chain.reveal(&JEF, BOB, NOW + REAL_WAIT_MS + 1);
+        }));
+        assert!(result.is_err(), "Bob's later reveal cannot overwrite Alice's registration");
+    }
+
+    #[test]
+    #[should_panic(expected = "this commitment was already made")]
+    fn a_live_private_commitment_cannot_be_overwritten_as_public() {
+        let mut chain = Chain::default();
+        chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
+        chain.commit_public(&JEF, ALICE, NOW);
     }
 
     #[test]

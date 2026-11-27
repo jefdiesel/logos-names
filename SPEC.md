@@ -166,6 +166,7 @@ On the chain:
 
 ```rust
 struct NameRecord { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8>, claimed: bool }   // version 6; owner is the owner tag; sealed at most 12,288 bytes
+struct Commitment { version: u8, made: u64, public: bool }             // version 6; `public` binds the commitment to the fast public path
 struct Page       { version: u8, sealed: Vec<u8> }                     // sealed at most 81,920 bytes
 struct PrimaryName { version: u8, name: String }                       // the reverse record, in the clear
 struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2],
@@ -364,8 +365,9 @@ So the bytes of a transaction's message are the tag `00`, then the `Instruction`
 | 5 | `Release` | `id, refund: u128` | record, page, and if `refund` is not 0 the deposit account's balance and the signer's |
 | 6 | `SetPrimary` | `name: String` | none: it writes the signer's own actor |
 | 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2], claims_root: [u8; 32], claims_until: u64, claims_program: AccountId` | settings; the signer is the program's own account the first time, then the admin |
-| 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment |
+| 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment (private path: 10-minute window, 15-minute minimum age) |
 | 9 | `Claim` | `id, sealed: Vec<u8>, now: u64, proof: Vec<[u8; 32]>` | record, page, settings |
+| 10 | `CommitPublic` | `commitment: [u8; 32], now: u64` | commitment (public path: 1-minute window, 5-minute minimum age) |
 
 Rules:
 
@@ -397,19 +399,34 @@ Rules:
   treasury itself, `fee` is 0 and no treasury is named. A client reads the
   settings account first.
 - **Claiming is commit, then reveal** (since registry version 4), so nobody watching
-  pending transactions can register an identifier first. `Commit` stores, at
-  `PDA(program, SHA-256("logos-names/v5/commit/" ‖ c))`, when it was made, where
+  pending transactions can register an identifier first. `Commit` (private path) or
+  `CommitPublic` (public path) stores, at
+  `PDA(program, SHA-256("logos-names/v5/commit/" ‖ c))`, when it was made and which
+  path it was made under (`public: bool`), where
   `c = SHA-256("logos-names/v5/commitment" ‖ id ‖ tag ‖ secret)`, `tag` is the
   owner tag of the account that will reveal it and `secret` is 32 random bytes
   the client keeps. `Register` names that commitment account and `secret`; the
   program recomputes `c` with the payer's tag, so a reveal seen pending can't
-  be replayed for another account. The commitment must have been made at least
-  15 minutes and less than 24 hours before the reveal's `now`; the reveal uses it
-  up. `Commit` and `Register` are valid only in a block whose timestamp is in
-  `[now, now + 10 minutes)` (room for a private holder's proof), so a claimed
-  time is at most 10 minutes early and at least 5 minutes really pass between a commitment and its reveal: longer than a
-  reveal waits to be included, so a commitment made after seeing one loses.
-  A `Commit` refuses to overwrite a commitment that can still be revealed.
+  be replayed for another account. Because the guest program's `ReceiveInput` does
+  not expose whether the transaction is public or privacy-preserving, `Register`
+  takes no path flag: the commitment actor reads the stored `public` bit that was
+  bound when the commitment's clock window was enforced on-chain, and applies the
+  matching minimum age and reveal clock window:
+  - **Private (`Commit`):** valid in a block whose timestamp is in
+    `[now, now + 10 minutes)` (room for a private holder's proof), and revealable
+    at least 15 minutes and less than 24 hours before the reveal's `now` (also
+    under `[now, now + 10 minutes)`). At least `15 - 10 = 5 minutes` really pass
+    between commit and reveal.
+  - **Public (`CommitPublic`):** valid in a block whose timestamp is in
+    `[now, now + 1 minute)` (no slow proof, only room to reach the next block),
+    and revealable at least 5 minutes and less than 24 hours before the reveal's
+    `now` (with the commitment actor also enforcing `[now, now + 1 minute)` on
+    the reveal). A public commit can claim a time up to 1 minute old, so a
+    5-minute wait means at least 4 real minutes between commit and reveal. A
+    10-minute-window `Commit` cannot be revealed on the shorter public wait,
+    because the wait follows the stored `public` bit.
+  The reveal uses the commitment up. Both `Commit` and `CommitPublic` refuse to
+  overwrite a commitment that can still be revealed.
 - `Register` succeeds if the name is unregistered, or if its record's
   `expires + grace <= now`. The payer becomes the owner (its tag is stored), `expires` becomes
   `now` plus the term, and any page left by a lapsed holder is emptied. Its
@@ -697,6 +714,7 @@ transaction's message is `00` followed by the encoding:
 | `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [1, 2, 3], mode: 0, deposits: [0, 0], claims_root: 32 × 0x00, claims_until: 0, claims_program: 32 × 0x07 }` | `07` ‖ `01` 32 times ‖ `02` 32 times ‖ three 16-byte little-endian numbers ‖ `00` ‖ `00` 72 times ‖ `07` 32 times |
 | `Commit { commitment: 32 × 0xc0, now: 1700000000000 }` | `08` ‖ `c0` 32 times ‖ `0068e5cf8b010000` |
 | `Claim { id, sealed: [ee], now: 1700000000000, proof: [32 × 0x01, 32 × 0x02] }` | `09` ‖ id ‖ `01000000ee` ‖ `0068e5cf8b010000` ‖ `02000000` ‖ `01` 32 times ‖ `02` 32 times |
+| `CommitPublic { commitment: 32 × 0xc0, now: 1700000000000 }` | `0a` ‖ `c0` 32 times ‖ `0068e5cf8b010000` |
 
 `claim_leaf(32 × 0x07, 32 × 0x08)` is `0ec9619438b0876b837235e0b00766a9244925d4fb7071f59221da38b98c9aff`.
 
@@ -981,9 +999,10 @@ still holds. A name registered elsewhere appears once it is looked up and kept.
 **Registering** is two steps, so that nobody watching pending transactions can
 take the name first. `register_name(name, owner, private_account)` registers to
 `owner` (base58), a public account in the open wallet, which pays the deposit
-(see `deposit`). The first call sends a commitment, which hides the name, and
-answers `stage: "committed"` with `ready_at` (milliseconds, chain time, about
-15 minutes on). Calling `register_name` again from then on sends the reveal that
+(see `deposit`). The first call sends a commitment (`CommitPublic`, since the
+owner is public), which hides the name, and answers `stage: "committed"` with
+`ready_at` (milliseconds, chain time, about 5 minutes on). Calling
+`register_name` again from then on sends the reveal that
 claims the name (`stage: "revealed"`), and once that has landed it answers
 `stage: "registered"` without sending anything. A call before `ready_at` sends
 nothing. The commitment is kept on this device and stays usable for 24 hours.
