@@ -55,17 +55,21 @@ pub const MODE_FEE: u8 = 0;
 pub const MODE_DEPOSIT: u8 = 1;
 /// The expiry of a name held by a deposit: it never lapses.
 pub const NEVER: u64 = u64::MAX;
-/// A commit or reveal is valid only in a block whose timestamp is in
+/// A private commit or reveal is valid only in a block whose timestamp is in
 /// `[now, now + TIME_WINDOW_MS)`.
 pub const TIME_WINDOW_MS: u64 = 10 * 60 * 1000;
-/// How long a commitment must wait before its reveal.
+/// A public commit (`CommitPublic`) or public reveal is valid only in a block whose
+/// timestamp is in `[now, now + PUBLIC_TIME_WINDOW_MS)`.
+pub const PUBLIC_TIME_WINDOW_MS: u64 = 60 * 1000;
+/// How long a private commitment must wait before its reveal.
 pub const MIN_COMMIT_AGE_MS: u64 = 15 * 60 * 1000;
+/// How long a public commitment (`CommitPublic`) must wait before its reveal.
+pub const PUBLIC_MIN_COMMIT_AGE_MS: u64 = 5 * 60 * 1000;
 /// How long a commitment can still be revealed.
 pub const MAX_COMMIT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// The account the chain keeps its clock on, and the program whose state on
 /// it holds the time: `{block_id: u64, timestamp: u64}`, in milliseconds.
-const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000001";
-const BUILTIN_PROGRAM_PREFIX: &[u8] = b"/LEE-BuiltinProgram/v1/AccountId";
+const CLOCK_ACCOUNT: &AccountId = b"/LEZ/ClockProgramAccount/0000000";
 const RECORD_SEAL: &[u8] = b"logos-names/v5/record";
 const PAGE_SEAL: &[u8] = b"logos-names/v5/page";
 const NONCE_LEN: usize = 12;
@@ -275,9 +279,9 @@ pub fn claim_leaf(old_record: &AccountId, holder: &OwnerTag) -> [u8; 32] {
     sha256(&[CLAIM_LEAF_DOMAIN, old_record, holder])
 }
 
-/// The ID of the chain's built-in clock program.
+/// The ID of the chain's clock system program (`AccountId::from_system_program_name("clock")`).
 fn clock_program() -> AccountId {
-    sha256(&[BUILTIN_PROGRAM_PREFIX, b"clock"])
+    crate::deposit::system_program(b"clock")
 }
 
 /// This machine's clock, in milliseconds since the Unix epoch.
@@ -1391,18 +1395,22 @@ mod tests {
 
     const PROGRAM: AccountId = [7; 32];
 
-    /// A LEZ 0.4 rc1 sequencer started fresh mints its genesis supply as deposits whose op
-    /// id is `"/LEZ/v0.3/GenesisDeposit" ‖ index (u64 LE)`: `getAccountView` of the receipt
-    /// this derives, under the bridge program 99GUy…7qp4, answered `actor_states: [1]` for
-    /// index 0, and `null` for the receipt of op id 00…00.
+    /// A LEZ v0.4.0 sequencer derives the bridge system program via `system_upgrader` PDA
+    /// and marks each minted deposit at its receipt PDA under `bridge_program()`.
     #[test]
     fn a_deposits_receipt_is_where_lez_marks_it_minted() {
-        assert_eq!(account_text(&bridge_program()), "99GUyPapsAwpRKEoEQKFNAT4WJtJJyCdBnSby7Ht7qp4");
+        assert_eq!(bridge_program(), crate::deposit::system_program(b"bridge"));
         let mut genesis = [0_u8; 32];
         genesis[..24].copy_from_slice(b"/LEZ/v0.3/GenesisDeposit");
-        assert_eq!(account_text(&deposit_receipt(&genesis)), "G2VEcgxXRc3KE7snS2dUQt8CYeX3CHee1n487AtxoKGb");
+        let r0 = deposit_receipt(&genesis);
         genesis[24] = 1;
-        assert_eq!(account_text(&deposit_receipt(&genesis)), "3skigWsvTNC7QmbJNtj9b1bP1KzoE118TuVkWsVhF6Xj");
+        let r1 = deposit_receipt(&genesis);
+        assert_ne!(r0, r1);
+        // LEZ v0.4.0 public account derivation vector (`lee-core/src/account.rs`):
+        // key_type = Schnorr (0), key_commitment = [7; 32].
+        let mut key7 = [7_u8; 33];
+        key7[0] = 0;
+        assert_eq!(account_text(&crate::deposit::key_account(&key7)), "N2k68narJVM21VGmt8V6nM5o9E38ASXxAwvLZzt7XjE");
         let program = account_text(&bridge_program());
         assert_eq!(minted_in(&json!({ "result": { "nonce": 0, "data": { "actor_states": { program.clone(): [1] } } } })), Ok(true));
         assert_eq!(minted_in(&json!({ "result": null })), Ok(false), "nothing wrote it: not minted yet");
@@ -1771,8 +1779,8 @@ mod tests {
         assert!(Settings::decode(&core[..core.len() - 1]).is_err(), "truncated");
         assert!(settings.claims_open(6) && !settings.claims_open(7));
         assert!(!Settings { claims_root: [0; 32], ..settings }.claims_open(6), "no list, no claims");
-        // The clock's address as the chain itself reports it.
-        assert_eq!(account_text(&clock_program()), "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z");
+        // The clock's address as LEZ v0.4.0 derives it (`system_upgrader` PDA for "clock").
+        assert_eq!(clock_program(), crate::deposit::system_program(b"clock"));
         assert_eq!(TERM_LENGTHS_MS[1], 31_536_000_000);
     }
 

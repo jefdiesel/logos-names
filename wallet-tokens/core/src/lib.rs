@@ -257,7 +257,7 @@ pub fn handle(input: &ReceiveInput) -> Response {
 /// signer signed for that program, not for this call.
 fn require_root_signer(input: &ReceiveInput, what: &str) {
     assert!(input.from.is_none(), "{what} is sent by the transaction itself");
-    assert!(input.is_authorized, "{what} must be signed by the receiving account");
+    assert!(input.is_authorized(), "{what} must be signed by the receiving account");
 }
 
 /// The account whose actor of this program sent `input`; such an actor only forwards what its
@@ -354,10 +354,11 @@ mod tests {
     }
 
     fn input(to: AccountId, from: Option<Actor>, authorized: bool, pre: ActorState, message: &Message) -> ReceiveInput {
+        let receiver = actor(to);
         ReceiveInput {
-            receiver: actor(to),
+            receiver,
             from,
-            is_authorized: authorized,
+            grants: authorized.then_some(receiver).into_iter().collect(),
             pre_state: pre,
             message: borsh::to_vec(message).unwrap(),
         }

@@ -156,9 +156,17 @@ pub fn encode_set_primary(name: &str) -> Vec<u8> {
     writer.0
 }
 
-/// `Commit { commitment, now }`.
+/// `Commit { commitment, now }` (private, 15-minute wait).
 pub fn encode_commit(commitment: &[u8; 32], now: u64) -> Vec<u8> {
     let mut writer = instruction(8);
+    writer.0.extend(commitment);
+    writer.u64(now);
+    writer.0
+}
+
+/// `CommitPublic { commitment, now }` (public, 5-minute wait, 1-minute validity window).
+pub fn encode_commit_public(commitment: &[u8; 32], now: u64) -> Vec<u8> {
+    let mut writer = instruction(10);
     writer.0.extend(commitment);
     writer.u64(now);
     writer.0
@@ -334,14 +342,14 @@ impl Registry {
     /// Step 1 of registering: commits `owner` to claiming `name` with `secret`,
     /// without revealing the name, its identifier or `owner`. Returns the
     /// change and the time it claims; the reveal ([`Self::reveal`]) is valid
-    /// from [`MIN_COMMIT_AGE_MS`](crate::registry::MIN_COMMIT_AGE_MS) after it.
+    /// from [`PUBLIC_MIN_COMMIT_AGE_MS`](crate::registry::PUBLIC_MIN_COMMIT_AGE_MS) after it.
     pub fn commit(&self, name: &str, derived: &Derived, owner: &AccountId, secret: &[u8; 32]) -> Result<(Change, u64), String> {
         let (_, tier, charge) = self.claimable(name, derived, owner)?;
         let promised = commitment(&derived.id, &owner_tag(&derived.id, owner), secret);
         let now = self.now()?;
         let mut change = Change::new(
             &self.program,
-            encode_commit(&promised, now),
+            encode_commit_public(&promised, now),
             *owner,
             vec![registry_actor(&self.program, commitment_seed(&promised))],
         );
@@ -608,6 +616,8 @@ mod tests {
             expected("registerDeposit")
         );
         assert_eq!(hex(&encode_commit(&[0xC0; 32], NOW)), expected("commit"));
+        // `CommitPublic` is variant 10 (0x0a) with the same `{ commitment, now }` payload as `Commit` (0x08).
+        assert_eq!(hex(&encode_commit_public(&[0xC0; 32], NOW)), expected("commit").replacen("0008", "000a", 1));
         assert_eq!(hex(&encode_set_record(&id, &[0xEE])), expected("setRecord"));
         assert_eq!(hex(&encode_set_page(&id, &[])), expected("setPage"));
         assert_eq!(hex(&encode_transfer(&id, &[2; 32])), expected("transfer"));

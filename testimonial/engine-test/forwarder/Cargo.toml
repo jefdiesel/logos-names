@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [build-dependencies]
-risc0-build = "3.0.5"
+risc0-build = "3.0.7"
 
 [package.metadata.risc0]
 methods = ["guest"]

@@ -735,7 +735,7 @@ impl Client {
         }
         if self
             .wallet
-            .get_account_public_signing_key(account)
+            .get_account_initial_key(account)
             .is_some()
         {
             AccountIdentity::Public(account)
@@ -1058,7 +1058,7 @@ impl Client {
         payer: AccountId,
     ) -> Result<()> {
         check_token_name(name, tokens.codec.max_name_len())?;
-        if self.is_private(payer) || self.wallet.get_account_public_signing_key(payer).is_none() {
+        if self.is_private(payer) || self.wallet.get_account_initial_key(payer).is_none() {
             bail!("the payer must be a public account of this wallet");
         }
         let recipient = self.token_identity(to);
@@ -1140,7 +1140,7 @@ impl Client {
         let hash = if proven {
             crate::prover::to_prove()?;
             let quote = self.wallet.client().get_fee_state().await?;
-            let estimate = crate::fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+            let estimate = crate::fees::private(&quote, self.wallet.config().fee_headroom_blocks);
             println!("{}", crate::fees::estimate_line(&estimate, "paid inside the proof"));
             if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
                 bail!(
@@ -1181,20 +1181,22 @@ impl Client {
                 .simulate(&mentions, &call.message, vec![(tokens.program, program)])
                 .await?;
             let limit = gas_limit_for(cycles);
-            self.check_payer(&paying, call.message.len(), 0, limit, cycles)
+            let max_fee = self
+                .check_payer(&paying, call.message.len(), 0, limit, cycles)
                 .await?;
             if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
             }
-            let saved = self.wallet.config().clone();
-            let mut config = saved.clone();
-            config.gas_limit = limit;
-            self.wallet.set_config(config);
+            self.wallet.set_fee_params(wallet::FeeParams {
+                gas_limit: Some(limit),
+                max_fee: Some(max_fee),
+                ..Default::default()
+            });
             let sent = self
                 .wallet
                 .send_pub_tx_paid_by(mentions, 0, call.message, payer)
                 .await;
-            self.wallet.set_config(saved);
+            self.wallet.set_fee_params(wallet::FeeParams::default());
             sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");

@@ -529,7 +529,7 @@ pub fn bridge_problem(output: &str, node: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeTo {
     pub account: String,
-    pub key: Option<[u8; 32]>,
+    pub key: Option<[u8; 33]>,
 }
 
 impl BridgeTo {
@@ -541,7 +541,7 @@ impl BridgeTo {
 
 /// The public LEZ account a bridge credits, as typed: `Public/` and its ID, written once
 /// (`Public/Private/<id>` was read as `Public/<id>`), as base58, or the account's public
-/// key (64 hex characters, a point LEZ accepts); `None` when empty (the wallet's default).
+/// key (66 hex characters, a `SigningKeyState` LEZ accepts); `None` when empty (the wallet's default).
 pub fn bridge_to(to: &str) -> Result<Option<BridgeTo>, String> {
     let to = to.trim();
     if to.is_empty() {
@@ -555,7 +555,7 @@ pub fn bridge_to(to: &str) -> Result<Option<BridgeTo>, String> {
     }
     let id = to
         .strip_prefix("Public/")
-        .ok_or("the bridge credits a public LEZ account: Public/ and its ID, or the account's public key (64 hex characters)")?;
+        .ok_or("the bridge credits a public LEZ account: Public/ and its ID, or the account's public key (66 hex characters)")?;
     let account = registry::bare_account(id).map_err(|_| "that isn't a public LEZ account: Public/ once, then its ID".to_owned())?;
     Ok(Some(BridgeTo { account: registry::account_text(&account), key: None }))
 }
@@ -1116,7 +1116,8 @@ fn account_entry(entry: &Value) -> Result<Value, String> {
     let (private, id) = crate::provider::account_ref(account)?;
     let digits = |value: &Value| value.as_str().filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())).map(str::to_owned);
     let hex64 = |value: &Value| value.as_str().filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase);
-    let key = hex64(&entry["public_key"]);
+    let hex66 = |value: &Value| value.as_str().filter(|key| key.len() == 66 && key.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_ascii_lowercase);
+    let key = hex66(&entry["public_key"]);
     let npk = hex64(&entry["npk"]);
     Ok(json!({
         "account": crate::provider::account_written(private, &id),
@@ -2996,13 +2997,13 @@ mod tests {
         assert_eq!(bridge_to("  ").unwrap(), None);
         // By the account's public key (what LEZ 0.4 needs for an account the wallet doesn't
         // hold): the account is the key's, and the CLI is given the key.
-        let key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let key = "00f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
         let by_key = bridge_to(key).unwrap().unwrap();
         assert_eq!(by_key.account, registry::account_text(&crate::deposit::key_account(&crate::deposit::public_key_text(key).unwrap())));
         assert_eq!(by_key.arg(), key);
         assert_eq!(bridge_args("5", &by_key.arg(), &"39".repeat(32), "", false).unwrap()[1], format!("--to={key}"));
-        // A key LEZ would not accept is refused before anything runs (BIP-340 vector 5).
-        let off = bridge_to("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34").unwrap_err();
+        // A key with an unknown KeyType tag LEZ would not accept is refused before anything runs.
+        let off = bridge_to("01eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34").unwrap_err();
         assert!(off.contains("isn't a public key LEZ accepts") && off.ends_with("Nothing was sent."), "{off}");
         for bad in [format!("Public/Private/{to}"), format!("Public/Public/{to}"), format!("Private/{to}"), to.to_owned()] {
             assert!(bridge_to(&bad).is_err(), "{bad}");

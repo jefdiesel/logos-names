@@ -739,6 +739,7 @@ fn effect(to: AccountId, program: &AccountId, effect: Effect) -> SyncMessage {
 /// this transaction as long as the client declares the account paid.
 #[allow(clippy::too_many_arguments)]
 fn charge(
+    input: &ReceiveInput,
     response: Response,
     program: &AccountId,
     payer: &AccountId,
@@ -768,10 +769,13 @@ fn charge(
         },
     ));
     match to {
-        Some(to) => response.send(SyncMessage::new(
-            Actor::native_balance(*payer),
-            &native_token::Message::Transfer { to, amount: fee },
-        )),
+        Some(to) => response.send(
+            SyncMessage::new(
+                Actor::native_balance(*payer),
+                &native_token::Message::Transfer { to, amount: fee },
+            )
+            .with_lent_grant(input),
+        ),
         None => response,
     }
 }
@@ -810,7 +814,7 @@ pub fn handle(input: &ReceiveInput, message: Message) -> Response {
 /// Turns an instruction from the signer into the effects it has on other actors.
 #[must_use]
 pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
-    assert!(input.is_authorized, "the signer's account must sign");
+    assert!(input.is_authorized(), "the signer's account must sign");
     let program = &input.receiver.program_account_id;
     let signer = &input.receiver.account_id;
     let response = Response::keep_state();
@@ -838,7 +842,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
             // Bound to the holder: a reveal seen pending can't be replayed for
             // another account.
             let promised = commitment(&id, &owner, &secret);
-            let response = charge(response, program, signer, &id, treasury, term, fee, deposit, tier);
+            let response = charge(input, response, program, signer, &id, treasury, term, fee, deposit, tier);
             bounded_window(response, now)
                 .send(self::effect(
                     commitment_address(program, &promised),
@@ -860,7 +864,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
         }
         Instruction::Renew { id, term, fee, treasury, now } => {
             let term_ms = term_length(term);
-            charge(response, program, signer, &id, treasury, term, fee, false, TIER_NORMAL)
+            charge(input, response, program, signer, &id, treasury, term, fee, false, TIER_NORMAL)
                 // Valid only in a block at least as late as `now`, so `now` is
                 // never in the future and `apply` can use it as the time.
                 .timestamp_window(now..)
@@ -1299,7 +1303,7 @@ mod tests {
             let input = ReceiveInput {
                 receiver: Actor::new(ALICE, PROGRAM),
                 from: Some(Actor::new(BOB, AccountId::new([9; 32]))),
-                is_authorized: false,
+                grants: Default::default(),
                 pre_state: pre_state.into(),
                 message: Vec::new().into(),
             };
@@ -1375,11 +1379,16 @@ mod tests {
         let signer = accounts.iter().find(|account| account.is_authorized).copied();
         let receiver = signer.or(accounts.last().copied()).expect("some account");
         let paid = accounts.last().filter(|account| !account.is_authorized).map(|account| account.account_id);
+        let mut grants = std::collections::BTreeSet::new();
+        if let Some(s) = signer {
+            grants.insert(Actor::new(s.account_id, PROGRAM));
+            grants.insert(Actor::native_balance(s.account_id));
+        }
         PlanInput {
             receive: ReceiveInput {
                 receiver: Actor::new(receiver.account_id, PROGRAM),
                 from: None,
-                is_authorized: signer.is_some(),
+                grants,
                 pre_state: Default::default(),
                 message: borsh::to_vec(instruction).expect("the instruction serializes"),
             },
@@ -2398,7 +2407,7 @@ mod tests {
             let receive = ReceiveInput {
                 receiver: Actor::new(committed(&JEF, ALICE), PROGRAM),
                 from: Some(Actor::new(ALICE, PROGRAM)),
-                is_authorized: false,
+                grants: Default::default(),
                 pre_state: to_bytes(&Commitment { version: VERSION, made, public }).into(),
                 message: Vec::new(),
             };
@@ -2527,6 +2536,7 @@ mod tests {
             panic!("expected one transfer");
         };
         assert!(call.to == Actor::native_balance(ALICE));
+        assert!(call.grants.contains(&Actor::native_balance(ALICE)));
         assert_eq!(
             call.message,
             borsh::to_vec(&native_token::Message::Transfer { to: BOB, amount: PRICES[1] })
@@ -3020,10 +3030,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "only this program may send an effect")]
     fn outsiders_cannot_send_effects() {
+        let receiver = Actor::new(record_address(&PROGRAM, &JEF), PROGRAM);
         let receive = ReceiveInput {
-            receiver: Actor::new(record_address(&PROGRAM, &JEF), PROGRAM),
+            receiver,
             from: None,
-            is_authorized: true,
+            grants: std::collections::BTreeSet::from([receiver]),
             pre_state: Default::default(),
             message: Vec::new(),
         };
@@ -3035,7 +3046,7 @@ mod tests {
         let receive = ReceiveInput {
             receiver: Actor::new(record_address(&PROGRAM, &JEF), PROGRAM),
             from: Some(Actor::new(ALICE, BOB)),
-            is_authorized: false,
+            grants: Default::default(),
             pre_state: Default::default(),
             message: Vec::new(),
         };

@@ -708,7 +708,7 @@ impl Client {
         if let Some(public) = load_defaults().gas_accounts.get(name).and_then(|id| id.parse::<AccountId>().ok()) {
             // A read that failed is not an empty account: funding another would spend the
             // 10,000,000 and its fee a second time.
-            if self.wallet.get_account_public_signing_key(public).is_some()
+            if self.wallet.get_account_initial_key(public).is_some()
                 && self
                     .wallet
                     .get_account_balance(public)

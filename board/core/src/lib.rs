@@ -245,6 +245,7 @@ pub fn require_holder(name: &NameId, signer: &AccountId) -> SyncMessage {
         to: Actor::new(record_address(&REGISTRY, name), REGISTRY),
         message,
         pda_seeds: Default::default(),
+        grants: Default::default(),
     }
 }
 
@@ -286,7 +287,7 @@ pub fn handle(input: &ReceiveInput, message: Message) -> Response {
 /// Turns an instruction from the signer into the checks and changes it makes.
 #[must_use]
 pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
-    assert!(input.is_authorized, "the signer must sign");
+    assert!(input.is_authorized(), "the signer must sign");
     let board = &input.receiver.program_account_id;
     let signer = &input.receiver.account_id;
     let response = Response::keep_state();
@@ -386,10 +387,11 @@ mod tests {
     const STRANGER: AccountId = AccountId::new([8; 32]);
 
     fn input(signer: AccountId, authorized: bool, instruction: &Instruction) -> ReceiveInput {
+        let receiver = Actor::new(signer, BOARD);
         ReceiveInput {
-            receiver: Actor::new(signer, BOARD),
+            receiver,
             from: None,
-            is_authorized: authorized,
+            grants: authorized.then_some(receiver).into_iter().collect(),
             pre_state: Default::default(),
             message: borsh::to_vec(&Message::Instruction(instruction.clone())).expect("the instruction serializes"),
         }

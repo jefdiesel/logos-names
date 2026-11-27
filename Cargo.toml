@@ -14,19 +14,22 @@ names_accountlog = { path = "accountlog" }
 board_core = { path = "board/core" }
 testimonial_core = { path = "testimonial/core" }
 
-# Pinned to LEZ v0.4.0-rc1 on the lez-0.4 port branch.
-lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-fee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-system_accounts = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc1", features = ["client"] }
-risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
+# Pinned to LEZ v0.4.0.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+program_loader_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+fee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+system_accounts = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0", features = ["client"] }
+risc0-zkvm = { version = "3.1.0", default-features = false, features = ["std"] }
 borsh = "1.5.7"
 argon2 = "0.6"
 
-# Same keccak patch LEZ applies, so the guest matches what the zone builds.
+# Same patches LEZ applies, so the guest matches what the zone builds.
 [patch.crates-io]
 keccak = { git = "https://github.com/logos-blockchain/sponges", rev = "3a56e99771beedf04946eab21a4a62adc2951377" }
+curve25519-dalek = { git = "https://github.com/risc0/curve25519-dalek", rev = "385adda1fa3b66d9aaa8b8fcc99ddc324d33ba32" }
+crypto-bigint = { git = "https://github.com/risc0/RustCrypto-crypto-bigint", rev = "3ab63a6f1048833f7047d5a50532e4a4cc789384" }

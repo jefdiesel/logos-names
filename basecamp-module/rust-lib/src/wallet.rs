@@ -25,9 +25,10 @@ const SEND: Duration = Duration::from_secs(120);
 pub struct Held {
     pub public: Vec<AccountId>,
     pub private: Vec<(AccountId, u128)>,
-    /// Each public account's public key, when the CLI tells them (none from an older one):
-    /// what LEZ 0.4 needs to credit a bridge to it. Only a key that is the account's.
-    pub keys: Vec<(AccountId, [u8; 32])>,
+    /// Each public account's initial signing key (`SigningKeyState`, 33 bytes), when the
+    /// CLI tells them (none from an older one): what LEZ 0.4 needs to credit a bridge to it.
+    /// Only a key that is the account's.
+    pub keys: Vec<(AccountId, [u8; 33])>,
 }
 
 fn request(words: &[&str]) -> Vec<String> {
@@ -65,13 +66,13 @@ fn parse_held(answer: &Value) -> Held {
 /// The public key of `account` when this wallet holds it (`Held::keys`): what LEZ 0.4
 /// needs to credit a bridge to it. `None` for an account it doesn't hold, or when the CLI
 /// is too old to tell keys.
-pub fn public_key(setup: &Setup, account: &AccountId) -> Result<Option<[u8; 32]>, String> {
+pub fn public_key(setup: &Setup, account: &AccountId) -> Result<Option<[u8; 33]>, String> {
     held_key(&accounts(setup)?, account)
 }
 
 /// `public_key` from what the wallet holds: an account it holds without a key (an older
 /// CLI) is said so, not taken for another's.
-fn held_key(held: &Held, account: &AccountId) -> Result<Option<[u8; 32]>, String> {
+fn held_key(held: &Held, account: &AccountId) -> Result<Option<[u8; 33]>, String> {
     if let Some((_, key)) = held.keys.iter().find(|(held, _)| held == account) {
         return Ok(Some(*key));
     }
@@ -172,7 +173,7 @@ mod tests {
     /// account's (what a bridge to it on LEZ 0.4 carries).
     #[test]
     fn a_public_accounts_key_is_kept_only_when_it_is_the_accounts() {
-        let key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let key = "00f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
         let mine = crate::deposit::key_account(&crate::deposit::public_key_text(key).unwrap());
         let held = parse_held(&json!({ "public": [registry::account_text(&mine), registry::account_text(&[3; 32])], "private": [],
             "keys": { registry::account_text(&mine): key, registry::account_text(&[3; 32]): key } }));

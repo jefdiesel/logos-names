@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use clock_core::{CLOCK_01_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
+use clock_core::{CLOCK_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
 use common::{HashType, transaction::LeeTransaction};
 use lee::{
     PublicTransaction, Simulation,
@@ -24,11 +24,13 @@ use lee::{
 use lee_core::{
     NullifierPublicKey, PrivateAccountKind,
     account::{AccountId, Actor},
+    execution_state::Authority,
     program::{PROGRAM_LOADER_ACCOUNT_ID, PdaSeed, ProgramHeader},
 };
 use names_core::{
     GRACE_MS, Instruction, LengthProof, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, MODE_FEE,
-    LEGACY_SUFFIX, Message as RegistryMessage, NAME_SUFFIX, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId,
+    LEGACY_SUFFIX, Message as RegistryMessage, NAME_SUFFIX, PUBLIC_MIN_COMMIT_AGE_MS,
+    PUBLIC_TIME_WINDOW_MS, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId,
     commitment_seed, deposit_address, name_seeds, settings_seed, shortlist,
     NameRecord, Page, Settings, commitment,
     normalize_name, owner_tag, page_address, record_address, settings_address,
@@ -38,9 +40,11 @@ use names_seal::{
     Derived, PageContent, Profile, TextRecord, derive, open_page, open_profile, seal_page,
     seal_profile, validate_page, validate_profile, validate_text_key,
 };
+use program_loader_core::LoaderActorState as _;
 use sequencer_service_rpc::SequencerClient;
 use wallet::{
-    AccountIdentity, AccountMention, PASSWORD_ENV_VAR, WalletCore, WalletSequencerClient as _,
+    AccountIdentity, AccountMention, FeeParams, PASSWORD_ENV_VAR, WalletCore, WalletSequencerClient as _,
+    account::AccountIdWithPrivacy,
     config::{SequencerConnectionData, WalletConfigOverrides},
     max_fee_for,
     program_facades::{
@@ -129,11 +133,27 @@ fn queue_public(then_public: &mut Vec<String>, name: &str, public: bool, fresh: 
     }
 }
 
+/// How long a commitment must wait before its reveal: 5 minutes for a public
+/// `CommitPublic`, 15 minutes for a private `Commit`.
+fn commit_wait_ms(public: bool) -> u64 {
+    if public { PUBLIC_MIN_COMMIT_AGE_MS } else { MIN_COMMIT_AGE_MS }
+}
+
+/// How long a commit or reveal's claimed timestamp stays valid: 1 minute for a public
+/// transaction, 10 minutes for a private one.
+fn commit_window_ms(public: bool) -> u64 {
+    if public { PUBLIC_TIME_WINDOW_MS } else { TIME_WINDOW_MS }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Pending {
     owner: String,
     secret: String,
     made: u64,
+    /// Whether this commitment was sent publicly (`CommitPublic`, 5-minute wait).
+    /// Entries saved before v0.4.0 omit this field and default to `false` (15-minute wait).
+    #[serde(default)]
+    public: bool,
     /// Why the last reveal gave up, so `names mine` can say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failed: Option<String>,
@@ -647,7 +667,7 @@ enum Command {
         /// are used, so it may be a little more.
         #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
         amount: u128,
-        /// The LEZ public account to credit: `Public/<id>`, or its public key (64 hex
+        /// The LEZ public account to credit: `Public/<id>`, or its public key (66 hex
         /// characters). LEZ 0.4 credits a bridge only to an account named by its key, so for
         /// an account this wallet doesn't hold, give its key (its owner can tell it).
         #[arg(long)]
@@ -875,11 +895,11 @@ fn parse_payee_name(input: &str) -> Result<String, String> {
 }
 
 /// The LEZ account `names bridge` credits: a public one (`Public/<id>` or bare, or its
-/// public key as 64 hex, which names the account and is what LEZ 0.4 needs for one this
+/// public key as 66 hex, which names the account and is what LEZ 0.4 needs for one this
 /// wallet doesn't hold) that someone can use, never the empty account or a program's
 /// (`programs`), as the Basecamp module refuses them
 /// (cli-bridge-direct-amount-zero-and-private-prefix). With the key when one was given.
-fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<(AccountId, Option<[u8; 32]>), String> {
+fn bridge_destination(to: &str, programs: &[AccountId]) -> Result<(AccountId, Option<[u8; 33]>), String> {
     let to = to.trim();
     if to.starts_with("Private/") {
         return Err("the bridge credits a public account: give --to as Public/<id>".to_owned());
@@ -918,17 +938,20 @@ fn lez_version(rpc: &str) -> Result<deposit::Lez> {
     deposit::lez_of(&reply).ok_or_else(|| anyhow!(deposit::UNKNOWN_LEZ))
 }
 
-/// The public key of `account` when this wallet holds it: what LEZ 0.4 needs to credit a
-/// bridge to it. Opening the wallet reads its file and signs nothing.
-async fn held_public_key(overrides: Option<WalletConfigOverrides>, account: AccountId) -> Option<[u8; 32]> {
+/// The initial signing key of `account` (`SigningKeyState`, 33 bytes) when this wallet
+/// holds it: what LEZ 0.4 needs to credit a bridge to it. Opening the wallet reads its
+/// file and signs nothing.
+async fn held_public_key(overrides: Option<WalletConfigOverrides>, account: AccountId) -> Option<[u8; 33]> {
     let wallet = open_wallet(overrides, false, false).await.ok()?;
-    wallet.get_account_public_signing_key(account).map(|key| *lee::PublicKey::new_from_private_key(key).value())
+    wallet
+        .get_account_initial_key(account)
+        .and_then(|key| borsh::to_vec(&key).ok()?.try_into().ok())
 }
 
 /// The metadata of a deposit crediting `to` (`deposit::metadata`), for the LEZ at `rpc`:
 /// on 0.4 with `key` (given as `--to`) or the wallet's own key for `to`, and refused in
 /// plain words, before anything is sent, when neither is there.
-async fn bridge_metadata(rpc: &str, overrides: Option<WalletConfigOverrides>, to: AccountId, key: Option<[u8; 32]>) -> Result<Vec<u8>> {
+async fn bridge_metadata(rpc: &str, overrides: Option<WalletConfigOverrides>, to: AccountId, key: Option<[u8; 33]>) -> Result<Vec<u8>> {
     let lez = lez_version(rpc)?;
     let key = match (lez, key) {
         (deposit::Lez::V04, None) => held_public_key(overrides, to).await,
@@ -1117,7 +1140,7 @@ impl Client {
             return Program::new(bytes.into())
                 .map_err(|error| anyhow!("{what}'s bytecode does not load: {error}"));
         }
-        let header = ProgramHeader::from_bytes(&self.actor_state_of(id, PROGRAM_LOADER_ACCOUNT_ID).await?)
+        let header = ProgramHeader::from_loader_actor_state(&self.actor_state_of(id, PROGRAM_LOADER_ACCOUNT_ID).await?)
             .ok_or_else(|| anyhow!("{id} is not a deployed program"))?;
         let cache = fetch_persistent_storage_path()?.with_file_name(format!("{cache}-{id}.bin"));
         if let Ok(bytes) = std::fs::read(&cache) {
@@ -1219,7 +1242,7 @@ impl Client {
     /// now (0 for a native transfer).
     async fn private_fee(&self, cycles: u64) -> Result<fees::Estimate> {
         let quote = self.wallet.client().get_fee_state().await?;
-        Ok(fees::private_running(&quote, self.wallet.config().private_fee_headroom_blocks, cycles))
+        Ok(fees::private_running(&quote, self.wallet.config().fee_headroom_blocks, cycles))
     }
 
     /// Checks that the private changes of `job` can all be paid for, as the wallet will pay
@@ -1315,15 +1338,29 @@ impl Client {
             borsh::from_slice(&lez03_settings(bytes)).context("the settings account does not hold settings")?,
         ))
     }
+    /// The chain's time in milliseconds, from the clock program's account; fails closed
+    /// when the clock cannot be read or decoded, so public `CommitPublic`/`Register` calls
+    /// never fall back to a local-clock guess inside their 1-minute validity window.
+    async fn chain_now(&self) -> Result<u64> {
+        let state = self
+            .actor_state_of(CLOCK_PROGRAM_ACCOUNT_ID, clock_account_id())
+            .await
+            .context("could not read the chain's clock")?;
+        if state.is_empty() {
+            bail!("the chain's clock account is empty");
+        }
+        let data = borsh::from_slice::<ClockAccountData>(&state)
+            .context("the chain's clock account did not decode")?;
+        Ok(data.timestamp)
+    }
+
     /// The chain's time in milliseconds, from the clock program's account. If that
     /// cannot be read, this machine's clock set back a minute, so that it is not ahead
     /// of the next block.
     async fn now(&self) -> u64 {
-        self.actor_state_of(CLOCK_01_PROGRAM_ACCOUNT_ID, clock_account_id())
+        self.chain_now()
             .await
-            .ok()
-            .and_then(|state| borsh::from_slice::<ClockAccountData>(&state).ok())
-            .map_or_else(|| local_now().saturating_sub(60_000), |data| data.timestamp)
+            .unwrap_or_else(|_| local_now().saturating_sub(60_000))
     }
 
     /// What `payer` owes for `term`, and the treasury it goes to when there is a fee.
@@ -1490,17 +1527,18 @@ impl Client {
 
         // Step 1: commit. The commitment hides the identifier, so watching
         // pending transactions doesn't let anyone claim the name first.
+        let is_public_owner = !self.is_private(owner);
         let mut defaults = load_defaults();
         let resumed = defaults
             .pending
             .get(name)
             .filter(|p| p.owner == owner.to_string() && local_now() < p.made.saturating_add(MAX_COMMIT_AGE_MS))
-            .and_then(|p| Some((parse_hex32(&p.secret)?, p.made)));
-        // The deposit or fee is only taken at the reveal, 15 minutes on, and making the name
-        // public takes two more private steps after it: all are checked now, before the commit,
-        // so a short account doesn't commit and fail at the end
-        // (register-as-public-silently-stays-private). A resumed registration checks its reveal
-        // as it sends it.
+            .and_then(|p| Some((parse_hex32(&p.secret)?, p.made, p.public)));
+        // The deposit or fee is only taken at the reveal (5 minutes on for public, 15 for
+        // private), and making a private name public takes two more private steps after it:
+        // all are checked now, before the commit, so a short account doesn't commit and fail
+        // at the end (register-as-public-silently-stays-private). A resumed registration
+        // checks its reveal as it sends it.
         if resumed.is_none() {
             if self.is_private(owner) {
                 let steps = self.registration_steps(name, owner, fee, deposit, public).await?;
@@ -1515,7 +1553,7 @@ impl Client {
                 }
             }
         }
-        let (secret, made) = match resumed {
+        let (secret, made, commit_public) = match resumed {
             Some(found) => {
                 println!("resuming the commitment to {name}{NAME_SUFFIX} made earlier");
                 if let Some(pending) = defaults.pending.get_mut(name) {
@@ -1530,16 +1568,28 @@ impl Client {
                 getrandom::fill(&mut secret).map_err(|e| anyhow!("no randomness: {e}"))?;
                 let promised = commitment(&id, &holder, &secret);
                 println!("step 1 of 2: committing to {name}{NAME_SUFFIX}");
-                // A commit that missed its window is dropped and charged nothing, and the miss
-                // measured this computer's proof: one more try claims a time that allows for it.
+                if is_public_owner {
+                    // Warm the cached registry bytecode before reading the chain clock so
+                    // fetching it never consumes the 1-minute CommitPublic validity window.
+                    let _ = self.program().await?;
+                }
+                // A private commit that missed its window is dropped and charged nothing, and
+                // the miss measured this computer's proof: one more try claims a time that
+                // allows for it. A public commit is not blindly retried because a reverted
+                // public transaction burns gas.
                 let mut attempt = 0;
                 let made = loop {
                     attempt += 1;
-                    let made = self.claim_time(owner).await;
+                    let made = self.claim_time(owner).await?;
+                    let instruction = if is_public_owner {
+                        Instruction::CommitPublic { commitment: promised, now: made }
+                    } else {
+                        Instruction::Commit { commitment: promised, now: made }
+                    };
                     let sent = self
                         .send(
                             vec![self.own_actor(owner), self.registry_actor(commitment_seed(&promised))],
-                            &Instruction::Commit { commitment: promised, now: made },
+                            &instruction,
                             0,
                         )
                         .await;
@@ -1547,6 +1597,9 @@ impl Client {
                         self.note_proof();
                         break made;
                     };
+                    if is_public_owner {
+                        return Err(error);
+                    }
                     let (error, missed) = self.past_window(error, made).await;
                     if !missed {
                         return Err(error);
@@ -1561,11 +1614,11 @@ impl Client {
                 defaults.proof_ms = load_defaults().proof_ms;
                 defaults.pending.insert(
                     name.to_owned(),
-                    Pending { owner: owner.to_string(), secret: hex::encode(secret), made, failed: None },
+                    Pending { owner: owner.to_string(), secret: hex::encode(secret), made, public: is_public_owner, failed: None },
                 );
                 queue_public(&mut defaults.then_public, name, public, true);
                 save_defaults(&defaults)?;
-                (secret, made)
+                (secret, made, is_public_owner)
             }
         };
         // What this commitment asked, now queued with it: a resumed one keeps a `--public`
@@ -1573,29 +1626,43 @@ impl Client {
         let public = defaults.then_public.iter().any(|queued| queued == name);
 
         // Step 2: reveal, once the commitment is old enough.
-        let ready = made.saturating_add(MIN_COMMIT_AGE_MS);
+        let wait_ms = commit_wait_ms(commit_public);
+        let ready = made.saturating_add(wait_ms);
         if !wait {
             let log = self.finish_in_background(name, owner, term, public, rpc)?;
-            println!(
-                "{name}{NAME_SUFFIX} is committed; it finishes by itself in about {} minutes, from {}",
-                MIN_COMMIT_AGE_MS / 60_000 + 5,
-                readable(ready)
-            );
-            println!(
-                "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first,",
-                MIN_COMMIT_AGE_MS / 60_000
-            );
-            println!("  then proves the last step on this computer ({}); keep this computer on and awake", proving_words());
+            if commit_public {
+                println!(
+                    "{name}{NAME_SUFFIX} is committed; it finishes by itself in about {} minutes, from {}",
+                    wait_ms / 60_000,
+                    readable(ready)
+                );
+                println!(
+                    "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first;",
+                    wait_ms / 60_000
+                );
+                println!("  keep this computer on and awake until then");
+            } else {
+                println!(
+                    "{name}{NAME_SUFFIX} is committed; it finishes by itself in about {} minutes, from {}",
+                    wait_ms / 60_000 + 5,
+                    readable(ready)
+                );
+                println!(
+                    "  it waits until the commitment is {} minutes old, so nobody who saw it can take the name first,",
+                    wait_ms / 60_000
+                );
+                println!("  then proves the last step on this computer ({}); keep this computer on and awake", proving_words());
+            }
             println!("check with `names mine`; the log is {}", log.display());
             return Ok(false);
         }
         loop {
-            let chain_now = self.now().await;
+            let chain_now = if commit_public { self.chain_now().await? } else { self.now().await };
             if chain_now >= ready {
                 break;
             }
             let wait = (ready - chain_now).div_ceil(1000);
-            println!("waiting {wait}s before revealing (the commitment must be {} minutes old)", MIN_COMMIT_AGE_MS / 60_000);
+            println!("waiting {wait}s before revealing (the commitment must be {} minutes old)", wait_ms / 60_000);
             tokio::time::sleep(std::time::Duration::from_secs(wait.clamp(5, 30))).await;
         }
         // Every name can be paid from the start: the profile carries receiving
@@ -1610,16 +1677,23 @@ impl Client {
         let sealed = seal_profile(&key, &profile);
         println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
         let promised = commitment(&id, &holder, &secret);
+        if is_public_owner {
+            // Warm the cached registry bytecode before reading the chain clock so
+            // fetching it never consumes the 1-minute public Register validity window.
+            let _ = self.program().await?;
+        }
         // A reveal claims a time before its proof is made, and the program takes it only
-        // within TIME_WINDOW_MS of that (`proving_lead`); a slow proof or chain can land it
-        // outside. The commitment stays usable for MAX_COMMIT_AGE_MS, so try again.
+        // within TIME_WINDOW_MS (10 min private, 1 min public) of that (`proving_lead`);
+        // a slow proof or chain can land it outside. The commitment stays usable for
+        // MAX_COMMIT_AGE_MS, so private reveals try again.
+        let window_ms = commit_window_ms(commit_public);
         let expires_at = made.saturating_add(MAX_COMMIT_AGE_MS);
         let mut attempt = 0;
         loop {
             attempt += 1;
             let claimed = match now {
                 Some(now) => now,
-                None => self.claim_time(owner).await,
+                None => self.claim_time(owner).await?,
             };
             let kind = if deposit { "a deposit" } else { "a fee" };
             println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for {kind} of {fee}");
@@ -1654,11 +1728,15 @@ impl Client {
                 Ok(Some(_)) => return Err(self.give_up(name, error.context("someone else holds the name"))),
                 _ => {}
             }
+            if is_public_owner {
+                // A reverted public transaction burns gas; don't blindly retry in a loop.
+                return Err(self.give_up(name, error));
+            }
             let (error, missed) = self.past_window(error, claimed).await;
             if missed {
                 self.note_proof();
             }
-            if attempt >= REVEAL_ATTEMPTS || self.now().await.saturating_add(TIME_WINDOW_MS) >= expires_at {
+            if attempt >= REVEAL_ATTEMPTS || self.now().await.saturating_add(window_ms) >= expires_at {
                 return Err(self.give_up(name, error));
             }
             println!("the reveal did not land ({error:#}); trying again (attempt {} of {REVEAL_ATTEMPTS})", attempt + 1);
@@ -1670,13 +1748,14 @@ impl Client {
         Ok(true)
     }
 
-    /// The time a commit or registration signed by `owner` claims: the chain's, and for a
-    /// private owner, whose proof is made after the time is claimed, later by `proving_lead`.
-    async fn claim_time(&self, owner: AccountId) -> u64 {
-        let now = self.now().await;
+    /// The time a commit or registration signed by `owner` claims: the chain's (failing closed
+    /// for public owners so a 1-minute window is never built from a local clock guess), and for
+    /// a private owner, whose proof is made after the time is claimed, later by `proving_lead`.
+    async fn claim_time(&self, owner: AccountId) -> Result<u64> {
         if !self.is_private(owner) {
-            return now;
+            return self.chain_now().await;
         }
+        let now = self.now().await;
         let lead = proving_lead(load_defaults().proof_ms);
         if lead > 0 {
             println!(
@@ -1685,7 +1764,7 @@ impl Client {
                 (lead + TIME_WINDOW_MS / 2).div_ceil(60_000)
             );
         }
-        now.saturating_add(lead)
+        Ok(now.saturating_add(lead))
     }
 
     /// Saves how long the last private transaction took to prove, for `claim_time`.
@@ -2030,16 +2109,19 @@ impl Client {
             // sizes the gas limit, whose whole reserve is held from the payer meanwhile.
             let cycles = self.simulate(&mentions, &message, programs).await?;
             let limit = gas_limit_for(cycles);
-            self.check_payer(&mentions, message.len(), spent, limit, cycles).await?;
+            let max_fee = self.check_payer(&mentions, message.len(), spent, limit, cycles).await?;
             if dry_run {
                 bail!("LOGOS_NAMES_DRY_RUN is set, so nothing was sent");
             }
-            let saved = self.wallet.config().clone();
-            let mut config = saved.clone();
-            config.gas_limit = limit;
-            self.wallet.set_config(config);
+            // Pin both gas_limit and max_fee so WalletCore::send_public skips its own
+            // measure_public (program fetch + 2 redundant simulations) and bounds revert burn.
+            self.wallet.set_fee_params(FeeParams {
+                gas_limit: Some(limit),
+                max_fee: Some(max_fee),
+                ..Default::default()
+            });
             let sent = self.wallet.send_pub_tx(mentions, 0, message).await;
-            self.wallet.set_config(saved);
+            self.wallet.set_fee_params(FeeParams::default());
             sent.context("the sequencer did not accept the transaction")?
         };
         println!("submitted {hash}");
@@ -2047,7 +2129,10 @@ impl Client {
         println!("applied in block {block}");
         match before {
             Some(before) => {
-                if let Some(line) = fees::paid_line_of(before, self.held_by(&paying).await, spent) {
+                if let Some(line) = block_fee
+                    .map(|paid| format!("fee paid: {paid}"))
+                    .or_else(|| fees::paid_line_of(before, self.held_by(&paying).await, spent))
+                {
                     println!("{line}");
                 }
             }
@@ -2077,7 +2162,7 @@ impl Client {
             .iter()
             .filter(|mention| mention.authorizes)
             .filter_map(|mention| mention.identity.public_account_id())
-            .filter(|account| self.wallet.get_account_public_signing_key(*account).is_some())
+            .filter(|account| self.wallet.get_account_initial_key(*account).is_some())
             .collect();
         for id in signers {
             held = held.saturating_add(self.wallet.get_account_balance(id).await.ok()?);
@@ -2144,24 +2229,32 @@ impl Client {
             let state = self.actor_state_of(actor.account_id, actor.program_account_id).await?;
             states.insert(*actor, state.into());
         }
-        let signers: std::collections::BTreeSet<AccountId> = mentions
+        let signers_set: std::collections::BTreeSet<AccountId> = mentions
             .iter()
             .filter(|mention| mention.authorizes && mention.identity.public_account_id().is_some())
             .map(|mention| mention.identity.account_id())
-            .filter(|account| self.wallet.get_account_public_signing_key(*account).is_some())
+            .filter(|account| self.wallet.get_account_initial_key(*account).is_some())
             .collect();
-        let signers: Vec<AccountId> = signers.into_iter().collect();
+        let signers: Vec<AccountId> = signers_set.iter().copied().collect();
         let nonces = self.wallet.get_accounts_nonces(&signers).await?;
+        let public_actors = mentions.iter().map(|mention| {
+            let authority = if mention.authorizes && signers_set.contains(&mention.identity.account_id()) {
+                Authority::Signer
+            } else {
+                Authority::None
+            };
+            (mention.actor(), authority)
+        });
         let root = actors.first().copied().ok_or_else(|| anyhow!("a call needs a root actor"))?;
         let tx = TxMessage::new(
             root,
             message.to_vec(),
-            actors,
+            public_actors,
             signers.into_iter().zip(nonces).collect(),
             None,
             Vec::new(),
         );
-        let witness = WitnessSet::for_message(&tx, &[]);
+        let witness = WitnessSet::from_raw_parts(Vec::new());
         let tx = PublicTransaction::new(tx, witness);
         let simulation = Simulation { public_actor_states: states, admitted_accounts: None };
         let catalog: ProgramCatalog = programs.into_iter().collect();
@@ -2178,12 +2271,13 @@ impl Client {
     /// Checks that the account paying a public call's fee holds what the call takes from
     /// it (a fee or deposit) plus the fee reserve at `limit`, so a short account is told
     /// so here instead of refused by the sequencer. The reserve is priced at the highest
-    /// base fees the next block can have.
-    async fn check_payer(&self, mentions: &[AccountMention], bytes: usize, spent: u128, limit: u64, cycles: u64) -> Result<()> {
+    /// base fees the next block can have. Returns the `max_fee` cap for `limit`.
+    async fn check_payer(&self, mentions: &[AccountMention], bytes: usize, spent: u128, limit: u64, cycles: u64) -> Result<u128> {
+        let cap = max_fee_for(limit);
         // The wallet has the first funded signing account pay the fee.
         let Some(payer) = mentions.iter().find(|mention| mention.authorizes).map(|mention| mention.identity.account_id())
         else {
-            return Ok(());
+            return Ok(cap);
         };
         let quote = self.wallet.client().get_fee_state().await?;
         // The transaction's bytes are billed too: signatures, nonces and actors besides the message.
@@ -2193,7 +2287,6 @@ impl Client {
         if std::env::var_os("LOGOS_NAMES_DRY_RUN").is_some() {
             println!("fee reserve: {reserve} from Public/{payer}, plus {spent} the call moves");
         }
-        let cap = max_fee_for(limit);
         if reserve > cap {
             bail!("the chain's fees are too high right now: this call's fee reserve of {reserve} is above the wallet's cap of {cap}");
         }
@@ -2206,7 +2299,7 @@ impl Client {
             }
             bail!("Public/{payer} holds {balance}; about {reserve} is held for the fee while this runs");
         }
-        Ok(())
+        Ok(cap)
     }
 
     /// Pays `amount` to the public account `name` points at.
@@ -2291,7 +2384,7 @@ impl Client {
     async fn print_transfer_fee(&self, from: AccountId) -> Result<()> {
         let quote = self.wallet.client().get_fee_state().await?;
         let (estimate, how) = if self.is_private(from) {
-            (fees::private(&quote, self.wallet.config().private_fee_headroom_blocks), "a private transfer, paid inside the proof")
+            (fees::private(&quote, self.wallet.config().fee_headroom_blocks), "a private transfer, paid inside the proof")
         } else {
             (fees::native_public(&quote, NATIVE_TRANSFER_GAS_LIMIT), "a public transfer")
         };
@@ -2310,7 +2403,7 @@ impl Client {
         // A payment to someone's private keys arrives as a pending credit, and claiming it
         // is a private transaction of its own (SC-1): below its fee it is worth nothing.
         let quote = self.wallet.client().get_fee_state().await?;
-        let claim = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+        let claim = fees::private(&quote, self.wallet.config().fee_headroom_blocks);
         if amount <= claim.about {
             println!(
                 "note: claiming this costs the holder a private transaction (about {}, paid from another private account of theirs), more than the {amount} you are paying",
@@ -2391,7 +2484,7 @@ impl Client {
             return Ok(());
         }
         let quote = self.wallet.client().get_fee_state().await?;
-        let fee = fees::private(&quote, self.wallet.config().private_fee_headroom_blocks);
+        let fee = fees::private(&quote, self.wallet.config().fee_headroom_blocks);
         // A credit worth less than claiming it costs (a private fee's refund, most often) is
         // left: claiming it would lose money. `--all` claims it anyway.
         // A fee's refund is left even with `--all`: claiming it pays a claim's fee and makes
@@ -2478,7 +2571,10 @@ impl Client {
         }
         // Said before any claim, so a job that stops partway still names its payer.
         println!("fee paid from Private/{payer}");
-        self.wallet.set_private_fee_payer(Some(payer));
+        self.wallet.set_fee_params(FeeParams {
+            payer: Some(AccountIdWithPrivacy::Private(payer)),
+            ..Default::default()
+        });
         let total = pending.len();
         let waiting: Vec<(u128, AccountId)> =
             pending.iter().chain(&later).map(|message| (message.native_credit().unwrap_or(0), message.body.to.account_id)).collect();
@@ -2802,11 +2898,21 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
     };
     let mut sent = None;
 
-    let Args { continuous_run, dry_run, fee_headroom, fee_payer, refund_to, command } =
-        Args::parse_from(std::iter::once("names wallet".to_owned()).chain(args));
+    let Args {
+        continuous_run,
+        dry_run,
+        allow_revert,
+        gas_limit,
+        max_fee,
+        tip,
+        fee_headroom,
+        fee_payer,
+        refund_to,
+        command,
+    } = Args::parse_from(std::iter::once("names wallet".to_owned()).chain(args));
     let mut overrides = overrides.unwrap_or_default();
     if fee_headroom.is_some() {
-        overrides.private_fee_headroom_blocks = fee_headroom;
+        overrides.fee_headroom_blocks = fee_headroom;
     }
     let overrides = Some(overrides);
     write_default_wallet_files()?;
@@ -2824,7 +2930,8 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         };
         let mut wallet = if storage_path.exists() {
             let password = wallet_password(&storage_path)?;
-            WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?
+            WalletCore::new_update_chain(config_path, storage_path, overrides, &password)
+                .map_err(open_storage_error)?
         } else {
             let (mut wallet, mnemonic) =
                 WalletCore::new_init_storage(config_path, storage_path, overrides, &new_wallet_password())?;
@@ -2839,11 +2946,23 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
             wallet
         };
         wallet.set_dry_run(dry_run);
-        wallet.set_private_fee_payer(fee_payer);
-        wallet.set_private_refund_target(refund_to);
+        wallet.set_allow_revert(allow_revert);
+        wallet.set_fee_params(FeeParams {
+            gas_limit,
+            max_fee,
+            tip,
+            headroom_blocks: fee_headroom,
+            payer: fee_payer,
+            refund_to,
+        });
         match execute_subcommand(&mut wallet, command).await {
-            // A dry run ends the command on the error channel once it has reported.
-            Err(error) if matches!(error.root_cause().downcast_ref(), Some(ExecutionFailureKind::DryRun)) => {}
+            // A dry run ends the command on the error channel with its report.
+            Err(error) => match error.root_cause().downcast_ref() {
+                Some(ExecutionFailureKind::DryRun(report)) => {
+                    println!("{report}");
+                }
+                _ => return Err(error),
+            },
             Ok(SubcommandReturnValue::TransactionExecuted { tx_hash }) => sent = Some(tx_hash),
             result => {
                 result?;
@@ -2851,7 +2970,8 @@ async fn run_wallet(args: Vec<String>, overrides: Option<WalletConfigOverrides>)
         }
     } else if continuous_run {
         let password = wallet_password(&storage_path)?;
-        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides, &password).context(OLD_WALLET)?;
+        let mut wallet = WalletCore::new_update_chain(config_path, storage_path, overrides, &password)
+            .map_err(open_storage_error)?;
         execute_continuous_run(&mut wallet).await?;
     } else {
         let mut help = Args::command().name("names wallet");
@@ -2865,9 +2985,19 @@ fn makes_account(command: &wallet::cli::Command) -> bool {
     matches!(command, wallet::cli::Command::Account(wallet::cli::account::AccountSubcommand::New(_)))
 }
 
-/// Why an existing wallet may not open: LEZ 0.4 cannot read a 0.3 wallet's file.
-const OLD_WALLET: &str = "cannot open the wallet; a wallet from LEZ 0.3 does not load on 0.4: move it aside and bring its \
+/// Why an existing wallet may not open: LEZ 0.4.0 cannot read a pre-0.4.0 wallet's file.
+const OLD_WALLET: &str = "cannot open the wallet; a wallet from LEZ 0.3 or 0.4.0-rc1 does not load on 0.4.0: move it aside and bring its \
     public accounts back from its recovery phrase with `names wallet restore-keys`";
+
+/// Preserves `WrongPassword` errors as-is instead of misreporting an encrypted v0.4.0
+/// wallet as an incompatible older wallet format.
+fn open_storage_error(error: anyhow::Error) -> anyhow::Error {
+    if error.chain().any(|cause| cause.is::<wallet::storage::WrongPassword>()) {
+        error
+    } else {
+        error.context(OLD_WALLET)
+    }
+}
 
 /// The password of a new wallet: `LEE_WALLET_PASSWORD` if set, else none, which leaves
 /// its storage unencrypted. Nothing prompts, because apps run `names` without a terminal.
@@ -2882,9 +3012,16 @@ fn new_wallet_password() -> String {
 /// The wallet's password, read once (`read_password` may ask at the terminal): each save
 /// opens the stored wallet again to take in what other processes added (`save_wallet`).
 fn wallet_password(storage_path: &std::path::Path) -> Result<String> {
+    use std::io::IsTerminal as _;
     static READ: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     if let Some(password) = READ.get() {
         return Ok(password.clone());
+    }
+    if wallet::storage::Storage::is_encrypted(storage_path).unwrap_or(false)
+        && std::env::var(PASSWORD_ENV_VAR).map_or(true, |value| value.is_empty())
+        && !std::io::stdin().is_terminal()
+    {
+        bail!("this wallet is encrypted; set {PASSWORD_ENV_VAR} or run in a terminal to unlock it");
     }
     let password = read_password(storage_path)?.to_string();
     Ok(READ.get_or_init(|| password).clone())
@@ -3032,7 +3169,7 @@ async fn open_wallet(overrides: Option<WalletConfigOverrides>, save: bool, creat
         let password = wallet_password(&storage_path)?;
         match WalletCore::new_update_chain(fetch_config_path()?, storage_path.clone(), overrides.clone(), &password) {
             Ok(wallet) => return Ok(wallet),
-            Err(error) if save => return Err(error).context(OLD_WALLET),
+            Err(error) if save => return Err(open_storage_error(error)),
             // Reading the chain signs nothing, so a wallet that won't load (one from
             // LEZ 0.3) mustn't stop it: use a throwaway one, which is never saved.
             Err(_) => {}
@@ -3128,7 +3265,7 @@ fn gas_limit_for(cycles: u64) -> u64 {
 /// costs more than a commit (5,811,525 against 5,199,394 on a local chain).
 fn call_cycles(instruction: &Instruction) -> u64 {
     match instruction {
-        Instruction::Commit { .. } => COMMIT_CYCLES,
+        Instruction::Commit { .. } | Instruction::CommitPublic { .. } => COMMIT_CYCLES,
         Instruction::Register { .. } | Instruction::Claim { .. } => REVEAL_CYCLES,
         Instruction::Release { .. } => 51_322,
         _ => CHANGE_CYCLES,
@@ -3645,18 +3782,29 @@ struct Landed {
     fee: Option<u128>,
 }
 
-/// The transaction `sent` in `block`, if the block holds it. A block ends with its fee
-/// transaction (whose summary is what its charged transactions used and paid, together)
-/// and its clock transaction.
+/// The transaction `sent` in `block`, if the block holds it. In LEZ v0.4.0 each user
+/// transaction has a parallel [`common::block::TransactionReceipt`] giving its exact outcome
+/// and fee; if a block carries no receipt at `position`, fall back to the trailing fee
+/// transaction's summary.
 fn landed_in(block: &common::block::Block, sent: &HashType) -> Option<Landed> {
     let transactions = &block.body.transactions;
     let position = transactions.iter().position(|tx| tx.hash() == *sent)?;
+    if let Some(receipt) = block.body.receipts.get(position) {
+        let charged = receipt.fee.fee_base > 0
+            || receipt.fee.tip > 0
+            || receipt.fee.gas_exec > 0
+            || receipt.fee.gas_stor > 0;
+        return Some(Landed {
+            reverted: !receipt.success,
+            fee: charged.then(|| receipt.fee.fee_base.saturating_add(receipt.fee.tip)),
+        });
+    }
     let users = transactions.len().checked_sub(2)?;
     let charged: Vec<bool> = transactions[..users]
         .iter()
         .map(|tx| match tx {
             LeeTransaction::PrivacyPreserving(_) => true,
-            LeeTransaction::Public(tx) => tx.message().execution.fee.is_some(),
+            LeeTransaction::Public(tx) => tx.message().fee.is_some(),
         })
         .collect();
     let summary = match transactions.get(users) {
@@ -3675,12 +3823,18 @@ fn landed_in(block: &common::block::Block, sent: &HashType) -> Option<Landed> {
     let own = match &transactions[position] {
         LeeTransaction::Public(tx) => tx
             .message()
-            .execution
             .fee
             .and_then(|fee| Some((u64::try_from(borsh::to_vec(&transactions[position]).ok()?.len()).ok()?, u128::from(fee.tip)))),
         LeeTransaction::PrivacyPreserving(_) => None,
     };
-    Some(landing(position, &charged, &block.body.reverted, summary, own))
+    let reverted: Vec<u64> = block
+        .body
+        .receipts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, receipt)| (!receipt.success).then(|| u64::try_from(i).ok()).flatten())
+        .collect();
+    Some(landing(position, &charged, &reverted, summary, own))
 }
 
 /// A block's fee summary: the gas its charged transactions used and what they paid.
@@ -4012,7 +4166,7 @@ async fn main() -> Result<()> {
                 let refunds: Vec<u128> = pending.iter().filter(|message| is_fee_refund(message)).filter_map(|message| message.native_credit()).collect();
                 let credits: Vec<u128> = pending.iter().filter(|message| !is_fee_refund(message)).filter_map(|message| message.native_credit()).collect();
                 let claim = match client.wallet.client().get_fee_state().await {
-                    Ok(quote) => fees::private(&quote, client.wallet.config().private_fee_headroom_blocks).about,
+                    Ok(quote) => fees::private(&quote, client.wallet.config().fee_headroom_blocks).about,
                     Err(_) => 0,
                 };
                 let (worth, small): (Vec<u128>, Vec<u128>) = credits.into_iter().partition(|amount| *amount > claim);
@@ -4063,7 +4217,7 @@ async fn main() -> Result<()> {
                     ),
                     None => println!(
                         "{name}{NAME_SUFFIX}  registering, {} (log: {})",
-                        until(pending.made.saturating_add(MIN_COMMIT_AGE_MS)),
+                        until(pending.made.saturating_add(commit_wait_ms(pending.public))),
                         register_log(name)?.display()
                     ),
                 }
@@ -4493,7 +4647,7 @@ mod shortlist_tests {
 }
 
 /// The deposit encoding the module and `names bridge` share (`deposit.rs`), fed to LEZ
-/// 0.4's own decoder (`bridge_core`, v0.4.0-rc1): real-bridges-to-lez-0.4-never-mint. The
+/// 0.4's own decoder (`bridge_core`, v0.4.0): real-bridges-to-lez-0.4-never-mint. The
 /// sequencer runs `DepositMetadata::try_from_slice` on a final deposit's metadata and
 /// credits `recipient.account_id()`; a decode failure leaves the deposit in custody.
 #[cfg(test)]
@@ -4501,8 +4655,11 @@ mod bridge_metadata_tests {
     use super::deposit::{self, Evidence, Lez};
     use borsh::BorshDeserialize as _;
     use bridge_core::DepositMetadata;
-    use lee::{AccountId, PrivateKey, PublicKey};
-    use lee_core::program::PdaSeed;
+    use lee::AccountId;
+    use lee_core::{
+        program::PdaSeed,
+        signing_key::{KeyType, SigningKeyState},
+    };
     use sha2::Digest as _;
 
     /// 32 bytes that look random, the same every run.
@@ -4510,18 +4667,18 @@ mod bridge_metadata_tests {
         sha2::Sha256::digest(seed.to_le_bytes()).into()
     }
 
-    /// The wallet's own accounts: the key the CLI reads from its signing key makes metadata
-    /// that LEZ 0.4 decodes to that very account.
+    /// The wallet's own accounts: the initial signing key (`SigningKeyState`, 33 bytes)
+    /// makes metadata that LEZ 0.4.0 decodes to that very account.
     #[test]
     fn a_wallet_accounts_key_decodes_to_that_account() {
         for seed in 0..64 {
-            let Ok(private) = PrivateKey::try_new(bytes(seed)) else { continue };
-            let public = PublicKey::new_from_private_key(&private);
-            let account = AccountId::from(&public);
-            assert_eq!(deposit::key_account(public.value()), *account.value(), "the account of a key");
-            let metadata = deposit::metadata(Lez::V04, account.value(), Some(&Evidence::Key(*public.value()))).expect("metadata");
+            let key = SigningKeyState { key_type: KeyType::Schnorr, key_commitment: bytes(seed) };
+            let account = AccountId::for_initial_key(&key).expect("schnorr account");
+            let encoded: [u8; 33] = borsh::to_vec(&key).expect("borsh").try_into().expect("33 bytes");
+            assert_eq!(deposit::key_account(&encoded), *account.value(), "the account of a key");
+            let metadata = deposit::metadata(Lez::V04, account.value(), Some(&Evidence::Key(encoded))).expect("metadata");
             let decoded = DepositMetadata::try_from_slice(&metadata).expect("LEZ 0.4 decodes it");
-            assert_eq!(decoded.recipient.account_id(), account, "credits the account");
+            assert_eq!(decoded.recipient.account_id(), Some(account), "credits the account");
             assert_eq!(deposit::credited(Lez::V04, &metadata), Some(*account.value()));
         }
     }
@@ -4537,25 +4694,18 @@ mod bridge_metadata_tests {
         assert!(DepositMetadata::try_from_slice(&metadata).is_err(), "0.4 can't");
     }
 
-    /// The curve check in `deposit.rs` (the module has no curve library) agrees with LEZ's
-    /// own `PublicKey::try_new`, which the decoder runs, for thousands of 32-byte values;
-    /// metadata is made only from a key LEZ accepts.
+    /// The key-type check in `deposit.rs` agrees with LEZ v0.4.0's `DepositMetadata` decoder
+    /// for every 1-byte tag (`0x00` = Schnorr valid, `0x01..=0xff` rejected).
     #[test]
-    fn the_curve_check_agrees_with_lez() {
-        let (mut valid, mut invalid) = (0, 0);
-        for seed in 0..4000 {
-            let candidate = bytes(seed);
-            let lez = PublicKey::try_new(candidate).is_ok();
-            assert_eq!(deposit::valid_public_key(&candidate), lez, "{}", hex::encode(candidate));
+    fn the_key_type_check_agrees_with_lez() {
+        for tag in 0..=255_u8 {
+            let mut candidate = [0_u8; 33];
+            candidate[0] = tag;
+            candidate[1..].copy_from_slice(&bytes(u64::from(tag)));
             let decodes = DepositMetadata::try_from_slice(&[&[1, 0][..], &candidate[..]].concat()).is_ok();
-            assert_eq!(decodes, lez, "the decoder accepts exactly the keys LEZ does");
+            assert_eq!(deposit::valid_public_key(&candidate), decodes, "tag {tag:#x}");
             let made = deposit::metadata(Lez::V04, &deposit::key_account(&candidate), Some(&Evidence::Key(candidate)));
-            assert_eq!(made.is_ok(), lez);
-            if lez { valid += 1 } else { invalid += 1 }
-        }
-        assert!(valid > 1000 && invalid > 1000, "both kinds seen: {valid} valid, {invalid} not");
-        for edge in [[0_u8; 32], [0xff; 32]] {
-            assert_eq!(deposit::valid_public_key(&edge), PublicKey::try_new(edge).is_ok(), "{}", hex::encode(edge));
+            assert_eq!(made.is_ok(), decodes, "tag {tag:#x}");
         }
     }
 
@@ -4566,7 +4716,7 @@ mod bridge_metadata_tests {
         let account = AccountId::for_public_pda(&AccountId::new(program), &PdaSeed::new(seed));
         assert_eq!(deposit::pda_account(&program, &seed), *account.value());
         let metadata = deposit::metadata(Lez::V04, account.value(), Some(&Evidence::Pda { program, seed })).expect("metadata");
-        assert_eq!(DepositMetadata::try_from_slice(&metadata).expect("decodes").recipient.account_id(), account);
+        assert_eq!(DepositMetadata::try_from_slice(&metadata).expect("decodes").recipient.account_id(), Some(account));
     }
 
     /// The receipt LEZ writes when it mints a deposit, and the bridge program, as LEZ 0.4's
@@ -4588,7 +4738,7 @@ mod bridge_metadata_tests {
         let refusal = deposit::metadata(Lez::V04, account.value(), None).unwrap_err();
         let said = refusal.words(&|id: &[u8; 32]| AccountId::new(*id).to_string());
         assert!(said.contains(&format!("doesn't hold Public/{account}")), "{said}");
-        assert!(said.contains("public key (64 hex characters"), "{said}");
+        assert!(said.contains("public key (66 hex characters"), "{said}");
         assert!(said.ends_with("Nothing was sent."), "{said}");
     }
 }
@@ -4871,14 +5021,13 @@ mod input_tests {
         assert_eq!(bridge_destination(&format!("Public/{DEFAULT_PROGRAM}"), &[registry]).unwrap_err(), "that is a program's account, which can't take a bridge");
         let (id, key) = bridge_destination(&format!("Public/{someone}"), &[registry]).unwrap();
         assert_eq!((id.to_string().as_str(), key), (someone, None));
-        // Its public key names the account too, and is kept for the deposit's metadata.
-        let key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        // Its initial signing key (SigningKeyState, 66 hex) names the account too, and is kept for the deposit's metadata.
+        let key = "00f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
         let (id, given) = bridge_destination(key, &[registry]).unwrap();
-        assert_eq!(id, AccountId::from(&key.parse::<lee::PublicKey>().unwrap()));
+        assert_eq!(id, AccountId::for_initial_key(&key.parse::<lee_core::signing_key::SigningKeyState>().unwrap()).unwrap());
         assert_eq!(given.map(hex::encode).as_deref(), Some(key));
-        // cli-bridge-03-skips-curve-check: a key that isn't one (BIP-340 vector 5) is refused
-        // whatever LEZ runs, before the sequencer is asked, as its account is no one's.
-        let off = bridge_destination("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34", &[registry]).unwrap_err();
+        // An unknown KeyType tag (0x01) is refused whatever LEZ runs, before the sequencer is asked.
+        let off = bridge_destination("01eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34", &[registry]).unwrap_err();
         assert!(off.contains("isn't a public key LEZ accepts") && off.ends_with("Nothing was sent."), "{off}");
         // cli-bridge-retired-registry-account-accepted: v2 and v4.1 took a deposit.
         let sinks = bridge_sinks(None, Some(someone.parse().unwrap()));
@@ -5116,7 +5265,7 @@ mod job_ties_and_failed_reads {
         // public-request-lost-when-registration-fails-after-commit: a `--public` registration
         // that committed and then failed keeps its request with the commitment it resumes.
         defaults.then_public.push("vpubr".to_owned());
-        defaults.pending.insert("vpubr".to_owned(), Pending { owner: String::new(), secret: String::new(), made: 0, failed: None });
+        defaults.pending.insert("vpubr".to_owned(), Pending { owner: String::new(), secret: String::new(), made: 0, public: false, failed: None });
         defaults.registration_failed("vpubr");
         assert!(defaults.then_public.contains(&"vpubr".to_owned()));
         // Once nothing is left to resume, a failure takes the request with it.
@@ -5190,5 +5339,52 @@ mod register_public_tests {
         assert!(queued.is_empty());
         queue_public(&mut queued, "plain", true, false);
         assert_eq!(queued, ["plain"]);
+    }
+}
+
+#[cfg(test)]
+mod commit_public_tests {
+    use super::*;
+
+    #[test]
+    fn pending_serde_defaults_missing_public_to_false_and_round_trips_true() {
+        // Pending entries written before v0.4.0 omit `public` and must keep the 15-minute wait.
+        let legacy: Pending = serde_json::from_str(
+            r#"{"owner":"CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk","secret":"aa","made":1000}"#,
+        )
+        .expect("legacy Pending decodes");
+        assert!(!legacy.public);
+        assert_eq!(commit_wait_ms(legacy.public), MIN_COMMIT_AGE_MS);
+        assert_eq!(commit_window_ms(legacy.public), TIME_WINDOW_MS);
+
+        let public_pending = Pending {
+            owner: legacy.owner.clone(),
+            secret: legacy.secret.clone(),
+            made: 2_000,
+            public: true,
+            failed: None,
+        };
+        let encoded = serde_json::to_string(&public_pending).expect("encodes");
+        let decoded: Pending = serde_json::from_str(&encoded).expect("decodes");
+        assert!(decoded.public);
+        assert_eq!(commit_wait_ms(decoded.public), PUBLIC_MIN_COMMIT_AGE_MS);
+        assert_eq!(commit_window_ms(decoded.public), PUBLIC_TIME_WINDOW_MS);
+    }
+
+    #[test]
+    fn commit_public_wait_window_and_gas_accounting() {
+        assert_eq!(commit_wait_ms(true), 5 * 60 * 1000);
+        assert_eq!(commit_wait_ms(false), 15 * 60 * 1000);
+        assert_eq!(commit_window_ms(true), 60 * 1000);
+        assert_eq!(commit_window_ms(false), 10 * 60 * 1000);
+
+        let public_commit = Instruction::CommitPublic { commitment: [0xC0; 32], now: 1_000 };
+        let private_commit = Instruction::Commit { commitment: [0xC0; 32], now: 1_000 };
+        assert_eq!(call_cycles(&public_commit), COMMIT_CYCLES);
+        assert_eq!(call_cycles(&public_commit), call_cycles(&private_commit));
+
+        let limit = gas_limit_for(call_cycles(&public_commit));
+        assert_eq!(limit, 34_821);
+        assert!(max_fee_for(limit) > 0);
     }
 }

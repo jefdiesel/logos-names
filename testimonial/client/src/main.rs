@@ -9,7 +9,7 @@ mod rpc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use clock_core::{CLOCK_01_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
+use clock_core::{CLOCK_PROGRAM_ACCOUNT_ID, ClockAccountData, clock_account_id};
 use common::{HashType, transaction::LeeTransaction};
 use lee::{
     PublicTransaction, Simulation,
@@ -18,7 +18,10 @@ use lee::{
     public_transaction::{Message as TxMessage, WitnessSet},
     simulate_public_transaction,
 };
-use lee_core::account::{AccountId, Actor};
+use lee_core::{
+    account::{AccountId, Actor},
+    execution_state::Authority,
+};
 use rpc::Rpc;
 use sequencer_service_rpc::SequencerClient;
 use serde_json::json;
@@ -27,7 +30,7 @@ use testimonial_core::{
     head_address, head_seed, month_of, node_address, node_seed, summarize, validate_post, walk,
 };
 use wallet::{
-    AccountIdentity, AccountMention, WalletCore, WalletSequencerClient as _,
+    AccountIdentity, AccountMention, FeeParams, WalletCore, WalletSequencerClient as _,
     config::{SequencerConnectionData, WalletConfigOverrides},
     max_fee_for,
     program_facades::program_loader::ProgramLoader,
@@ -284,7 +287,7 @@ async fn chain_now(w: &WalletCore<SequencerClient>) -> u64 {
             .unwrap_or(u64::MAX)
             .saturating_sub(60_000)
     };
-    actor_state(w, CLOCK_01_PROGRAM_ACCOUNT_ID, clock_account_id())
+    actor_state(w, CLOCK_PROGRAM_ACCOUNT_ID, clock_account_id())
         .await
         .ok()
         .and_then(|s| borsh::from_slice::<ClockAccountData>(&s).ok())
@@ -299,18 +302,25 @@ async fn simulate(w: &WalletCore<SequencerClient>, mentions: &[AccountMention], 
     for a in &actors {
         states.insert(*a, actor_state(w, a.account_id, a.program_account_id).await?.into());
     }
-    let signers: Vec<AccountId> = mentions
+    let signers_set: std::collections::BTreeSet<AccountId> = mentions
         .iter()
         .filter(|m| m.authorizes && m.identity.public_account_id().is_some())
         .map(|m| m.identity.account_id())
-        .filter(|a| w.get_account_public_signing_key(*a).is_some())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
+        .filter(|a| w.get_account_initial_key(*a).is_some())
         .collect();
+    let signers: Vec<AccountId> = signers_set.iter().copied().collect();
     let nonces = w.get_accounts_nonces(&signers).await?;
+    let public_actors = mentions.iter().map(|m| {
+        let authority = if m.authorizes && signers_set.contains(&m.identity.account_id()) {
+            Authority::Signer
+        } else {
+            Authority::None
+        };
+        (m.actor(), authority)
+    });
     let root = actors[0];
-    let tx = TxMessage::new(root, message.to_vec(), actors, signers.into_iter().zip(nonces).collect(), None, Vec::new());
-    let tx = PublicTransaction::new(tx.clone(), WitnessSet::for_message(&tx, &[]));
+    let tx = TxMessage::new(root, message.to_vec(), public_actors, signers.into_iter().zip(nonces).collect(), None, Vec::new());
+    let tx = PublicTransaction::new(tx, WitnessSet::from_raw_parts(Vec::new()));
     let simulation = Simulation { public_actor_states: states, admitted_accounts: None };
     let catalog: ProgramCatalog = std::iter::once(program).collect();
     let budget = w.client().get_fee_state().await?.max_gas_exec;
@@ -362,7 +372,7 @@ async fn post(cli: &Cli, submission: &str, username: Option<&str>, text: &str, a
             "{author} is a private account: the LEZ 0.4 wallet presents it under a fresh alias, which the program refuses so that each account posts once; post from a public account (TESTIMONIAL_TRY_PRIVATE=1 tries anyway)"
         );
     }
-    if !private && w.get_account_public_signing_key(author).is_none() {
+    if !private && w.get_account_initial_key(author).is_none() {
         bail!("this wallet holds no key for {author}");
     }
     let bytecode = ProgramLoader(&w)
@@ -408,12 +418,9 @@ async fn post(cli: &Cli, submission: &str, username: Option<&str>, text: &str, a
         if balance < reserve {
             bail!("{author} holds {balance}; about {reserve} is held for the fee while this runs");
         }
-        let saved = w.config().clone();
-        let mut config = saved.clone();
-        config.gas_limit = limit;
-        w.set_config(config);
+        w.set_fee_params(FeeParams { gas_limit: Some(limit), max_fee: Some(max_fee_for(limit)), ..Default::default() });
         let sent = w.send_pub_tx(mentions, 0, message).await;
-        w.set_config(saved);
+        w.set_fee_params(FeeParams::default());
         sent.context("the sequencer did not accept the transaction")?
     };
     println!("submitted {hash}");

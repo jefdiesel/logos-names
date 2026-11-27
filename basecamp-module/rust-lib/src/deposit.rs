@@ -11,12 +11,13 @@
 //!
 //! - LEZ 0.3 (the public testnet until it moves): `DepositMetadata { recipient_id:
 //!   AccountId }`, the account's 32 bytes.
-//! - LEZ 0.4 (`v0.4.0-rc1`, `programs/bridge/core/src/deposit.rs`): `DepositMetadata {
+//! - LEZ 0.4 (`v0.4.0`, `programs/bridge/core/src/deposit.rs`): `DepositMetadata {
 //!   recipient: DepositRecipient::Identified(PublicAccountEvidence) }`, tag 1, then the
-//!   evidence: `Key(PublicKey)` (0, then the account's 32-byte x-only public key) or
-//!   `Pda { program, seed }` (1, then both). The sequencer credits the account the evidence
-//!   gives, and a key that isn't a point on the curve fails the whole decode. There is no
-//!   private recipient: LEZ 0.4 credits a deposit only to a public account.
+//!   evidence: `Key(SigningKeyState)` (0, then the 33-byte Borsh encoding of
+//!   `SigningKeyState`: 1-byte `KeyType` tag `0x00` for Schnorr plus 32-byte key commitment)
+//!   or `Pda { program, seed }` (1, then both). The sequencer credits the account the evidence
+//!   gives, and an unknown `KeyType` tag fails the decode. There is no private recipient:
+//!   LEZ 0.4 credits a deposit only to a public account.
 //!
 //! So on 0.4 an account ID alone is not enough: the sender needs the account's public key,
 //! which the wallet has for its own accounts and only the owner can give for another's.
@@ -33,8 +34,9 @@ pub enum Lez {
 /// What shows LEZ 0.4 that a public account is the one credited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Evidence {
-    /// The account's x-only public key: the account is `key_account(key)`.
-    Key([u8; 32]),
+    /// The account's initial signing key (`SigningKeyState`, 1-byte key type + 32-byte
+    /// commitment): the account is `key_account(key)`.
+    Key([u8; 33]),
     /// A program's account: `pda_account(program, seed)`.
     Pda { program: [u8; 32], seed: [u8; 32] },
 }
@@ -57,7 +59,7 @@ pub enum Refusal {
     /// The key given belongs to another account.
     KeyMismatch { account: [u8; 32], belongs_to: [u8; 32] },
     /// The key isn't one LEZ accepts: it would fail the sequencer's decode.
-    NotAKey { key: [u8; 32] },
+    NotAKey { key: [u8; 33] },
 }
 
 impl Refusal {
@@ -66,7 +68,7 @@ impl Refusal {
         match self {
             Self::NeedsKey { account } => format!(
                 "LEZ credits a bridge only to an account named by its public key, and this wallet doesn't hold Public/{}. \
-                 Ask its owner for that account's public key (64 hex characters, shown with the account in their wallet) \
+                 Ask its owner for that account's public key (66 hex characters, shown with the account in their wallet) \
                  and bridge to the key instead. Nothing was sent.",
                 show(account)
             ),
@@ -109,7 +111,7 @@ pub fn credited(lez: Lez, metadata: &[u8]) -> Option<[u8; 32]> {
     match (lez, metadata) {
         (Lez::V03, bytes) => <[u8; 32]>::try_from(bytes).ok(),
         (Lez::V04, [1, 0, key @ ..]) => {
-            let key = <[u8; 32]>::try_from(key).ok()?;
+            let key = <[u8; 33]>::try_from(key).ok()?;
             valid_public_key(&key).then(|| key_account(&key))
         }
         (Lez::V04, [1, 1, rest @ ..]) if rest.len() == 64 => {
@@ -120,24 +122,33 @@ pub fn credited(lez: Lez, metadata: &[u8]) -> Option<[u8; 32]> {
     }
 }
 
-/// A public key written as 64 hex characters (a leading `0x` is allowed).
-pub fn public_key_text(text: &str) -> Option<[u8; 32]> {
+/// A public key (`SigningKeyState`) written as 66 hex characters (a leading `0x` is allowed).
+pub fn public_key_text(text: &str) -> Option<[u8; 33]> {
     let text = text.trim();
     let digits = text.strip_prefix("0x").unwrap_or(text);
-    if digits.len() != 64 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if digits.len() != 66 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let mut key = [0_u8; 32];
+    let mut key = [0_u8; 33];
     for (i, byte) in key.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).ok()?;
     }
     Some(key)
 }
 
-/// The public account of the x-only key `key`: `SHA-256("/LEE/v0.3/AccountId/Public/" ‖ 5
-/// zero bytes ‖ key)`, as LEZ derives it.
-pub fn key_account(key: &[u8; 32]) -> [u8; 32] {
-    Sha256::new().chain_update(b"/LEE/v0.3/AccountId/Public/\x00\x00\x00\x00\x00").chain_update(key).finalize().into()
+/// The public account of the initial signing key `key` (`SigningKeyState`: 1-byte `KeyType` +
+/// 32-byte commitment): two-step SHA-256 as LEZ v0.4.0's `AccountId::for_initial_key` derives it.
+pub fn key_account(key: &[u8; 33]) -> [u8; 32] {
+    let key_hash: [u8; 32] = Sha256::new()
+        .chain_update(b"/LEE/v0.3/AccountId/Public/Schn/")
+        .chain_update(&key[1..])
+        .finalize()
+        .into();
+    Sha256::new()
+        .chain_update(b"/LEE/v0.3/AccountId/Public/\x00\x00\x00\x00\x00")
+        .chain_update(key_hash)
+        .finalize()
+        .into()
 }
 
 /// The account `program` derives from `seed`: `SHA-256("/LEE/v0.2/AccountId/PDA/" ‖ 8 zero
@@ -151,9 +162,22 @@ pub fn pda_account(program: &[u8; 32], seed: &[u8; 32]) -> [u8; 32] {
         .into()
 }
 
-/// LEZ's bridge program: `SHA-256("/LEE-BuiltinProgram/v1/AccountId" ‖ "bridge")`.
+/// A LEZ v0.4.0 system program account (`AccountId::from_system_program_name`), derived as a
+/// PDA under `SYSTEM_UPGRADER_ACCOUNT_ID` (`[0xFD; 32]`).
+pub fn system_program(name: &[u8]) -> [u8; 32] {
+    let mut padded = [0_u8; 32];
+    padded[..name.len()].copy_from_slice(name);
+    let seed: [u8; 32] = Sha256::new()
+        .chain_update(b"/LEE/SystemUpgrader/v1/Name\x00\x00\x00\x00\x00")
+        .chain_update(padded)
+        .finalize()
+        .into();
+    pda_account(&[0xFD; 32], &seed)
+}
+
+/// LEZ's bridge program: `system_program(b"bridge")`.
 pub fn bridge_program() -> [u8; 32] {
-    Sha256::new().chain_update(b"/LEE-BuiltinProgram/v1/AccountId").chain_update(b"bridge").finalize().into()
+    system_program(b"bridge")
 }
 
 /// The account in which LEZ's bridge marks the deposit `op_id` as minted (its receipt):
@@ -209,155 +233,31 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-// ── Whether 32 bytes are an x-only public key (BIP-340 `lift_x`) ────────────────
+// ── Whether 33 bytes are a SigningKeyState LEZ v0.4.0 accepts ───────────────────
 //
-// LEZ reads a key with `k256::schnorr::VerifyingKey::from_bytes`: the bytes are a field
-// element x below p, and x³ + 7 is a square mod p (some y is on the curve). The module has
-// no curve library, so the check is done here in a few lines of 256-bit arithmetic; the
-// CLI's tests hold it against LEZ's own `PublicKey::try_new` for many keys.
+// In LEZ v0.4.0 (`lee-core/src/signing_key.rs`), `SigningKeyState` is Borsh-encoded as a
+// 1-byte `KeyType` tag (`0x00` = `KeyType::Schnorr`) followed by a 32-byte key commitment
+// (arbitrary 32 bytes; no curve check is performed on the commitment). Any tag other than
+// `0x00` fails Borsh deserialization and is refused by the sequencer.
 
-/// A field element, as four 64-bit limbs, least significant first.
-type Fe = [u64; 4];
-
-/// secp256k1's field prime, 2²⁵⁶ − 2³² − 977.
-const P: Fe = [0xFFFF_FFFE_FFFF_FC2F, u64::MAX, u64::MAX, u64::MAX];
-/// 2²⁵⁶ mod p.
-const FOLD: u128 = 0x1_0000_03D1;
-
-fn below_p(a: &Fe) -> bool {
-    for i in (0..4).rev() {
-        if a[i] != P[i] {
-            return a[i] < P[i];
-        }
-    }
-    false
-}
-
-fn minus_p(a: &Fe) -> Fe {
-    let mut out = [0; 4];
-    let mut borrow = false;
-    for i in 0..4 {
-        let (step, under) = a[i].overflowing_sub(P[i]);
-        let (step, under_again) = step.overflowing_sub(u64::from(borrow));
-        out[i] = step;
-        borrow = under || under_again;
-    }
-    out
-}
-
-/// A 512-bit number (eight limbs) mod p.
-fn reduce(wide: &[u64; 8]) -> Fe {
-    // lo + hi·2²⁵⁶ ≡ lo + hi·FOLD: at most 2²⁵⁶ · 2³⁴.
-    let mut folded = [0_u64; 4];
-    let mut carry = 0_u128;
-    for i in 0..4 {
-        let sum = u128::from(wide[i]) + u128::from(wide[i + 4]) * FOLD + carry;
-        folded[i] = sum as u64;
-        carry = sum >> 64;
-    }
-    // Once more for what spilled over (below 2³⁴), and once for a carry out of that.
-    let mut out = [0_u64; 4];
-    let mut add = carry * FOLD;
-    for i in 0..4 {
-        let sum = u128::from(folded[i]) + add;
-        out[i] = sum as u64;
-        add = sum >> 64;
-    }
-    if add != 0 {
-        let mut add = FOLD;
-        for limb in &mut out {
-            let sum = u128::from(*limb) + add;
-            *limb = sum as u64;
-            add = sum >> 64;
-        }
-    }
-    while !below_p(&out) {
-        out = minus_p(&out);
-    }
-    out
-}
-
-fn mul(a: &Fe, b: &Fe) -> Fe {
-    let mut wide = [0_u64; 8];
-    for i in 0..4 {
-        let mut carry = 0_u128;
-        for j in 0..4 {
-            let sum = u128::from(a[i]) * u128::from(b[j]) + u128::from(wide[i + j]) + carry;
-            wide[i + j] = sum as u64;
-            carry = sum >> 64;
-        }
-        wide[i + 4] = carry as u64;
-    }
-    reduce(&wide)
-}
-
-fn pow(base: &Fe, exponent: &Fe) -> Fe {
-    let mut acc: Fe = [1, 0, 0, 0];
-    for i in (0..4).rev() {
-        for bit in (0..64).rev() {
-            acc = mul(&acc, &acc);
-            if (exponent[i] >> bit) & 1 == 1 {
-                acc = mul(&acc, base);
-            }
-        }
-    }
-    acc
-}
-
-/// Whether `key` is an x-only public key LEZ accepts: x < p and x³ + 7 a square mod p.
-pub fn valid_public_key(key: &[u8; 32]) -> bool {
-    let mut x: Fe = [0; 4];
-    for (i, limb) in x.iter_mut().enumerate() {
-        let at = 32 - 8 * (i + 1);
-        *limb = u64::from_be_bytes([key[at], key[at + 1], key[at + 2], key[at + 3], key[at + 4], key[at + 5], key[at + 6], key[at + 7]]);
-    }
-    if !below_p(&x) {
-        return false;
-    }
-    let cube = mul(&mul(&x, &x), &x);
-    let mut wide = [0_u64; 8];
-    wide[..4].copy_from_slice(&cube);
-    let mut carry = 7_u128;
-    for limb in &mut wide {
-        let sum = u128::from(*limb) + carry;
-        *limb = sum as u64;
-        carry = sum >> 64;
-    }
-    let c = reduce(&wide);
-    // Euler's criterion: c^((p−1)/2) is 1 for a nonzero square.
-    let mut half = minus_one(&P);
-    for i in 0..4 {
-        half[i] = (half[i] >> 1) | if i < 3 { half[i + 1] << 63 } else { 0 };
-    }
-    c == [0; 4] || pow(&c, &half) == [1, 0, 0, 0]
-}
-
-fn minus_one(a: &Fe) -> Fe {
-    let mut out = *a;
-    for limb in &mut out {
-        let (step, under) = limb.overflowing_sub(1);
-        *limb = step;
-        if !under {
-            break;
-        }
-    }
-    out
+/// Whether `key` is a `SigningKeyState` LEZ v0.4.0 accepts (`KeyType::Schnorr` = `0x00`).
+pub fn valid_public_key(key: &[u8; 33]) -> bool {
+    key[0] == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn unhex32(text: &str) -> [u8; 32] {
-        public_key_text(text).expect("64 hex")
+    fn unhex33(text: &str) -> [u8; 33] {
+        public_key_text(text).expect("66 hex")
     }
 
-    /// LEZ 0.4's own vectors (`deposit_metadata_carries_key_or_pda_evidence_under_tag_one`):
-    /// tag 1, then 0 and the key, or 1, the program and the seed.
+    /// LEZ 0.4's own vectors: tag 1, then 0 and the 33-byte SigningKeyState, or 1, the
+    /// program and the seed.
     #[test]
     fn lez_0_4_metadata_is_tag_one_then_the_evidence() {
-        // BIP-340's first test key (secret key 3), valid on the curve.
-        let key = unhex32("f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9");
+        let key = unhex33("00f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9");
         let account = key_account(&key);
         assert_eq!(metadata(Lez::V04, &account, Some(&Evidence::Key(key))).unwrap(), [&[1, 0][..], &key[..]].concat());
         let pda = Evidence::Pda { program: [4; 32], seed: [6; 32] };
@@ -367,7 +267,7 @@ mod tests {
         // What 0.4 refuses to decode: the bare account (0.3's form), other tags, misfit lengths.
         assert_eq!(credited(Lez::V04, &account), None);
         assert_eq!(credited(Lez::V04, &[&[2, 0][..], &key[..]].concat()), None);
-        assert_eq!(credited(Lez::V04, &[&[1, 0][..], &key[..31]].concat()), None);
+        assert_eq!(credited(Lez::V04, &[&[1, 0][..], &key[..32]].concat()), None);
         assert_eq!(credited(Lez::V04, &[&[1, 0][..], &key[..], &[0][..]].concat()), None);
     }
 
@@ -382,10 +282,10 @@ mod tests {
     }
 
     /// On 0.4 an account without its key is refused, as is a key of another account or a
-    /// key off the curve: each would leave the deposit in the bridge's custody.
+    /// key with an unknown KeyType tag: each would leave the deposit in the bridge's custody.
     #[test]
     fn lez_0_4_refuses_what_it_could_not_credit() {
-        let key = unhex32("f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9");
+        let key = unhex33("00f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9");
         let account = key_account(&key);
         assert_eq!(metadata(Lez::V04, &account, None), Err(Refusal::NeedsKey { account }));
         assert_eq!(
@@ -394,43 +294,32 @@ mod tests {
         );
         // Also on 0.3: a key given for another account is a mistake either way.
         assert!(matches!(metadata(Lez::V03, &[7; 32], Some(&Evidence::Key(key))), Err(Refusal::KeyMismatch { .. })));
-        // BIP-340's vector 5: not on the curve.
-        let off = unhex32("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34");
-        assert_eq!(metadata(Lez::V04, &key_account(&off), Some(&Evidence::Key(off))), Err(Refusal::NotAKey { key: off }));
+        // Unknown KeyType tag (1 != KeyType::Schnorr (0)).
+        let bad_tag = unhex33("01eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34");
+        assert_eq!(metadata(Lez::V04, &key_account(&bad_tag), Some(&Evidence::Key(bad_tag))), Err(Refusal::NotAKey { key: bad_tag }));
         let show = |account: &[u8; 32]| hex(&account[..2]);
         assert!(Refusal::NeedsKey { account }.words(&show).contains("public key"));
-        assert!(Refusal::NotAKey { key: off }.words(&show).ends_with("Nothing was sent."));
+        assert!(Refusal::NotAKey { key: bad_tag }.words(&show).ends_with("Nothing was sent."));
     }
 
     #[test]
-    fn the_curve_check_knows_points_from_non_points() {
-        // The generator's x, and BIP-340's test vector keys.
-        for valid in [
-            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-            "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
-            "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
-            "dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8",
-        ] {
-            assert!(valid_public_key(&unhex32(valid)), "{valid}");
-        }
-        // BIP-340 vector 5 (not on the curve), p itself, and above p.
-        for invalid in [
-            "eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
-            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
-            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc30",
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        ] {
-            assert!(!valid_public_key(&unhex32(invalid)), "{invalid}");
+    fn the_key_type_check_knows_valid_from_invalid_tags() {
+        assert!(valid_public_key(&unhex33("0079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")));
+        assert!(valid_public_key(&[0; 33]));
+        for tag in [1_u8, 2, 0x7f, 0xff] {
+            let mut key = [0xab_u8; 33];
+            key[0] = tag;
+            assert!(!valid_public_key(&key), "tag {tag:#x}");
         }
     }
 
     #[test]
-    fn a_public_key_is_64_hex() {
-        assert_eq!(public_key_text(&"ab".repeat(32)), Some([0xab; 32]));
-        assert_eq!(public_key_text(&format!("0x{}", "AB".repeat(32))), Some([0xab; 32]));
-        assert_eq!(public_key_text(&"ab".repeat(31)), None);
+    fn a_public_key_is_66_hex() {
+        assert_eq!(public_key_text(&"ab".repeat(33)), Some([0xab; 33]));
+        assert_eq!(public_key_text(&format!("0x{}", "AB".repeat(33))), Some([0xab; 33]));
+        assert_eq!(public_key_text(&"ab".repeat(32)), None);
         assert_eq!(public_key_text("CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk"), None);
-        assert_eq!(public_key_text(&"zz".repeat(32)), None);
+        assert_eq!(public_key_text(&"zz".repeat(33)), None);
     }
 
     /// The probe: a result (null too) is 0.4, "method not found" is 0.3, the rest neither.
@@ -445,12 +334,19 @@ mod tests {
         assert_eq!(lez_of(&json!("<html>")), None);
     }
 
-    /// The bridge program as LEZ names a builtin program; receipts differ by deposit. (The
-    /// CLI's tests hold both against LEZ 0.4's own `bridge_core`; registry.rs holds a
-    /// receipt against a live rc1 sequencer's genesis deposits.)
+    /// The bridge program as LEZ v0.4.0 names a system program (PDA under
+    /// `SYSTEM_UPGRADER_ACCOUNT_ID`); receipts differ by deposit. (The CLI's tests hold both
+    /// against LEZ 0.4's own `bridge_core`.)
     #[test]
     fn the_bridge_program_and_a_receipt_are_derived_as_lez_does() {
-        let program: [u8; 32] = Sha256::new().chain_update(b"/LEE-BuiltinProgram/v1/AccountId").chain_update(b"bridge").finalize().into();
+        let mut padded = [0_u8; 32];
+        padded[..6].copy_from_slice(b"bridge");
+        let seed: [u8; 32] = Sha256::new()
+            .chain_update(b"/LEE/SystemUpgrader/v1/Name\x00\x00\x00\x00\x00")
+            .chain_update(padded)
+            .finalize()
+            .into();
+        let program = pda_account(&[0xFD; 32], &seed);
         assert_eq!(bridge_program(), program);
         assert_ne!(receipt(&[1; 32]), receipt(&[2; 32]));
     }

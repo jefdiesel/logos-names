@@ -278,7 +278,7 @@ pub fn instruct(input: &ReceiveInput, instruction: Instruction) -> Response {
     // a program the author called for something else could relay a Post. Only the
     // transaction's own root message may post.
     assert!(input.from.is_none(), "a testimonial must be the transaction's root message");
-    assert!(input.is_authorized, "the author must sign");
+    assert!(input.is_authorized(), "the author must sign");
     let program = input.receiver.program_account_id;
     let author = input.receiver.account_id;
     match instruction {
@@ -516,10 +516,11 @@ mod tests {
     }
 
     fn root_input(signer: AccountId, authorized: bool, instruction: &Instruction) -> ReceiveInput {
+        let receiver = Actor::new(signer, PROGRAM);
         ReceiveInput {
-            receiver: Actor::new(signer, PROGRAM),
+            receiver,
             from: None,
-            is_authorized: authorized,
+            grants: authorized.then_some(receiver).into_iter().collect(),
             pre_state: Default::default(),
             message: to_bytes(&Message::Instruction(instruction.clone())),
         }
@@ -547,7 +548,7 @@ mod tests {
             let input = ReceiveInput {
                 receiver: to,
                 from,
-                is_authorized: authorized,
+                grants: authorized.then_some(to).into_iter().collect(),
                 pre_state: states.get(&to.account_id).cloned().unwrap_or_default().into(),
                 message: message.clone(),
             };
@@ -674,12 +675,15 @@ mod tests {
             text: "x".into(),
             prev: None,
         };
-        let input = |to: AccountId, from: Option<Actor>| ReceiveInput {
-            receiver: Actor::new(to, PROGRAM),
-            from,
-            is_authorized: true,
-            pre_state: Default::default(),
-            message: Vec::new(),
+        let input = |to: AccountId, from: Option<Actor>| {
+            let receiver = Actor::new(to, PROGRAM);
+            ReceiveInput {
+                receiver,
+                from,
+                grants: BTreeSet::from([receiver]),
+                pre_state: Default::default(),
+                message: Vec::new(),
+            }
         };
         let head = head_address(&PROGRAM, SUB);
         let node = node_address(&PROGRAM, SUB, &ALICE);

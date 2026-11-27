@@ -206,7 +206,7 @@ mod tests {
         let places = Places {
             server_path: None,
             beside: Some(empty.join("r0vm")),
-            installed: vec![empty.join("v3.0.5/r0vm")],
+            installed: vec![empty.join("v3.1.0/r0vm")],
             on_path: None,
         };
         let reason = settle("prover", None, false, &places).unwrap_err();

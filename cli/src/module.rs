@@ -13,7 +13,7 @@ use lee_core::{account::AccountId, program::PdaSeed};
 use wallet::{
     AccountIdentity, AccountMention, WalletCore, WalletSequencerClient as _,
     config::WalletConfigOverrides,
-    utils::{fetch_config_path, fetch_persistent_storage_path, read_password},
+    utils::{fetch_config_path, fetch_persistent_storage_path},
 };
 
 use crate::{
@@ -135,7 +135,7 @@ impl Client {
             Request::AccountUse { account } => self.module_account_use(&account).await,
             Request::Fee => {
                 let quote = self.wallet.client().get_fee_state().await?;
-                let headroom = self.wallet.config().private_fee_headroom_blocks;
+                let headroom = self.wallet.config().fee_headroom_blocks;
                 println!("{}", fees::quote_json(&quote, headroom, NATIVE_TRANSFER_GAS_LIMIT));
                 Ok(())
             }
@@ -179,8 +179,8 @@ impl Client {
             let balance = self.wallet.get_account_balance(id).await.ok();
             let key = self
                 .wallet
-                .get_account_public_signing_key(id)
-                .map(|key| hex::encode(lee::PublicKey::new_from_private_key(key).value()));
+                .get_account_initial_key(id)
+                .map(|key| key.to_string());
             (balance, defaults.public.as_deref() == Some(&id.to_string()), key)
         };
         serde_json::json!({
@@ -264,8 +264,8 @@ impl Client {
         let keys: serde_json::Map<String, serde_json::Value> = key_chain
             .public_account_ids()
             .filter_map(|(id, _)| {
-                let key = self.wallet.get_account_public_signing_key(id)?;
-                Some((id.to_string(), serde_json::Value::from(hex::encode(lee::PublicKey::new_from_private_key(key).value()))))
+                let key = self.wallet.get_account_initial_key(id)?;
+                Some((id.to_string(), serde_json::Value::from(key.to_string())))
             })
             .collect();
         let private: Vec<serde_json::Value> = key_chain
@@ -315,9 +315,22 @@ impl Client {
         let message = hex::decode(&change.message).context("the message is not hex")?;
         let spent = change.spent.parse().context("the amount spent is not a number")?;
         let program = self.program().await?;
+        let decoded = borsh::from_slice::<names_core::Message>(&message).ok();
+        let is_public = !mentions.iter().any(|mention| mention.identity.is_private());
+        if is_public {
+            if let Some(names_core::Message::Instruction(
+                names_core::Instruction::CommitPublic { now, .. }
+                | names_core::Instruction::Register { now, .. },
+            )) = &decoded
+            {
+                let chain_now = self.chain_now().await?;
+                if chain_now >= now.saturating_add(names_core::PUBLIC_TIME_WINDOW_MS) {
+                    bail!("the change's 1-minute public validity window already passed before submission; nothing was sent");
+                }
+            }
+        }
         // The module's change is any registry call: priced as a profile change's cycles.
-        let cycles = borsh::from_slice::<names_core::Message>(&message)
-            .ok()
+        let cycles = decoded
             .and_then(|message| match message {
                 names_core::Message::Instruction(instruction) => Some(crate::call_cycles(&instruction)),
                 _ => None,
@@ -370,9 +383,16 @@ pub async fn restore(accounts: u32, overrides: Option<WalletConfigOverrides>) ->
     let config_path = fetch_config_path()?;
     let storage_path = fetch_persistent_storage_path()?;
     if storage_path.exists() {
-        let password = read_password(&storage_path)?;
-        if WalletCore::new_update_chain(config_path.clone(), storage_path.clone(), overrides.clone(), &password).is_ok() {
-            bail!("this wallet opens, so there is nothing to restore");
+        let password = crate::wallet_password(&storage_path)?;
+        match WalletCore::new_update_chain(config_path.clone(), storage_path.clone(), overrides.clone(), &password) {
+            Ok(_) => bail!("this wallet opens, so there is nothing to restore"),
+            Err(error) if error.chain().any(|cause| cause.is::<wallet::storage::WrongPassword>()) => {
+                return Err(error);
+            }
+            Err(_) if wallet::storage::Storage::is_encrypted(&storage_path).unwrap_or(false) => {
+                bail!("this wallet is encrypted and could not be unlocked; it was not moved aside");
+            }
+            Err(_) => {}
         }
     }
     let mnemonic = wallet::cli::read_mnemonic_from_stdin()?;

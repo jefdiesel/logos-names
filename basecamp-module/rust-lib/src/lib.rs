@@ -22,7 +22,8 @@
 //! deposit comes back to whoever releases it. One- and two-character names are
 //! locked, and three-character names take a higher deposit; the module proves a
 //! name's length tier from a built-in copy of the short-name list. Claiming a
-//! name is commit, then reveal at least 15 minutes later (see `register_name`).
+//! name is commit, then reveal at least 5 minutes later for public names
+//! (15 minutes for private names; see `register_name`).
 //!
 //! Reading needs nothing but the sequencer. Changing a name needs a signature.
 //! The keys stay in the person's own `names` CLI wallet, and this module hands
@@ -189,7 +190,7 @@ pub trait NamesModule: Send + 'static {
     /// steps, so that nobody watching pending transactions can take the name
     /// first: the first call sends a commitment, which hides the name, and
     /// answers `stage: "committed"` with `ready_at` (milliseconds, chain time,
-    /// about 15 minutes on). Calling `register_name` again from then on sends the
+    /// about 5 minutes on). Calling `register_name` again from then on sends the
     /// reveal that claims the name (`stage: "revealed"`), and once that has
     /// landed, answers `stage: "registered"` without sending anything. A call
     /// before `ready_at` sends nothing. The commitment is kept on this device
@@ -1057,7 +1058,7 @@ fn installer_script() -> String {
 set -eu
 env > "$NAMES_INSTALL_DIR/../installer-env"
 printf '#!/bin/sh\necho "names 9.9.9-test"\n' > "$NAMES_INSTALL_DIR/names"
-printf '#!/bin/sh\necho "r0vm 3.0.5"\n' > "$NAMES_INSTALL_DIR/r0vm"
+printf '#!/bin/sh\necho "r0vm 3.1.0"\n' > "$NAMES_INSTALL_DIR/r0vm"
 chmod 755 "$NAMES_INSTALL_DIR/names" "$NAMES_INSTALL_DIR/r0vm"
 echo "Installed $NAMES_INSTALL_DIR/names"
 "#
@@ -1492,6 +1493,9 @@ struct Commitment {
     secret: [u8; 32],
     /// The chain time the commitment claimed.
     made: u64,
+    /// Whether this was a public `CommitPublic` (5-minute wait, 1-minute window) rather
+    /// than a legacy/private `Commit` (15-minute wait, 10-minute window).
+    public: bool,
     /// The `private_account` choice for the reveal.
     private_account: String,
     /// The reveal's transaction, once sent.
@@ -1507,6 +1511,7 @@ impl Commitment {
             "owner": registry::account_text(&self.owner),
             "secret": registry::hex(&self.secret),
             "made": self.made,
+            "public": self.public,
             "private_account": self.private_account,
             "revealed": self.revealed,
             "revealed_at": self.revealed_at,
@@ -1518,21 +1523,27 @@ impl Commitment {
             owner: registry::parse_account(value["owner"].as_str()?).ok()?,
             secret: registry::unhex(value["secret"].as_str()?).ok()?.try_into().ok()?,
             made: value["made"].as_u64()?,
+            public: value["public"].as_bool().unwrap_or(false),
             private_account: value["private_account"].as_str().unwrap_or_default().to_owned(),
             revealed: value["revealed"].as_str().map(str::to_owned),
             revealed_at: value["revealed_at"].as_u64(),
         })
     }
 
+    fn window_ms(&self) -> u64 {
+        if self.public { registry::PUBLIC_TIME_WINDOW_MS } else { registry::TIME_WINDOW_MS }
+    }
+
     /// When the reveal may be sent, in chain time.
     fn ready_at(&self) -> u64 {
-        self.made.saturating_add(registry::MIN_COMMIT_AGE_MS)
+        let wait = if self.public { registry::PUBLIC_MIN_COMMIT_AGE_MS } else { registry::MIN_COMMIT_AGE_MS };
+        self.made.saturating_add(wait)
     }
 
     /// Whether a reveal claiming `chain_now` can still land before the
     /// commitment expires.
     fn usable_at(&self, chain_now: u64) -> bool {
-        chain_now.saturating_add(registry::TIME_WINDOW_MS) < self.made.saturating_add(registry::MAX_COMMIT_AGE_MS)
+        chain_now.saturating_add(self.window_ms()) < self.made.saturating_add(registry::MAX_COMMIT_AGE_MS)
     }
 }
 
@@ -2525,7 +2536,7 @@ impl Names {
         if let Some(mut saved) = saved.filter(|saved| saved.usable_at(chain_now)) {
             let promised = registry::commitment(&derived.id, &registry::owner_tag(&derived.id, &owner), &saved.secret);
             let landed = registry.commitment_made(&promised)?.is_some();
-            if !landed && chain_now < saved.made.saturating_add(registry::TIME_WINDOW_MS) {
+            if !landed && chain_now < saved.made.saturating_add(saved.window_ms()) {
                 // Sent, and still able to land.
                 return Ok(status("committed", None, Some(saved.ready_at())));
             }
@@ -2533,7 +2544,7 @@ impl Names {
                 if chain_now < saved.ready_at() {
                     return Ok(status("committed", None, Some(saved.ready_at())));
                 }
-                if saved.revealed_at.is_some_and(|at| chain_now < at.saturating_add(registry::TIME_WINDOW_MS)) {
+                if saved.revealed_at.is_some_and(|at| chain_now < at.saturating_add(saved.window_ms())) {
                     // A reveal is on its way and may still land.
                     return Ok(status("revealed", saved.revealed.as_deref(), Some(saved.ready_at())));
                 }
@@ -2558,6 +2569,7 @@ impl Names {
             owner,
             secret,
             made,
+            public: true,
             private_account: private_account.trim().to_owned(),
             revealed: None,
             revealed_at: None,
@@ -6030,14 +6042,24 @@ mod tests {
             owner: [1; 32],
             secret: [5; 32],
             made: 1_000_000,
+            public: true,
             private_account: "auto".into(),
             revealed: Some("ab".into()),
             revealed_at: Some(2_000_000),
         };
         assert_eq!(Commitment::from_json(&saved.to_json()), Some(saved.clone()));
-        assert_eq!(saved.ready_at(), 1_000_000 + 15 * 60 * 1000);
-        assert!(saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS - 1));
-        assert!(!saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS));
+        assert_eq!(saved.ready_at(), 1_000_000 + 5 * 60 * 1000);
+        assert!(saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::PUBLIC_TIME_WINDOW_MS - 1));
+        assert!(!saved.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::PUBLIC_TIME_WINDOW_MS));
+
+        // Legacy saved commitment without "public" defaults to 15-minute wait and 10-minute window.
+        let mut legacy_json = saved.to_json();
+        legacy_json.as_object_mut().unwrap().remove("public");
+        let legacy = Commitment::from_json(&legacy_json).expect("legacy decodes");
+        assert!(!legacy.public);
+        assert_eq!(legacy.ready_at(), 1_000_000 + 15 * 60 * 1000);
+        assert!(legacy.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS - 1));
+        assert!(!legacy.usable_at(1_000_000 + registry::MAX_COMMIT_AGE_MS - registry::TIME_WINDOW_MS));
 
         let path = std::env::temp_dir().join(format!("logos-names-pending-{}-{}.json", std::process::id(), now()));
         let mut pending = Pending::load(path.clone());
@@ -6176,7 +6198,7 @@ mod tests {
         names.bridge_key = Some("ab".repeat(32));
         names.bridge_node = Some("http://127.0.0.1:8080".into());
         let refused = parsed(&names.cli_bridge_to("5".into(), "12".repeat(32), "NOT-AN-ACCOUNT".into(), "http://127.0.0.1:4321".into(), false));
-        assert_eq!(refused["error"], "the bridge credits a public LEZ account: Public/ and its ID, or the account's public key (64 hex characters)", "{refused}");
+        assert_eq!(refused["error"], "the bridge credits a public LEZ account: Public/ and its ID, or the account's public key (66 hex characters)", "{refused}");
         assert_eq!((names.bridge_key.clone(), names.bridge_node.clone()), (Some("ab".repeat(32)), Some("http://127.0.0.1:8080".to_owned())));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -6755,7 +6777,7 @@ mod tests {
     #[test]
     fn a_bridge_to_lez_0_4_carries_the_accounts_key_and_is_refused_without_it() {
         const E8: &str = "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8";
-        const KEY: &str = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        const KEY: &str = "00f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
         let key = deposit::public_key_text(KEY).unwrap();
         let mine = deposit::key_account(&key);
         let other = "7wx3U7qMRWopjKXH67t9WpuNiNyB12pXUhB6CNA1LznR";
@@ -6800,7 +6822,7 @@ mod tests {
         assert_eq!(activity::bridge_op_id(&bare), Some(op));
         // Another's account by its public key: that key is the evidence.
         node_answers("wallet_get_notes", json!({ "notes": [{ "id": "e9".repeat(32), "value": "1000000" }, { "id": "c1de", "value": "5000000" }] }));
-        let theirs = "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659";
+        let theirs = "00dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659";
         let by_key = parsed(&names.chain_bridge(NODE_KEY.into(), theirs.into(), "1000000".into(), false));
         let their_account = deposit::key_account(&deposit::public_key_text(theirs).unwrap());
         assert_eq!(by_key["value"]["to"], registry::account_text(&their_account), "{by_key}");
@@ -8469,17 +8491,18 @@ mod tests {
 
     #[test]
     fn the_account_list_is_checked_before_the_app_sees_it() {
-        let key = "ab".repeat(32);
+        let pub_key = format!("00{}", "ab".repeat(32));
+        let npk = "ab".repeat(32);
         let list = format!(
-            r#"[{{"account":"Public/{PUBLIC}","kind":"public","label":"Main","balance":"12","default":true,"public_key":"{key}"}},{{"account":"Private/{PRIVATE}","kind":"private","label":"bad\u0007","balance":"x","default":false,"public_key":"{key}","npk":"{key}"}}]"#
+            r#"[{{"account":"Public/{PUBLIC}","kind":"public","label":"Main","balance":"12","default":true,"public_key":"{pub_key}"}},{{"account":"Private/{PRIVATE}","kind":"private","label":"bad\u0007","balance":"x","default":false,"public_key":"{pub_key}","npk":"{npk}"}}]"#
         );
         let (mut names, dir) = with_wallet("accounts-list", &format!("echo '{list}'"));
         let got = parsed(&names.cli_accounts());
         assert_eq!(got["success"], true, "{got}");
         let rows = got["value"].as_array().unwrap();
-        assert_eq!(rows[0], json!({ "account": format!("Public/{PUBLIC}"), "kind": "public", "label": "Main", "balance": "12", "default": true, "public_key": key, "npk": null }));
+        assert_eq!(rows[0], json!({ "account": format!("Public/{PUBLIC}"), "kind": "public", "label": "Main", "balance": "12", "default": true, "public_key": pub_key, "npk": null }));
         // A private account's npk comes through (a public key: a name's profile publishes it).
-        assert_eq!(rows[1], json!({ "account": format!("Private/{PRIVATE}"), "kind": "private", "label": null, "balance": null, "default": false, "public_key": null, "npk": key }));
+        assert_eq!(rows[1], json!({ "account": format!("Private/{PRIVATE}"), "kind": "private", "label": null, "balance": null, "default": false, "public_key": null, "npk": npk }));
         // Another app can't read the wallet's accounts this way.
         as_caller(app("snoop_ui"));
         assert_eq!(parsed(&names.cli_accounts())["success"], false);

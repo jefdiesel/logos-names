@@ -14,16 +14,17 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use common::{HashType, transaction::LeeTransaction};
-use lee::{PublicKey, privacy_preserving_transaction::circuit::ProgramCatalog, program::Program};
+use lee::{privacy_preserving_transaction::circuit::ProgramCatalog, program::Program};
 use lee_core::{
     NullifierPublicKey, PrivateAccountKind,
     account::{AccountId, Actor, Balance},
     encryption::ViewingPublicKey,
+    signing_key::SigningKeyState,
 };
 use sequencer_service_rpc::SequencerClient;
 use token_core::{Message, TokenDefinition, TokenState};
 use wallet::{
-    AccountIdentity, AsyncDelivery, ExecutionFailureKind, WalletCore,
+    AccountIdentity, AsyncDelivery, ExecutionFailureKind, FeeParams, WalletCore,
     config::{SequencerConnectionData, WalletConfigOverrides},
     program_facades::program_loader::ProgramLoader,
     utils::{fetch_config_path, fetch_persistent_storage_path, read_password},
@@ -99,9 +100,9 @@ enum Command {
         /// A public account, or a private account of this wallet.
         #[arg(long, conflicts_with_all = ["to_pk", "to_npk", "to_vpk"])]
         to: Option<AccountId>,
-        /// A public account never used yet, by its public key (it must be admitted).
+        /// A public account never used yet, by its initial signing key (it must be admitted).
         #[arg(long)]
-        to_pk: Option<PublicKey>,
+        to_pk: Option<SigningKeyState>,
         /// Someone else's private account: its nullifier public key (hex)...
         #[arg(long, requires = "to_vpk")]
         to_npk: Option<String>,
@@ -176,8 +177,18 @@ async fn run_wallet(args: Vec<String>, overrides: WalletConfigOverrides) -> Resu
     use clap::Parser as _;
     use wallet::cli::{Args, execute_subcommand};
 
-    let Args { command, dry_run, fee_payer, refund_to, .. } =
-        Args::parse_from(std::iter::once("wallet-tokens wallet".to_owned()).chain(args));
+    let Args {
+        command,
+        dry_run,
+        allow_revert,
+        gas_limit,
+        max_fee,
+        tip,
+        fee_headroom,
+        fee_payer,
+        refund_to,
+        ..
+    } = Args::parse_from(std::iter::once("wallet-tokens wallet".to_owned()).chain(args));
     let config_path = fetch_config_path()?;
     let storage_path = fetch_persistent_storage_path()?;
     if let Some(parent) = config_path.parent() {
@@ -197,14 +208,23 @@ async fn run_wallet(args: Vec<String>, overrides: WalletConfigOverrides) -> Resu
         wallet
     };
     wallet.set_dry_run(dry_run);
-    wallet.set_private_fee_payer(fee_payer);
-    wallet.set_private_refund_target(refund_to);
+    wallet.set_allow_revert(allow_revert);
+    wallet.set_fee_params(FeeParams {
+        gas_limit,
+        max_fee,
+        tip,
+        headroom_blocks: fee_headroom,
+        payer: fee_payer,
+        refund_to,
+    });
     match execute_subcommand(&mut wallet, command).await {
-        Err(error)
-            if matches!(error.root_cause().downcast_ref(), Some(ExecutionFailureKind::DryRun)) =>
-        {
-            Ok(())
-        }
+        Err(error) => match error.root_cause().downcast_ref() {
+            Some(ExecutionFailureKind::DryRun(report)) => {
+                println!("{report}");
+                Ok(())
+            }
+            _ => Err(error),
+        },
         result => result.map(|_| ()),
     }
 }
@@ -273,7 +293,8 @@ async fn run(wallet: &mut WalletCore<SequencerClient>, command: Command) -> Resu
             let sender = identity(wallet, from);
             let recipient = match (to, to_pk, to_npk, to_vpk) {
                 (Some(to), ..) => identity(wallet, to),
-                (None, Some(pk), ..) => AccountIdentity::PublicForeign(pk),
+                (None, Some(pk), ..) => AccountIdentity::public_foreign(pk)
+                    .ok_or_else(|| anyhow!("invalid initial public signing key"))?,
                 (None, None, Some(npk), Some(vpk)) => AccountIdentity::PrivateForeign {
                     npk: NullifierPublicKey(hex_array(&npk)?),
                     vpk: ViewingPublicKey::from_bytes(hex_bytes(&vpk)?)
@@ -364,7 +385,7 @@ fn identity(wallet: &WalletCore<SequencerClient>, account: AccountId) -> Account
     if let Some(private) = wallet.resolve_private_account(account) {
         return private;
     }
-    if wallet.get_account_public_signing_key(account).is_some() {
+    if wallet.get_account_initial_key(account).is_some() {
         AccountIdentity::Public(account)
     } else {
         AccountIdentity::PublicNoSign(account)
