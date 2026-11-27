@@ -12,7 +12,8 @@
 //    public key, which is why a fee-mode treasury has to be on the chain already.
 
 import {
-  Writer, actor, base58Decode, concat, feeDeclaration, maxFeeFor, nativeBalance, pdaEvidence, sha256,
+  AUTHORITY_SIGNER, Writer, actor, base58Decode, concat, feeDeclaration, maxFeeFor, nativeBalance, pdaEvidence, sha256,
+  signerActor,
 } from "./lez-tx.js";
 
 const utf8 = (text) => new TextEncoder().encode(text);
@@ -170,6 +171,7 @@ export const transferInstruction = ({ id, newOwner }) => instruction(4).fixed(id
 export const releaseInstruction = ({ id, refund }) => instruction(5).fixed(id, 32).u128(refund).done();
 export const setPrimaryInstruction = ({ name }) => instruction(6).vec(utf8(name)).done();
 export const commitInstruction = ({ commitment, now }) => instruction(8).fixed(commitment, 32).u64(now).done();
+export const commitPublicInstruction = ({ commitment, now }) => instruction(10).fixed(commitment, 32).u64(now).done();
 
 export function claimInstruction({ id, sealed, now, proof }) {
   const w = instruction(9).fixed(id, 32).vec(sealed).u64(now);
@@ -177,12 +179,26 @@ export function claimInstruction({ id, sealed, now, proof }) {
   return w.done();
 }
 
+/** Size of a borsh-encoded `Commitment` account state (`core/src/lib.rs:157-167`): version(1) + made(8) + public(1). */
+export const COMMITMENT_BYTES = 10;
+
+/** Decodes a commitment actor's 10-byte state: `{ version: u8, made: u64 LE, public: bool }`. */
+export function decodeCommitment(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== COMMITMENT_BYTES) {
+    throw new Error(`invalid commitment length: expected ${COMMITMENT_BYTES} bytes, got ${bytes?.length ?? 0}`);
+  }
+  const flag = bytes[9];
+  if (flag !== 0 && flag !== 1) throw new Error(`invalid commitment public flag: ${flag}`);
+  const made = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(1, true);
+  return { version: bytes[0], made: Number(made), public: flag === 1 };
+}
+
 // ---------- messages: what lez-tx.js encodes and signs ----------
 
-/** `signer` sends `data` to its own actor of the registry, and pays the fee. */
+/** `signer` sends `data` to its own actor of the registry (with `Authority.Signer`), and pays the fee. */
 function message({ program, signer, nonce, gasLimit, data, actors = [], evidence = [] }) {
   return {
-    to: actor(signer, program),
+    to: signerActor(signer, program),
     data,
     actors,
     nonces: [{ accountId: signer, nonce: BigInt(nonce) }],
@@ -200,6 +216,15 @@ export function commitMessage({ program, signer, nonce, gasLimit, now, commitmen
   });
 }
 
+export function commitPublicMessage({ program, signer, nonce, gasLimit, now, commitment }) {
+  return message({
+    program, signer, nonce, gasLimit,
+    data: commitPublicInstruction({ commitment, now }),
+    actors: [actor(commitmentAddress(program, commitment), program)],
+    evidence: [pdaEvidence(program, commitmentSeed(commitment))],
+  });
+}
+
 /** `deposit` pays `fee` into the name's deposit account; otherwise `treasury` gets it. */
 export function registerMessage({ program, signer, nonce, gasLimit, id, secret, sealed, term = 0, fee, treasury = null, now, deposit, lengthProof }) {
   const promised = commitmentHash(id, ownerTag(id, signer), secret);
@@ -212,7 +237,7 @@ export function registerMessage({ program, signer, nonce, gasLimit, id, secret, 
       actor(pageAddress(program, id), program),
       actor(settingsAddress(program), program),
       actor(commitmentAddress(program, promised), program),
-      ...(fee > 0n ? [nativeBalance(signer), nativeBalance(paid)] : []),
+      ...(fee > 0n ? [nativeBalance(signer, AUTHORITY_SIGNER), nativeBalance(paid)] : []),
     ],
     evidence: [
       pdaEvidence(program, nameSeed(id)),
@@ -231,7 +256,7 @@ export function renewMessage({ program, signer, nonce, gasLimit, id, term, fee, 
     actors: [
       actor(recordAddress(program, id), program),
       actor(settingsAddress(program), program),
-      ...(fee > 0n ? [nativeBalance(signer), nativeBalance(treasury)] : []),
+      ...(fee > 0n ? [nativeBalance(signer, AUTHORITY_SIGNER), nativeBalance(treasury)] : []),
     ],
     evidence: [pdaEvidence(program, nameSeed(id)), pdaEvidence(program, settingsSeed())],
   });

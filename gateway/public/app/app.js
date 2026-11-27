@@ -355,7 +355,7 @@ $("pick-command-copy").addEventListener("click", (event) => copy($("pick-command
 
 let registerMod = null;
 let registering = false;
-const REGISTER_PENDING = "lns-register-pending"; // { name, owner, secretHex, made }
+const REGISTER_PENDING = "lns-register-pending"; // { name, owner, secretHex, made, public }
 
 function pendingRegistration() {
   try { return JSON.parse(localStorage.getItem(REGISTER_PENDING) || "null"); } catch { return null; }
@@ -387,7 +387,9 @@ async function claimName(name) {
     registerMod ??= await import("./register.js");
     registerMod.setRpc(settings.rpc);
     const pend = pendingRegistration();
-    const resume = pend && pend.name === name && pend.owner === account ? { secretHex: pend.secretHex, made: pend.made } : null;
+    const resume = pend && pend.name === name && pend.owner === account
+      ? { secretHex: pend.secretHex, made: pend.made, public: Boolean(pend.public) }
+      : null;
     await registerMod.registerPublic({
       privateKey: key, program: settings.registry, name, resume,
       acceptClaimRisk: (until) => window.confirm(
@@ -397,8 +399,8 @@ async function claimName(name) {
       onStep: (stage, detail) => {
         if (stage === "commit") claimProgress("Committing to the name…");
         else if (stage === "committed") {
-          savePending({ name, owner: account, secretHex: detail.secretHex, made: detail.made });
-          claimProgress("Committed. Now the ~15-minute wait so nobody can take it — you can close this; it resumes when you return.");
+          savePending({ name, owner: account, secretHex: detail.secretHex, made: detail.made, public: Boolean(detail.public) });
+          claimProgress("Committed. Now the ~5-minute wait so nobody can take it — you can close this; it resumes when you return.");
         } else if (stage === "waiting") {
           const m = Math.max(1, Math.ceil(detail.remainingMs / 60000));
           claimProgress(`Waiting ~${m} min before claiming… (safe to leave; it resumes)`);
@@ -411,7 +413,10 @@ async function claimName(name) {
     claimProgress(`✓ ${name} is yours. Opening chat…`, "ok");
     setTimeout(() => show("chat"), 1400);
   } catch (error) {
-    const msg = error?.code === "insufficient" || error?.code === "cancelled" ? error.message : `Couldn't claim: ${(error && error.message) || error}`;
+    if (error?.code === "expired") clearPending();
+    const msg = error?.code === "insufficient" || error?.code === "cancelled" || error?.code === "expired"
+      ? error.message
+      : `Couldn't claim: ${(error && error.message) || error}`;
     claimProgress(msg, "bad");
     $("pick-register").disabled = false;
   } finally {

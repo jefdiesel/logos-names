@@ -3,7 +3,8 @@
 // to a scenario the Rust side runs through the real LEZ 0.4 engine and guest:
 //   node engine-run.mjs scenario.json
 //   lns_js_vectors run scenario.json report.json
-// Keys are [n; 32], as in src/main.rs; the first Configure is made there.
+// Account secrets are [n; 32], as in src/main.rs; the first Configure is made there.
+// A refused step is not applied (as engine-test does), so only an "ok" step uses up a nonce.
 import { writeFileSync, readFileSync } from "node:fs";
 
 import * as lez from "../../public/app/lez-tx.js";
@@ -13,13 +14,15 @@ import { buildCommit, buildRegister, setRpc } from "../../public/app/register.js
 const VECTORS = JSON.parse(readFileSync(new URL("vectors.json", import.meta.url)));
 const T0 = 1_800_000_000_000;
 const MIN_COMMIT_AGE_MS = 15 * 60 * 1000;
+const PUBLIC_MIN_COMMIT_AGE_MS = 5 * 60 * 1000;
+const PUBLIC_TIME_WINDOW_MS = 60 * 1000;
 const DEPOSIT = 1_000_000n;
 const GAS = 2_000_000n;
 
 const fill = (value) => new Uint8Array(32).fill(value);
 const who = (byte) => {
   const key = fill(byte);
-  return { key, id: lez.accountIdOfPrivateKey(key), nonce: 0n };
+  return { key, id: lez.publicAccountId(key), nonce: 0n };
 };
 const proofOf = (json) => ({
   kind: "NonMembership",
@@ -63,6 +66,12 @@ push("set primary", alice, lns.setPrimaryMessage({ ...base(alice), name: "alice"
 push("transfer the name to bob", alice, lns.transferMessage({ ...base(alice), id: jef, newOwner: lns.ownerTag(jef, bob.id) }), later);
 push("bob releases and collects the deposit", bob, lns.releaseMessage({ ...base(bob), id: jef, refund: DEPOSIT }), later);
 
+// CommitPublic (variant 10): only within a minute of its claimed time.
+const quick = lns.commitmentHash(fill(0xdd), lns.ownerTag(fill(0xdd), bob.id), fill(7));
+const commitPublic = () => lns.commitPublicMessage({ ...base(bob), now: later, commitment: quick });
+push("a public commit outside its one-minute window is refused", bob, commitPublic(), later + PUBLIC_TIME_WINDOW_MS, "OutOfValidityWindow");
+push("bob commits in public", bob, commitPublic(), later + PUBLIC_TIME_WINDOW_MS - 1);
+
 const claimProof = [lez.fromHex(VECTORS.scenarioClaimSibling)];
 const claim = (from) => lns.claimMessage({ ...base(from), id: held, sealed, now: later, proof: claimProof });
 push("bob can't claim alice's name", bob, claim(bob), later, "Failed");
@@ -73,12 +82,12 @@ const pay = (to, options = {}) => lez.transferMessage({ from: alice.id, to, nonc
 push("pay an account on the chain", alice, pay(bob.id), later);
 const fresh = who(11);
 push("pay a new account with no evidence", alice, pay(fresh.id), later, "UnadmittedPublicActor");
-push("pay a new account, showing its key", alice, pay(fresh.id, { evidence: [lez.keyEvidence(lez.publicKeyOf(fresh.key))] }), later);
+push("pay a new account, showing its initial key", alice, pay(fresh.id, { evidence: [lez.keyEvidence(lez.initialKey(fresh.key))] }), later);
 const undeclared = pay(who(12).id);
 undeclared.actors = [];
 push("pay an account the transaction doesn't declare", alice, undeclared, later, "UnboundAsyncDestination");
 
-// The app's own flow, register.js with a real name, and the RPC it would have used stubbed.
+// The app's own flow, register.js with a real name (CommitPublic + 5-min wait), and the RPC stubbed.
 const RPC = "http://rpc.test";
 setRpc(RPC);
 globalThis.fetch = async (url, options) => {
@@ -91,10 +100,13 @@ const name = "alice-lns";
 const nameSecret = fill(6);
 const shared = { privateKey: alice.key, program: lez.base58Encode(program), name, secret: nameSecret };
 const committed = await buildCommit({ ...shared, now: later });
-steps.push({ label: "register.js commit", ...details(committed.signed), now: later, expect: "ok" });
+steps.push({ label: "register.js commit public", ...details(committed.signed), now: later, expect: "ok" });
 alice.nonce += 1n;
-const revealed = later + MIN_COMMIT_AGE_MS;
-const registered = await buildRegister({ ...shared, now: revealed });
+const revealed = later + PUBLIC_MIN_COMMIT_AGE_MS;
+// The registry checks names against the full locked-name list (depth 21, root 9778bed4);
+// register.js's own builder still reads the old 65,536-name shortlist.bin, so the proof
+// here is the Rust one from the full list.
+const registered = await buildRegister({ ...shared, now: revealed, proof: proofOf(VECTORS.lengthProofs.named) });
 steps.push({ label: "register.js register", ...details(registered.signed), now: revealed, expect: "ok" });
 alice.nonce += 1n;
 
@@ -107,8 +119,14 @@ const views = [
   { label: "emptyActor", account: record, program: lez.base58Encode(fill(0)) },
   { label: "reverse", account: lez.base58Encode(alice.id), program: program58 },
   { label: "missing", account: lez.base58Encode(fill(0x44)), program: program58 },
+  { label: "publicCommitment", account: lez.base58Encode(lns.commitmentAddress(program, quick)), program: program58 },
 ];
 const balances = [alice, bob, fresh, who(12)].map(({ id }) => lez.base58Encode(id));
 balances.push(lez.base58Encode(lns.depositAddress(program, registered.id)));
 balances.push(lez.base58Encode(lns.depositAddress(program, jef)));
-writeFileSync(process.argv[2], JSON.stringify({ program: program58, account: lez.base58Encode(alice.id), steps, views, balances }, null, 1));
+// Each signer's nonce and current key afterwards: the next key its last transaction committed to.
+const signers = [alice, bob].map(({ id }) => lez.base58Encode(id));
+const expectedKeys = Object.fromEntries([alice, bob].map(({ key, id, nonce }) => [
+  lez.base58Encode(id), { nonce: String(nonce), key: lez.toHex(lez.encodeSigningKeyState(lez.keyState(key, nonce))) },
+]));
+writeFileSync(process.argv[2], JSON.stringify({ program: program58, account: lez.base58Encode(alice.id), steps, views, balances, signers, expectedKeys }, null, 1));

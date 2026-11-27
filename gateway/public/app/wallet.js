@@ -3,22 +3,23 @@
 // name, posting as a name) need proving on a computer and stay in Basecamp.
 //
 // TODO: move the key to the isolated separate-origin signer before mainnet / real
-// money. For testnet this holds a secp256k1 key in the app, behind the passkey vault
-// (vault.js) exactly like the messaging key, with a "use without saving" session path.
+// money. For testnet this holds a 32-byte LEZ v0.4.0 PublicAccountSecret in the app,
+// behind the passkey vault (vault.js) exactly like the messaging key, with a "use
+// without saving" session path.
 
 import {
-  randomPrivateKey,
-  accountIdOfPrivateKey,
-  checkPrivateKey,
+  randomAccountSecret,
+  publicAccountId,
+  checkAccountSecret,
   formatAccountId,
   fromHex,
   getAccountBalance,
-  publicKeyOf,
+  initialKeyBytes,
   toHex,
 } from "./lez-tx.js";
 import * as vault from "./vault.js";
 
-const KEY_STORE = "lns-wallet-device"; // vault record (vault.js): the wallet's secp256k1 key
+const KEY_STORE = "lns-wallet-device"; // vault record (vault.js): the wallet's 32-byte PublicAccountSecret
 const FAUCET_URL = "https://lez.buggers.online/faucet";
 
 const $ = (id) => document.getElementById(id);
@@ -123,18 +124,18 @@ async function doConnect() {
   $("wallet-lock-error").hidden = true;
   if (!/^[0-9a-f]{64}$/.test(hex)) { lockError("Paste a 64-character hex key."); return; }
   let sk;
-  try { sk = checkPrivateKey(fromHex(hex)); } catch { lockError("That isn't a valid wallet key."); return; }
+  try { sk = checkAccountSecret(fromHex(hex)); } catch { lockError("That isn't a valid wallet key."); return; }
   await storeBehindBiometric(sk, input);
 }
 
 /** Make a fresh wallet, kept behind biometric. */
 async function doMake() {
-  await storeBehindBiometric(randomPrivateKey(), null);
+  await storeBehindBiometric(randomAccountSecret(), null);
 }
 
 function setWallet(secretKey, kept) {
   if (!(secretKey instanceof Uint8Array) || secretKey.length !== 32) throw new Error("bad wallet key");
-  const accountId = accountIdOfPrivateKey(secretKey);
+  const accountId = publicAccountId(secretKey);
   wallet = { secretKey, accountId, accountB58: formatAccountId(accountId) };
   keyKept = kept;
 }
@@ -151,7 +152,7 @@ function loadPlainKey() {
   const rec = readStore(KEY_STORE);
   if (rec && typeof rec.secretKey === "string") {
     try {
-      setWallet(checkPrivateKey(fromHex(rec.secretKey)), true);
+      setWallet(checkAccountSecret(fromHex(rec.secretKey)), true);
       return;
     } catch {}
   }
@@ -160,7 +161,7 @@ function loadPlainKey() {
     // that could orphan a funded account. Surface it instead of making a new key.
     throw new Error("unreadable-wallet");
   }
-  const sk = randomPrivateKey();
+  const sk = randomAccountSecret();
   const kept = writeStore(KEY_STORE, { secretKey: toHex(sk) });
   setWallet(sk, kept);
 }
@@ -202,7 +203,7 @@ async function doPasskey() {
     if (lockMode === "unlock") {
       finishUnlock(await vault.unlockPasskey(readStore(KEY_STORE)), true);
     } else {
-      const secretKey = randomPrivateKey();
+      const secretKey = randomAccountSecret();
       const record = await vault.enrollPasskey(secretKey, { rpId: location.hostname, userName: "Names Wallet" });
       finishUnlock(secretKey, writeStore(KEY_STORE, record));
     }
@@ -266,12 +267,13 @@ async function getFaucet() {
   } catch {}
   try {
     // The faucet is fronted by the CORS proxy, so the response is readable: a 200 with
-    // {tx} on success, or a non-200 with {error} (e.g. the once-a-day limit). LEZ 0.4 only
-    // credits a new account if the transfer shows its public key, so the faucet needs it.
+    // {tx} on success, or a non-200 with {error} (e.g. the once-a-day limit). LEZ v0.4.0 only
+    // admits a new public account if the transfer shows its 33-byte initial SigningKeyState
+    // (66 hex chars: key_type 0x00 || 32-byte key commitment), so the faucet needs it.
     const res = await fetch(FAUCET_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ account: wallet.accountB58, publicKey: toHex(publicKeyOf(wallet.secretKey)) }),
+      body: JSON.stringify({ account: wallet.accountB58, publicKey: toHex(initialKeyBytes(wallet.secretKey)) }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -359,7 +361,7 @@ function doImportMain() {
   err.hidden = true;
   if (!/^[0-9a-f]{64}$/.test(hex)) { err.textContent = "Paste a 64-character hex key."; err.hidden = false; return; }
   let sk;
-  try { sk = checkPrivateKey(fromHex(hex)); } catch { err.textContent = "That isn't a valid wallet key."; err.hidden = false; return; }
+  try { sk = checkAccountSecret(fromHex(hex)); } catch { err.textContent = "That isn't a valid wallet key."; err.hidden = false; return; }
   if (wallet && toHex(wallet.secretKey) !== hex &&
       !window.confirm("Connect this key? It replaces the wallet shown here. If that wallet holds tokens and you haven't backed it up, they become unreachable. Continue?")) return;
   writeStore(KEY_STORE, { secretKey: hex });
@@ -402,7 +404,7 @@ export function open(context) {
   }
   if (rec && typeof rec.secretKey === "string") {
     try {
-      setWallet(checkPrivateKey(fromHex(rec.secretKey)), true); // saved plain → load it, no asking
+      setWallet(checkAccountSecret(fromHex(rec.secretKey)), true); // saved plain → load it, no asking
       proceed();
       return;
     } catch {}
@@ -427,7 +429,7 @@ export function ensureLoaded() {
   if (wallet) return true;
   const rec = readStore(KEY_STORE);
   if (rec && typeof rec.secretKey === "string") {
-    try { setWallet(checkPrivateKey(fromHex(rec.secretKey)), true); return true; } catch {}
+    try { setWallet(checkAccountSecret(fromHex(rec.secretKey)), true); return true; } catch {}
   }
   return false;
 }

@@ -3,38 +3,47 @@
 // only: the name carries a public account for open payments; private/ZK registration
 // stays in Basecamp. The transactions themselves are in lns-tx.js.
 //
-// Two steps, as the program demands: Commit, wait MIN_COMMIT_AGE_MS (15 min), then
-// Register. The commitment hides the name's id so nobody front-runs the claim.
+// Two steps, as the program demands: CommitPublic (variant 10), wait
+// PUBLIC_MIN_COMMIT_AGE_MS (5 min), then Register. The commitment hides the name's id
+// so nobody front-runs the claim. Both CommitPublic and its Register reveal use
+// PUBLIC_TIME_WINDOW_MS (1 min), so the chain clock is read right before signing (after
+// Argon2id derivation and shortlist proof construction) and never falls back to a local clock.
 //
 // LengthProof: NonMembership over the 65,536-leaf (depth 16) Merkle tree built from
 // shortlist.bin, domain-separated SHA-256; root must equal SHORTLIST_ROOT.
 
 import { deriveName, encodeProfile, seal, readActorState, decodeNameRecord, decodeSettings, openSealed, decodeProfile } from "./names.js";
 import {
-  concat, sha256, formatAccountId, accountIdOfPrivateKey, feeReserve, getFeeState,
+  concat, sha256, formatAccountId, publicAccountId, feeReserve, getFeeState,
   signPublicTransaction, getAccountsNonces, getAccountBalance, sendTransaction, waitForTransaction,
-  toHex, fromHex,
+  systemProgramId, toHex, fromHex,
 } from "./lez-tx.js";
 import {
-  accountBytes, commitMessage, commitmentAddress, commitmentHash, ownerTag, recordAddress, registerMessage, setRecordMessage,
-  settingsAddress,
+  accountBytes, commitMessage, commitPublicMessage, commitmentAddress, commitmentHash, decodeCommitment,
+  ownerTag, recordAddress, registerMessage, setRecordMessage, settingsAddress,
 } from "./lns-tx.js";
 
-// Gas limits, well above what the real guest used on the LEZ 0.4 engine for a one-block
-// profile (gateway/app-src/vectors): commit 21k, register 139k, set record 32k.
+// Gas limits: the browser cannot run r0vm, so these are constants above what the real guest
+// used on the LEZ v0.4.0 engine at these limits for a one-block profile
+// (gateway/app-src/vectors/engine-report.json, risc0 3.1.0): CommitPublic 25.4k, Register
+// 164.9k, SetRecord 35.6k. The sequencer runs a public transaction at its declared gas limit
+// and a reverted one is charged all of it, so keep them tight (~1.5-2.3× measured).
 const REGISTER_GAS = 250000n;
-const COMMIT_GAS = 60000n;
-const SET_RECORD_GAS = 120000n;
-// Transaction sizes, for the fee estimate: measured 2,591 and 569 bytes.
-const REGISTER_BYTES = 2700n;
-const COMMIT_BYTES = 600n;
+const COMMIT_GAS = 50000n;
+const SET_RECORD_GAS = 80000n;
+// Transaction wire sizes for the fee estimate, measured on v0.4.0: Register 2,959 bytes with a
+// proof from the full list (33 more at nonce 0), CommitPublic 612 (645 at nonce 0).
+const REGISTER_BYTES = 3000n;
+const COMMIT_BYTES = 660n;
 
 // ---- constants (core/src/lib.rs, registry.rs, shortlist.rs) ----
 const te = new TextEncoder();
 const utf8 = (s) => te.encode(s);
 export const MIN_COMMIT_AGE_MS = 15 * 60 * 1000;
+export const PUBLIC_MIN_COMMIT_AGE_MS = 5 * 60 * 1000;
 export const MAX_COMMIT_AGE_MS = 24 * 60 * 60 * 1000;
 export const TIME_WINDOW_MS = 10 * 60 * 1000;
+export const PUBLIC_TIME_WINDOW_MS = 60 * 1000;
 export const DEPOSIT = 1_000_000n; // normal name's deposit (deposit mode)
 // shortlist
 const LEAF_DOMAIN = utf8("logos-names/v5/short-leaf");
@@ -117,32 +126,47 @@ export async function lengthProof(id32) {
   };
 }
 
-// ---- building the signed txs (no network) ----
-export async function buildCommit({ privateKey, program, name, secret, now, gasLimit = COMMIT_GAS }) {
+// ---- building the signed txs ----
+// Slow work (Argon2id deriveName, sealing, shortlist Merkle proof) runs BEFORE reading the
+// chain clock and nonce so the 1-minute PUBLIC_TIME_WINDOW_MS starts right before signing.
+export async function buildCommit({ privateKey, program, name, secret, now = null, publicCommit = true, gasLimit = COMMIT_GAS }) {
+  const rpc = defaultRpc();
   const prog = accountBytes(program);
   const { id } = await deriveName(name);
-  const signer = accountIdOfPrivateKey(privateKey);
+  const signer = publicAccountId(privateKey);
   const holder = ownerTag(id, signer);
   const commitment = commitmentHash(id, holder, secret);
-  const [nonce] = await getAccountsNonces(defaultRpc(), [signer]);
-  const message = commitMessage({ program: prog, signer, nonce, gasLimit, now, commitment });
-  return { signed: signPublicTransaction(message, [privateKey]), id, holder, promised: commitment };
+  const [nonces, claimedNow] = await Promise.all([
+    getAccountsNonces(rpc, [signer]),
+    now !== null && now !== undefined ? Promise.resolve(now) : chainNow(rpc),
+  ]);
+  const [nonce] = nonces;
+  const build = publicCommit ? commitPublicMessage : commitMessage;
+  const message = build({ program: prog, signer, nonce, gasLimit, now: claimedNow, commitment });
+  return { signed: signPublicTransaction(message, [privateKey]), id, holder, promised: commitment, now: claimedNow, public: publicCommit };
 }
 
-export async function buildRegister({ privateKey, program, name, secret, now, term = 0, deposit = true, gasLimit = REGISTER_GAS }) {
+// `proof`: a length proof made elsewhere (the engine test passes one from the registry's full
+// list); by default it is built here from shortlist.bin.
+export async function buildRegister({ privateKey, program, name, secret, now = null, term = 0, deposit = true, gasLimit = REGISTER_GAS, proof: given = null }) {
   if (!name || name.length < MIN_NAME_LENGTH) throw Object.assign(new Error(`Names must be at least ${MIN_NAME_LENGTH} characters.`), { code: "too_short" });
+  const rpc = defaultRpc();
   const prog = accountBytes(program);
   const { id, key } = await deriveName(name);
-  const signer = accountIdOfPrivateKey(privateKey);
+  const signer = publicAccountId(privateKey);
   // public name: publish the payer's account on the name (open payments). No private keys.
   const profile = encodeProfile({ name, account: formatAccountId(signer), npk: null, vpk: null, texts: {} });
   const sealed = await seal(key, profile, "record");
-  const proof = await lengthProof(id);
-  const [nonce] = await getAccountsNonces(defaultRpc(), [signer]);
+  const proof = given ?? await lengthProof(id);
+  const [nonces, claimedNow] = await Promise.all([
+    getAccountsNonces(rpc, [signer]),
+    now !== null && now !== undefined ? Promise.resolve(now) : chainNow(rpc),
+  ]);
+  const [nonce] = nonces;
   const message = registerMessage({
-    program: prog, signer, nonce, gasLimit, id, secret, sealed, term, fee: DEPOSIT, now, deposit, lengthProof: proof,
+    program: prog, signer, nonce, gasLimit, id, secret, sealed, term, fee: DEPOSIT, now: claimedNow, deposit, lengthProof: proof,
   });
-  return { signed: signPublicTransaction(message, [privateKey]), id };
+  return { signed: signPublicTransaction(message, [privateKey]), id, now: claimedNow };
 }
 
 // The RPC the webapp reads/writes through. Defaults to the public CORS proxy.
@@ -150,25 +174,27 @@ let _rpc = "https://lez.buggers.online/lez";
 export function setRpc(url) { _rpc = url; }
 export function defaultRpc() { return _rpc; }
 
-// The account the chain keeps its clock on, and the program whose state there holds it:
-// { block_id: u64, timestamp: u64 }, in milliseconds.
-const CLOCK_ACCOUNT = formatAccountId(utf8("/LEZ/ClockProgramAccount/0000001"));
-const CLOCK_PROGRAM = "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z";
+// The account the chain keeps its clock on (`clock/core/src/lib.rs:9-13, 95-98`), and the
+// `system_upgrader` PDA program whose state there holds `{ block_id: u64, timestamp: u64 }` in ms.
+export const CLOCK_ACCOUNT = formatAccountId(utf8("/LEZ/ClockProgramAccount/0000000"));
+export const CLOCK_PROGRAM = formatAccountId(systemProgramId("clock"));
 
 /**
  * The chain's time in milliseconds. The program takes a claimed time only if the block's is
- * at or after it, and a refused transaction is charged, so this device's clock won't do. If
- * the chain's can't be read, this device's set back a minute, so it isn't ahead of the next block.
+ * in `[now, now + PUBLIC_TIME_WINDOW_MS)` (1 min on the public path), and a refused public
+ * transaction burns its entire declared gas limit. Fail closed if the chain's clock cannot be
+ * read — never fall back to a local clock offset.
  */
 export async function chainNow(rpc = defaultRpc()) {
-  try {
-    const state = await readActorState(rpc, CLOCK_PROGRAM, CLOCK_ACCOUNT);
-    const timestamp = new DataView(state.buffer, state.byteOffset, state.byteLength).getBigUint64(8, true);
-    if (timestamp > 0n) return Number(timestamp);
-  } catch {
-    // fall through to this device's clock
+  const state = await readActorState(rpc, CLOCK_PROGRAM, CLOCK_ACCOUNT);
+  if (state.length < 16) {
+    throw new Error("Couldn't read the chain's clock. Nothing was sent.");
   }
-  return Date.now() - 60000;
+  const timestamp = new DataView(state.buffer, state.byteOffset, state.byteLength).getBigUint64(8, true);
+  if (timestamp === 0n) {
+    throw new Error("The chain's clock isn't set yet. Nothing was sent.");
+  }
+  return Number(timestamp);
 }
 
 const reverted = (what, tx) => Object.assign(
@@ -185,15 +211,24 @@ export async function confirmRegistered(rpc, program, id, signer, tx) {
   if (state.length === 0 || decodeNameRecord(state).ownerTag !== toHex(ownerTag(id, signer))) throw reverted("The registration", tx);
 }
 
-/** The same for a commitment: its account exists. */
-export async function confirmCommitted(rpc, program, promised, tx) {
+/** The same for a commitment: its 10-byte `Commitment` account exists and matches `public` if specified. */
+export async function confirmCommitted(rpc, program, promised, tx, { public: expectPublic = null } = {}) {
   const state = await readActorState(rpc, program, formatAccountId(commitmentAddress(accountBytes(program), promised)));
   if (state.length === 0) throw reverted("The commitment", tx);
+  let commitment;
+  try {
+    commitment = decodeCommitment(state);
+  } catch {
+    throw reverted("The commitment", tx);
+  }
+  if (expectPublic !== null && commitment.public !== expectPublic) throw reverted("The commitment", tx);
+  return commitment;
 }
 
-// ---- the full public-register flow (commit → wait → register) ----
-// onStep(stage, detail) reports progress. secretHex/commitMade let the caller
-// resume across the 15-min wait (persist them). Returns {name, id, txHash}.
+// ---- the full public-register flow (CommitPublic → 5-min wait → Register) ----
+// onStep(stage, detail) reports progress. secretHex/made/public let the caller
+// resume across the 5-min wait (or 15-min for legacy non-public commitments).
+// Returns { name, id, txHash, block }.
 /** What claiming costs at the current fee market: the 1M deposit + the gas the wallet
  * must hold to send. `resume` = the commit is already paid, so only the register's cost. */
 export async function estimateNeed(privateKey, resume = null) {
@@ -202,7 +237,7 @@ export async function estimateNeed(privateKey, resume = null) {
   const regReserve = feeReserve({ gasLimit: REGISTER_GAS, dataBytes: REGISTER_BYTES, quote });
   const commitReserve = feeReserve({ gasLimit: COMMIT_GAS, dataBytes: COMMIT_BYTES, quote });
   const need = DEPOSIT + regReserve + (resume ? 0n : commitReserve);
-  const have = await getAccountBalance(rpc, accountIdOfPrivateKey(privateKey));
+  const have = await getAccountBalance(rpc, publicAccountId(privateKey));
   return { need, have, deposit: DEPOSIT, enough: have >= need };
 }
 
@@ -237,28 +272,41 @@ export async function registerPublic({ privateKey, program = "38jEfVV1RCyMzu1FGb
       throw Object.assign(new Error("Claiming was cancelled."), { code: "cancelled" });
     }
   }
-  let secret, made;
-  if (resume) { secret = fromHex(resume.secretHex); made = resume.made; }
-  else {
+  let secret, made, isPublic;
+  if (resume) {
+    secret = fromHex(resume.secretHex);
+    made = resume.made;
+    // Saved commitments without `public: true` were made via private `Commit` and require 15 min.
+    isPublic = Boolean(resume.public);
+  } else {
     secret = crypto.getRandomValues(new Uint8Array(32));
-    made = await clock();
+    isPublic = true;
     onStep("commit", "committing to the name");
-    const { signed, promised } = await buildCommit({ privateKey, program, name, secret, now: made });
+    const { signed, promised, now: committedAt } = await buildCommit({ privateKey, program, name, secret, now, publicCommit: true });
+    made = committedAt;
     const h = await sendTransaction(rpc, signed);
     await waitForTransaction(rpc, signed.hash);
-    await confirmCommitted(rpc, program, promised, signed.hash);
-    onStep("committed", { secretHex: toHex(secret), made, tx: h });
+    await confirmCommitted(rpc, program, promised, signed.hash, { public: true });
+    onStep("committed", { secretHex: toHex(secret), made, public: true, tx: h });
   }
-  const ready = made + MIN_COMMIT_AGE_MS;
+  const minAge = isPublic ? PUBLIC_MIN_COMMIT_AGE_MS : MIN_COMMIT_AGE_MS;
+  const ready = made + minAge;
   for (let at = await clock(); at < ready; at = await clock()) {
+    if (at >= made + MAX_COMMIT_AGE_MS) {
+      throw Object.assign(new Error("The commitment expired (older than 24 hours). Start a new claim."), { code: "expired" });
+    }
     onStep("waiting", { remainingMs: ready - at });
     await new Promise((r) => setTimeout(r, Math.min(30000, Math.max(5000, ready - at))));
   }
   onStep("register", "claiming the name");
-  const { signed, id } = await buildRegister({ privateKey, program, name, secret, now: await clock(), deposit: true });
+  // buildRegister runs deriveName + lengthProof BEFORE reading chainNow() right before signing.
+  const { signed, id, now: registeredAt } = await buildRegister({ privateKey, program, name, secret, now, deposit: true });
+  if (registeredAt >= made + MAX_COMMIT_AGE_MS) {
+    throw Object.assign(new Error("The commitment expired (older than 24 hours). Start a new claim."), { code: "expired" });
+  }
   const h = await sendTransaction(rpc, signed);
   const block = await waitForTransaction(rpc, signed.hash);
-  await confirmRegistered(rpc, program, id, accountIdOfPrivateKey(privateKey), signed.hash);
+  await confirmRegistered(rpc, program, id, publicAccountId(privateKey), signed.hash);
   onStep("done", { tx: h, block });
   return { name, id: toHex(id), txHash: signed.hash, block };
 }
@@ -270,7 +318,7 @@ export async function registerPublic({ privateKey, program = "38jEfVV1RCyMzu1FGb
 /** Preflight/test only: build a SetRecord with arbitrary sealed bytes (skips the read). */
 export async function buildSetRecordRaw({ privateKey, program, name, sealed, gasLimit = SET_RECORD_GAS }) {
   const { id } = await deriveName(name);
-  const signer = accountIdOfPrivateKey(privateKey);
+  const signer = publicAccountId(privateKey);
   const [nonce] = await getAccountsNonces(defaultRpc(), [signer]);
   const message = setRecordMessage({ program: accountBytes(program), signer, nonce, gasLimit, id, sealed });
   return { signed: signPublicTransaction(message, [privateKey]), id };
@@ -281,7 +329,7 @@ export async function setText({ privateKey, program = "38jEfVV1RCyMzu1FGbYcCn5Fq
   const rpc = defaultRpc();
   const prog = accountBytes(program);
   const { id, key: nameKey } = await deriveName(name);
-  const signer = accountIdOfPrivateKey(privateKey);
+  const signer = publicAccountId(privateKey);
   const state = await readActorState(rpc, program, formatAccountId(recordAddress(prog, id)));
   if (!state.length) { const e = new Error(`${name} isn't registered yet — claim it first.`); e.code = "unregistered"; throw e; }
   const rec = decodeNameRecord(state);
