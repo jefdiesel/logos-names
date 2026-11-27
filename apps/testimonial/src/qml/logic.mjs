@@ -24,11 +24,13 @@ export const ADOPTION_PER_MONTH = 30
 export const DEFAULT_SUBMISSION = "lp-0021:names-wallet"
 /// `/LEE/v0.2/AccountId/PDA/` zero-padded to 32 bytes (lee_core `for_public_pda`).
 const PDA_PREFIX = "/LEE/v0.2/AccountId/PDA/"
-/// The clock program and its every-block account (clock_core, LEZ 0.4). Its state is
+/// The clock program and its every-block account (clock_core, LEZ v0.4.0): the program is
+/// the system_upgrader PDA of "clock" (`clock_account_id()`), the account is
+/// `/LEZ/ClockProgramAccount/0000000` (`CLOCK_PROGRAM_ACCOUNT_ID`). Its state is
 /// borsh `{block_id: u64, timestamp: u64}`: the last block's time in milliseconds.
 /// Both are checked against the Rust values in test/vectors.json.
-export const CLOCK_PROGRAM = "2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z"
-export const CLOCK_ACCOUNT = "4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNU"
+export const CLOCK_PROGRAM = "7timEoFDdtDAjQdKWNB5GFAHBAtZy6j1hfu6UKvjoki2"
+export const CLOCK_ACCOUNT = "4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT"
 
 // ── Bytes ──────────────────────────────────────────────────────────────────────────
 
