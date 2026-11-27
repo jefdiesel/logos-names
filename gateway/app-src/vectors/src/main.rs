@@ -6,32 +6,45 @@
 //! - `run <scenario.json>` takes transactions made in JavaScript (engine-run.mjs),
 //!   decodes them with the real borsh types and runs them through the real engine
 //!   and the real guest ELF. Prints a JSON report of what happened.
+//!
+//! LEZ v0.4.0: public accounts sign with a per-nonce key derived from a
+//! `PublicAccountSecret`, and each witness entry commits to the signer's next key.
 
 use std::collections::BTreeMap;
 
 use borsh::{BorshDeserialize, to_vec};
 use lee::{
-    Account, FeeDeclaration, PrivateKey, PublicAccountEvidence, PublicKey, PublicTransaction,
-    V03State, ValidatedStateDiff, is_fee_authorized, native_token,
+    Account, Authority, FeeDeclaration, GenesisBuilder, PublicAccountEvidence, PublicTransaction,
+    SignedTransaction as _, V03State, ValidatedStateDiff, is_fee_authorized, native_token,
     program::{DEFAULT_PUBLIC_CYCLE_BUDGET, Program},
     public_transaction::{Message as TxMessage, WitnessSet},
+    signature::{
+        INITIAL_KEY_TYPE, PublicAccountSecret, Schnorr, Signer, initial_key, key_state,
+        public_account_id, signing_key,
+    },
 };
 use lee_core::{
     account::{AccountId, Actor, Nonce},
-    program::PdaSeed,
+    program::{PdaSeed, SystemProgramName},
+    signing_key::{KeyType, SigningKeyState, signature_program_id},
 };
 use names_core::{
-    Instruction, LengthProof, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, Message, NameId, Settings,
-    claim_leaf, claim_proof, claim_root, commitment, commitment_address, commitment_seed,
+    Commitment, Instruction, LengthProof, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, Message, NameId, Settings,
+    VERSION, claim_leaf, claim_proof, claim_root, commitment, commitment_address, commitment_seed,
     deposit_address, name_seeds, owner_tag, page_address, record_address, settings_address,
     settings_seed, shortlist,
 };
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 
 const T0: u64 = 1_800_000_000_000;
 const DEPOSIT: u128 = 1_000_000;
 const NOW: u64 = 1_700_000_000_000;
 const NAMED_ID: &str = "e04a915482013a12c5ac4884c8a182493bedbbc39cb93fcaaf8216486cb617e7";
+/// `public_transaction/message.rs` PREFIX (private there; `Message::hash` is crate-private).
+const MESSAGE_PREFIX: &[u8; 32] = b"/LEE/v0.3/Message/Public/\x00\x00\x00\x00\x00\x00\x00";
+/// `lez/wallet/src/lib.rs` `max_fee_for(1_000)`: (1_000 + 100_000) × 64.
+const TRANSFER_MAX_FEE: u128 = 6_464_000;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -43,12 +56,24 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn key(byte: u8) -> PrivateKey {
-    PrivateKey::try_new([byte; 32]).expect("a valid key")
+fn account_secret(byte: u8) -> PublicAccountSecret {
+    PublicAccountSecret::new([byte; 32])
 }
 
 fn id_of(byte: u8) -> AccountId {
-    AccountId::from(&PublicKey::new_from_private_key(&key(byte)))
+    public_account_id(&account_secret(byte))
+}
+
+fn signer(byte: u8, nonce: u128) -> Signer {
+    Signer::new(&account_secret(byte), Nonce(nonce), INITIAL_KEY_TYPE, INITIAL_KEY_TYPE)
+}
+
+fn key_hex(state: &SigningKeyState) -> String {
+    hex(&to_vec(state).expect("33 bytes"))
+}
+
+fn message_hash(message: &TxMessage) -> [u8; 32] {
+    Sha256::new().chain_update(MESSAGE_PREFIX).chain_update(message.to_bytes()).finalize().into()
 }
 
 fn short_list() -> shortlist::ShortList {
@@ -75,50 +100,97 @@ fn proof_json(id: &NameId) -> Value {
 }
 
 fn message_json(message: &TxMessage) -> Value {
-    json!({ "bytes": hex(&message.to_bytes()), "hash": hex(&message.hash()) })
+    json!({ "bytes": hex(&message.to_bytes()), "hash": hex(&message_hash(message)) })
+}
+
+/// What the account of secret `[byte; 32]` signs with: its id, its nonce-0 key, and its key
+/// states and x-only public keys at nonces 0 to 4.
+fn keys_json(byte: u8) -> Value {
+    let secret = account_secret(byte);
+    let nonces = 0..5_u128;
+    json!({
+        "accountId": public_account_id(&secret).to_string(),
+        "initialKey": key_hex(&initial_key(&secret)),
+        "keyStates": nonces.clone().map(|n| key_hex(&key_state(&secret, KeyType::Schnorr, Nonce(n)))).collect::<Vec<_>>(),
+        "publicKeys": nonces.map(|n| hex(signing_key::<Schnorr>(&secret, Nonce(n)).1.value())).collect::<Vec<_>>(),
+    })
+}
+
+/// A transaction Rust signed: its bytes, and what each signer signed.
+fn signed_json(message: TxMessage, signers: &[Signer]) -> Value {
+    let next: Vec<SigningKeyState> = {
+        let mut sorted: Vec<&Signer> = signers.iter().collect();
+        sorted.sort_by_key(|signer| signer.account_id());
+        sorted.iter().map(|signer| signer.next()).collect()
+    };
+    let keyed = message.message_with_keys(&next);
+    let witness = WitnessSet::sign(&message, signers);
+    let tx = PublicTransaction::new(message, witness);
+    json!({
+        "tx": hex(&to_vec(&tx).expect("borsh")),
+        "hash": hex(&tx.hash()),
+        "messageWithKeys": hex(&keyed),
+        "next": next.iter().map(key_hex).collect::<Vec<_>>(),
+        "authDataLengths": tx.witness_set().entries().iter().map(|entry| entry.auth_data.len()).collect::<Vec<_>>(),
+    })
+}
+
+fn wallet_transfer(alice: AccountId, bob: AccountId, nonce: u128, transfer: &native_token::Message) -> TxMessage {
+    TxMessage::try_new_with_fees(
+        Actor::native_balance(alice),
+        [(Actor::native_balance(alice), Authority::Signer), (Actor::native_balance(bob), Authority::None)],
+        BTreeMap::from([(alice, Nonce(nonce))]),
+        transfer.clone(),
+        FeeDeclaration::new(alice, 1_000, 0, TRANSFER_MAX_FEE),
+    )
+    .expect("a message")
 }
 
 fn generate() -> Value {
-    // message.rs a_public_message_has_a_pinned_layout_and_hash
+    // message.rs a_public_message_has_a_pinned_layout_and_hash / message_with_keys_has_known_answers
     let to = Actor::new(AccountId::new([42; 32]), AccountId::new([0; 32]));
     let pinned = TxMessage::new_preserialized(
         to,
         vec![0],
-        [to],
+        [(to, Authority::Signer)],
         BTreeMap::from([(to.account_id, Nonce(1))]),
         None,
     );
+    let state = |commitment: u8| SigningKeyState { key_type: KeyType::Schnorr, key_commitment: [commitment; 32] };
 
-    // Everything that sorts, listed out of order, with a fee and both kinds of evidence.
+    // Everything that sorts, listed out of order, with a fee and both kinds of evidence. The
+    // actors carry the authority the JavaScript gives them after merging its duplicates.
     let (high, low) = (AccountId::new([0xF0; 32]), AccountId::new([0x10; 32]));
     let program = AccountId::new([0x77; 32]);
     let sorted = TxMessage::new(
         Actor::new(high, program),
         vec![1, 2, 3],
         [
-            Actor::new(high, program),
-            Actor::native_balance(high),
-            Actor::new(low, program),
-            Actor::native_balance(low),
-            Actor::new(low, program),
+            (Actor::new(high, program), Authority::Signer),
+            (Actor::native_balance(high), Authority::Signer),
+            (Actor::new(low, program), Authority::None),
+            (Actor::native_balance(low), Authority::None),
         ],
         BTreeMap::from([(high, Nonce(9)), (low, Nonce(u128::from(u64::MAX) + 1))]),
         Some(FeeDeclaration::new(high, 250_000, 3, 12_345_678_901_234)),
         vec![
             PublicAccountEvidence::Pda { program, seed: PdaSeed::new([0x5D; 32]) },
-            PublicAccountEvidence::Key(PublicKey::new_from_private_key(&key(1))),
+            PublicAccountEvidence::Key(initial_key(&account_secret(1))),
         ],
     );
 
-    // What the wallet's NativeTokenTransfer builds.
+    // What the wallet's NativeTokenTransfer builds: the sender's balance authorized, the
+    // recipient's not, the sender paying a fee capped at max_fee_for(gas_limit).
     let (alice, bob) = (id_of(1), id_of(2));
     let transfer = native_token::Message::Transfer { to: bob, amount: 1337 };
-    let wallet_transfer = TxMessage::try_new_with_fees(
+    let transfer_message = wallet_transfer(alice, bob, 3, &transfer);
+    // Two signers, so the witness entries sort and both sign every next key.
+    let both = TxMessage::try_new_with_fees(
         Actor::native_balance(alice),
-        [Actor::native_balance(alice), Actor::native_balance(bob)],
-        BTreeMap::from([(alice, Nonce(3))]),
+        [(Actor::native_balance(alice), Authority::Signer), (Actor::native_balance(bob), Authority::Signer)],
+        BTreeMap::from([(alice, Nonce(1)), (bob, Nonce(0))]),
         transfer.clone(),
-        FeeDeclaration::new(alice, 1_000, 0, 6_464_000),
+        FeeDeclaration::new(alice, 1_000, 0, TRANSFER_MAX_FEE),
     )
     .expect("a message");
 
@@ -130,11 +202,29 @@ fn generate() -> Value {
     let leaves: Vec<_> = (0..5_u8)
         .map(|at| claim_leaf(&AccountId::new([at; 32]), &[at + 100; 32]))
         .collect();
+    let commitment_state = |public| hex(&to_vec(&Commitment { version: VERSION, made: NOW, public }).expect("borsh"));
     json!({
         "pinned": message_json(&pinned),
+        "pinnedWithKeys": {
+            "seven": hex(&pinned.message_with_keys(&[state(7)])),
+            "oneTwoThree": hex(&pinned.message_with_keys(&[state(1), state(2), state(3)])),
+        },
         "sorted": message_json(&sorted),
-        "walletTransfer": message_json(&wallet_transfer),
+        "walletTransfer": message_json(&transfer_message),
+        "walletTransferFirst": message_json(&wallet_transfer(alice, bob, 0, &transfer)),
         "transferInstruction": hex(&to_vec(&transfer).expect("borsh")),
+        "keys": { "one": keys_json(1), "two": keys_json(2), "seven": keys_json(7) },
+        "signed": {
+            "transfer": signed_json(transfer_message.clone(), &[signer(1, 3)]),
+            "transferFirst": signed_json(wallet_transfer(alice, bob, 0, &transfer), &[signer(1, 0)]),
+            "twoSigners": signed_json(both, &[signer(2, 0), signer(1, 1)]),
+        },
+        "clock": {
+            // clock_core: CLOCK_PROGRAM_ACCOUNT_ID holds the state of clock_account_id().
+            "account": AccountId::new(*b"/LEZ/ClockProgramAccount/0000000").to_string(),
+            "program": AccountId::from_system_program_name(&SystemProgramName::new(b"clock")).to_string(),
+            "signatureProgram": signature_program_id().to_string(),
+        },
         "addresses": {
             "alice": alice.to_string(),
             "bob": bob.to_string(),
@@ -189,8 +279,10 @@ fn generate() -> Value {
             "release": instruction(Instruction::Release { id, refund: DEPOSIT }),
             "setPrimary": instruction(Instruction::SetPrimary { name: "jef".into() }),
             "commit": instruction(Instruction::Commit { commitment: [0xC0; 32], now: NOW }),
+            "commitPublic": instruction(Instruction::CommitPublic { commitment: [0xC0; 32], now: NOW }),
             "claim": instruction(Instruction::Claim { id, sealed: vec![0xEE], now: NOW, proof: vec![[1; 32], [2; 32]] }),
         },
+        "commitmentState": { "made": NOW, "public": commitment_state(true), "private": commitment_state(false) },
         "claims": {
             "leaves": leaves.iter().map(|leaf| hex(leaf)).collect::<Vec<_>>(),
             "root": hex(&claim_root(&leaves)),
@@ -221,12 +313,12 @@ fn run_scenario(path: &str) -> Value {
         claim_leaf(&AccountId::new([0x11; 32]), &[0x22; 32]),
     ];
     let elf = names_methods::LOGOS_NAMES_ELF;
-    let mut state = V03State::new()
-        .with_public_account_balances([
-            (alice, 10 * DEPOSIT),
-            (id_of(3), 10 * DEPOSIT),
-        ])
-        .with_named_programs([(program, Program::new(elf.into()).expect("the guest loads"))]);
+    let mut state = GenesisBuilder::new()
+        .with_public_accounts(
+            [(alice, 10 * DEPOSIT), (id_of(3), 10 * DEPOSIT)].map(|(id, balance)| (id, Account::funded(balance))),
+        )
+        .with_programs_at([(program, Program::new(elf.into()).expect("the guest loads"), false)])
+        .build();
 
     // The deployer's Configure is the Rust side's; everything after it is JavaScript's.
     let settings = Actor::new(settings_address(&program), program);
@@ -240,16 +332,16 @@ fn run_scenario(path: &str) -> Value {
         claims_until: T0 + 10 * MIN_COMMIT_AGE_MS,
         claims_program: old_program,
     });
-    let signer = Actor::new(program, program);
+    let deployer = Actor::new(program, program);
     let tx = TxMessage::new(
-        signer,
+        deployer,
         to_vec(&configure).expect("borsh"),
-        [settings, signer],
+        [(settings, Authority::None), (deployer, Authority::Signer)],
         BTreeMap::from([(program, Nonce(0))]),
         None,
         vec![PublicAccountEvidence::Pda { program, seed: settings_seed() }],
     );
-    let witness = WitnessSet::for_message(&tx, &[&key(9)]);
+    let witness = WitnessSet::sign(&tx, &[signer(9, 0)]);
     state
         .transition_from_public_transaction(&PublicTransaction::new(tx, witness), 1, T0)
         .expect("configure");
@@ -265,30 +357,41 @@ fn run_scenario(path: &str) -> Value {
         let tx = PublicTransaction::try_from_slice(&wire[1..]).unwrap_or_else(|error| panic!("{label}: {error}"));
         assert_eq!(to_vec(&tx).expect("borsh"), wire[1..], "{label}: not canonical");
         assert_eq!(hex(&tx.hash()), step["hash"].as_str().expect("hash"), "{label}: transaction hash");
-        assert_eq!(hex(&tx.message().hash()), step["messageHash"].as_str().expect("hash"), "{label}: message hash");
-        assert!(tx.witness_set().is_valid_for(tx.message()), "{label}: signature");
-        assert!(is_fee_authorized(tx.message(), tx.witness_set()), "{label}: fee authorization");
+        assert_eq!(hex(&message_hash(tx.message())), step["messageHash"].as_str().expect("hash"), "{label}: message hash");
+        // Nonces name exactly the signers, authority only where they sign, auth data well formed.
+        tx.check_stateless().unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert!(is_fee_authorized(tx.message()), "{label}: fee authorization");
 
+        // The sequencer runs a public transaction's action at its declared gas limit
+        // (lez/chain_state/src/apply.rs), so a limit set too low shows up here as OutOfGas.
+        let budget = tx.message().fee.map_or(DEFAULT_PUBLIC_CYCLE_BUDGET, |fee| fee.gas_limit);
         let now = step["now"].as_u64().expect("now");
-        let metered = ValidatedStateDiff::from_public_transaction_with_cycle_budget(
-            &tx,
-            &state,
-            block,
-            now,
-            DEFAULT_PUBLIC_CYCLE_BUDGET,
-        );
+        // Authenticates each signer against the key its account holds now (the next key the
+        // last transaction committed to) before running anything.
+        let metered = ValidatedStateDiff::from_public_transaction_with_cycle_budget(&tx, &state, block, now, budget);
         let (outcome, cycles) = match metered {
-            Ok((_, charge)) => ("ok".to_owned(), Some(charge.cycles)),
+            Ok((diff, charge)) => {
+                state.apply_state_diff(diff).unwrap_or_else(|error| panic!("{label}: applying: {error:?}"));
+                ("ok".to_owned(), Some(charge.cycles))
+            }
             Err(error) => (format!("{error:?}"), None),
         };
         let expected = step["expect"].as_str().expect("expect");
         let agreed = if expected == "ok" { outcome == "ok" } else { outcome.contains(expected) };
         assert!(agreed, "{label}: expected {expected}, got {outcome}");
-        if outcome == "ok" {
-            state.transition_from_public_transaction(&tx, block, now).expect("the same transition");
-        }
-        println!("{:>9} cycles  {:>5} wire bytes  {label}", cycles.map_or("-".to_owned(), |c| c.to_string()), wire.len());
-        steps.push(json!({ "label": label, "cycles": cycles, "wireBytes": wire.len(), "outcome": outcome }));
+        println!(
+            "{:>9} cycles  {:>9} limit  {:>5} wire bytes  {label}",
+            cycles.map_or("-".to_owned(), |c| c.to_string()),
+            budget,
+            wire.len()
+        );
+        steps.push(json!({
+            "label": label,
+            "cycles": cycles,
+            "gasLimit": tx.message().fee.map(|fee| fee.gas_limit),
+            "wireBytes": wire.len(),
+            "outcome": outcome,
+        }));
     }
 
     // What the RPC would answer, and what the resolver reads.
@@ -314,6 +417,24 @@ fn run_scenario(path: &str) -> Value {
             (text.to_owned(), state.get_account_by_id(id).data.native_balance().expect("a balance").to_string())
         })
         .collect();
+    // Each signer's current key, as the signature program holds it: the `next` its last
+    // transaction committed to.
+    let signing_keys: BTreeMap<String, Value> = scenario["signers"]
+        .as_array()
+        .expect("signers")
+        .iter()
+        .map(|account| {
+            let text = account.as_str().expect("account");
+            let found = state.get_account_by_id(text.parse().expect("an account"));
+            let key = found.data.actor_state(signature_program_id());
+            (text.to_owned(), json!({ "nonce": found.nonce.0.to_string(), "key": hex(key) }))
+        })
+        .collect();
+    assert_eq!(
+        serde_json::to_value(&signing_keys).expect("JSON"),
+        scenario["expectedKeys"],
+        "the engine's current keys are the next keys the JavaScript committed to"
+    );
     let settings_state = state.get_account_by_id(settings_address(&program));
     let stored: Settings = borsh::from_slice(settings_state.data.actor_state(program)).expect("settings");
     json!({
@@ -322,6 +443,8 @@ fn run_scenario(path: &str) -> Value {
         "steps": steps,
         "views": views,
         "balances": balances,
+        "signingKeys": signing_keys,
+        "expectedKeys": scenario["expectedKeys"],
         "claimsUntil": stored.claims_until,
     })
 }
