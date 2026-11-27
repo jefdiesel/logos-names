@@ -63,22 +63,33 @@ What this does not hide:
 
 ## 2. Names
 
-- A name is 1 to 32 bytes of `a-z`, `0-9` and `-`, and does not start or end
-  with `-`.
-- **A name is written bare: `jef`.** No suffix and no `@`, in apps, wallets,
-  chat and posts alike, the way a handle is written. LNS (the Logos Name Service)
-  is the service, not part of the name.
+- A **label** (a top-level name, or either side of a subname) is 1 to 32 bytes of
+  `a-z`, `0-9` and `-`, does not start or end with `-`, and **does not contain
+  `--`** (two consecutive hyphens are refused anywhere in a new label so the
+  HTTPS gateway's `label--parent` encoding is unambiguous).
+- **Subnames (v7).** One level only: `label.parent`, where `label` and `parent`
+  are each a valid label and the total length of `label.parent` is at most **62
+  bytes** (so the gateway's single-label form `label--parent` is at most 63
+  bytes, the RFC 1035 DNS label limit). Multi-level subnames such as
+  `a.b.alice` are invalid.
+- **A name is written bare: `jef` or `blog.alice`.** No suffix and no `@`, in
+  apps, wallets, chat and posts alike, the way a handle is written. LNS (the
+  Logos Name Service) is the service, not part of the name.
 - **Name or address.** Wherever a field takes either (a wallet's "send to"), a
   client first tries the input as a LEZ account ID (base58, 32 bytes) and
   otherwise treats it as a name. A name that also decodes as an account ID is
   refused, so `jef` or `sammy123` can never be an address and the two never clash.
-- **Links:** `lns:jef` names a name unambiguously where it leaves Logos (a URI, a
-  QR code).
+- **Links:** `lns:jef` or `lns://blog.alice` names a name unambiguously where it
+  leaves Logos (a URI, a QR code).
 - **Normalisation.** Before using input as a name, a client trims surrounding
-  whitespace, lowers ASCII case, removes one leading `lns:`, then one leading `@`,
-  then one trailing `.lez` (the old suffix, still accepted when typed or pasted).
-  It then rejects the result unless it is a valid name and not an account ID.
-  `Jef`, `@jef`, `lns:jef` and `Jef.LEZ` all become `jef`; `jef.eth` is rejected.
+  whitespace, lowers ASCII case, removes one leading `lns://` or `lns:`, then
+  one leading `@`, then one trailing `.lez` (the old suffix, still accepted when
+  typed or pasted). It then rejects the result unless it is a valid top-level
+  name or one-level subname and not an account ID. `Jef`, `@jef`, `lns:jef`,
+  `lns://jef` and `Jef.LEZ` all become `jef`; `lns://Blog.Alice` becomes
+  `blog.alice`; `a--b` and `a.b.alice` are rejected. (Note: because trailing
+  `.lez` is stripped for legacy input, the locked three-character name `lez`
+  MUST NOT issue subnames while `.lez` stripping remains active.)
 
 Because the chain cannot check a name it never sees, these rules are enforced
 by clients. Two clients that normalise differently would disagree about which
@@ -94,11 +105,46 @@ id     = SHA-256("logos-names/v5/id"  ‖ master)
 key    = SHA-256("logos-names/v5/key" ‖ master)
 ```
 
-`name` is the normalised name, as UTF-8 bytes (names are ASCII). Argon2id is
-the variant of RFC 9106; no secret and no associated data are used. `id` is
-public: it is what the chain knows the name by. `key` is never sent anywhere:
-it opens and seals what the name resolves to. Neither can be turned back into
-the name except by guessing.
+`name` is the normalised name, as UTF-8 bytes (names are ASCII), whether a
+top-level name (`alice`) or a subname (`blog.alice`). Argon2id is the variant of
+RFC 9106; no secret and no associated data are used. `id` is public: it is what
+the chain knows the name by. `key` is never sent anywhere: it opens and seals
+what the name resolves to. Neither can be turned back into the name except by
+guessing.
+
+- **Top-level slot identifier (v7).** Every top-level name has a length-based
+  pricing tier `price_tier`: `0` for 1–5 characters (1–4 stay locked via
+  `SHORTLIST_ROOT`; 5 is the shortest public tier), `1` for 6–7 characters, and
+  `2` for 8–32 characters. Its on-chain slot identifier is:
+
+  ```
+  slot_id = SHA-256("logos-names/v7/tier/" ‖ price_tier (1 byte) ‖ id (32 bytes))
+  ```
+
+  `Register` and `Claim` take the base `id` (for `SHORTLIST_ROOT` and legacy
+  snapshot verification) plus `price_tier`, and derive `slot_id` on chain.
+  Every other top-level instruction (`Renew`, `SetRecord`, `SetPage`,
+  `Transfer`, `Release`) and the record/page/deposit PDAs use `slot_id`. Because
+  the program computes `slot_id` from the same `price_tier` it charges for, a
+  cheaper tier can never occupy or spoof a shorter name's record slot — without
+  revealing the name on chain and without enumerating 5–7 character names into
+  the shortlist.
+
+- **Subname identifiers and privacy (v7).** A subname `blog.alice` passes the
+  full normalised string `"blog.alice"` into the exact same Argon2id scheme to
+  produce `sub_id` and `sub_key`. Passing `"label.parent"` directly into
+  Argon2id means:
+  - subname identifiers are disjoint from top-level identifiers (dots never
+    appear in top-level names);
+  - knowing `alice` (and `alice`'s `master` / `id` / `key`) does **not** make
+    enumerating `alice`'s subnames cheap: every candidate label costs a full
+    64 MiB Argon2id derivation (~70–140 ms on an Apple M4, ~1,700/s on an RTX
+    4090), and a dictionary built for top-level names or for another parent
+    cannot be reused for `alice`;
+  - resolving `blog.alice` needs both `parent_slot_id` (from `alice`) and
+    `(sub_id, sub_key)` (from `blog.alice`): two Argon2id derivations (~140–280 ms
+    native, ~1 s pure JS, 64 MiB peak RAM sequentially), or one when the parent
+    is already cached.
 
 The salt is one fixed string, shared by every registry and every network. That
 is deliberate: a name keeps the same identifier and key on testnet and on
@@ -116,18 +162,25 @@ SHOULD NOT derive on behalf of anonymous callers.
 ## 4. Where a name lives
 
 A registry is one LEZ program, identified by its account ID (the `program`
-below). All of a registry's data is in **that program's actor state** on three
-kinds of account, and one settings account. On LEZ 0.4 an account holds one
+below). All of a registry's data is in **that program's actor state** on the
+accounts below, and one settings account. On LEZ 0.4 an account holds one
 state per program, and the pair of account and program is an *actor*.
 
 | Data | Account ID |
 |---|---|
-| Name record | `PDA(program, SHA-256("logos-names/v5/name/" ‖ id))` |
-| Page | `PDA(program, SHA-256("logos-names/v5/page/" ‖ id))` |
+| Top-level name record | `PDA(program, SHA-256("logos-names/v5/name/" ‖ slot_id))` |
+| Top-level page | `PDA(program, SHA-256("logos-names/v5/page/" ‖ slot_id))` |
+| Subname record (v7) | `PDA(program, SHA-256("logos-names/v7/subname/" ‖ parent_slot_id ‖ sub_id))` |
+| Subname page (v7) | `PDA(program, SHA-256("logos-names/v7/subpage/" ‖ parent_slot_id ‖ sub_id))` |
 | Reverse record | the account itself |
 | Settings | `PDA(program, SHA-256("logos-names/v5/config"))` |
 | Commitment | `PDA(program, SHA-256("logos-names/v5/commit/" ‖ c))`, section 8 |
-| Deposit (the native balance is the data) | `PDA(program, SHA-256("logos-names/v5/deposit/" ‖ id))`, section 8.2 |
+| Deposit (the native balance is the data) | `PDA(program, SHA-256("logos-names/v5/deposit/" ‖ slot_id))`, section 8.2 |
+
+Keying a subname's record and page PDAs by both `parent_slot_id` and `sub_id`
+isolates every parent's subname namespace on chain: holding `alice` can never
+create, occupy, or overwrite a subname under `bob`, even though the chain never
+sees the name strings.
 
 `PDA(program, seed)` is LEZ's public program-derived address:
 
@@ -159,32 +212,59 @@ same call with `shards` in place of `actor_states`.
 
 All data is [borsh](https://borsh.io)-encoded. `String` is a `u32` length and
 UTF-8 bytes; `Vec<u8>` is a `u32` length and bytes; `Option<T>` is one tag byte
-(`0` none, `1` some) then `T`; integers are little-endian; `AccountId` is 32
-raw bytes.
+(`0` none, `1` some) then `T`; fixed arrays `[T; N]` are `N` consecutive items
+with no length prefix; integers are little-endian; `AccountId` is 32 raw bytes.
 
-On the chain:
+On the chain (version 7):
 
 ```rust
-struct NameRecord { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8>, claimed: bool }   // version 6; owner is the owner tag; sealed at most 12,288 bytes
-struct Commitment { version: u8, made: u64, public: bool }             // version 6; `public` binds the commitment to the fast public path
-struct Page       { version: u8, sealed: Vec<u8> }                     // sealed at most 81,920 bytes
-struct PrimaryName { version: u8, name: String }                       // the reverse record, in the clear
-struct Settings   { version: u8, admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2],
-                    claims_root: [u8; 32], claims_until: u64, claims_program: AccountId }   // mode 0 fee, 1 deposit; deposits: normal, three-character
+struct SubnameSale   { price: u128, payout: AccountId }
+struct NameRecord    { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8>, claimed: bool,
+                       price_tier: u8, generation: [u8; 32], subname_sale: Option<SubnameSale> }
+enum   SubnameKind   { Permanent, Revocable { parent_generation: [u8; 32] } }
+struct SubnameRecord { version: u8, owner: [u8; 32], kind: SubnameKind, sealed: Vec<u8> }
+struct Commitment    { version: u8, made: u64, public: bool }
+struct Page          { version: u8, sealed: Vec<u8> }
+struct PrimaryName   { version: u8, name: String }
+struct Settings      { version: u8, admin: AccountId, treasury: AccountId,
+                       prices: [[u128; 4]; 3], mode: u8, deposits: [u128; 2],
+                       claims_root: [u8; 32], claims_until: u64, claims_program: AccountId }
 ```
 
-Records and settings before version 6 end at `sealed` and `deposits`, and a reader
-treats them as never claimed and taking no claims. `claimed` marks a name carried over
-from an earlier chain (section 8.4), and stays true through a transfer.
+- `NameRecord.sealed` and `SubnameRecord.sealed` are at most 12,288 bytes;
+  `Page.sealed` is at most 81,920 bytes.
+- `NameRecord.owner` is `owner_tag(slot_id, holder)`. `SubnameRecord.owner` is
+  `owner_tag(sub_id, holder)`.
+- `NameRecord.generation` is a 32-byte token unique to that hold:
+  - `Register`: `SHA-256("logos-names/v7/gen/register" ‖ slot_id ‖ owner ‖ now_le ‖ secret)`
+  - `Claim`: `SHA-256("logos-names/v7/gen/claim" ‖ slot_id ‖ owner ‖ now_le)`
+  - `Transfer`: `SHA-256("logos-names/v7/gen/transfer" ‖ prev_generation ‖ new_owner)`
+  Revocable subnames store the parent's `generation` at creation time so they
+  automatically detach when the parent is transferred, released, or re-registered
+  (section 8.6).
+- `NameRecord.claimed` marks a name carried over from an earlier chain (section
+  8.4), and stays true through a transfer.
+- `expires` is a time in milliseconds since the Unix epoch, as LEZ block
+  timestamps are; `u64::MAX` means permanent (never expires).
+- `Settings.prices` is a 3 × 4 row-major table `[price_tier][term]` in the
+  native token's base units (12 consecutive `u128` values, 192 bytes):
 
-`expires` is a time in milliseconds since the Unix epoch, as LEZ block
-timestamps are. `prices` are in the native token's base units, one per term:
+| Length tier (`price_tier`) | Names | 30 days (`0`) | 1 year (`1`) | 5 years (`2`) | Permanent (`3`) |
+|---|---|---:|---:|---:|---:|
+| `0` (`PRICE_TIER_5`) | 5 chars (and admin-placed 1–4) | 2,000,000 | 20,000,000 | 80,000,000 | 400,000,000 |
+| `1` (`PRICE_TIER_6_7`) | 6–7 chars | 500,000 | 5,000,000 | 20,000,000 | 100,000,000 |
+| `2` (`PRICE_TIER_8_PLUS`) | 8–32 chars | 100,000 | 1,000,000 | 4,000,000 | 20,000,000 |
+
+The numbers above are the starting placeholders (`DEFAULT_PRICES`); the admin
+can change any cell at any time via `Configure` or `SetPrice`, affecting new
+purchases and renewals only. Term lengths:
 
 | Term | Index | Length |
 |---|---|---|
 | 30 days | 0 | 2,592,000,000 ms |
 | 1 year | 1 | 31,536,000,000 ms |
 | 5 years | 2 | 157,680,000,000 ms |
+| Permanent | 3 | `expires = u64::MAX` (never lapses) |
 
 A registry whose settings account is empty charges nothing.
 
@@ -234,12 +314,30 @@ transactions contain is identifiers and sealed bytes.
 
 ## 6. Resolving
 
-**Forward (name to profile).** Normalise the name, derive `id` and `key`, derive
-the record account, read the registry's actor state on it, decode `NameRecord`, open
-`sealed`. One derivation and one account read. A client that uses the name then
-follows its `forward` entry, if it has one (section 7, Forwarding).
+**Forward (top-level name to profile).** Normalise the name, derive `id` and
+`key`, compute `slot_id = tiered_id(id, price_tier_for_len(name.len()))`, derive
+the record account from `slot_id`, read the registry's actor state on it, decode
+`NameRecord`, open `sealed`. One derivation and one account read. A client that
+uses the name then follows its `forward` entry, if it has one (section 7,
+Forwarding).
 
-**Expiry.** A name is held for a term and then lapses. With `now` the reader's
+**Forward (subname `label.parent` to profile, v7).** Normalise the name, split
+into `(label, parent)`, derive `parent_slot_id` (from `parent`) and
+`(sub_id, sub_key)` (from `label.parent`), read `SubnameRecord` at
+`subname_record_address(program, parent_slot_id, sub_id)`:
+
+- If absent or empty, the subname is unregistered.
+- If `kind` is `Permanent`: it never expires and is independent of `parent`.
+  Open `sealed` with `sub_key` and confirm `profile.name == "label.parent"`.
+- If `kind` is `Revocable { parent_generation }`: the client MUST also read
+  `parent`'s `NameRecord` at `record_address(program, parent_slot_id)`. Unless
+  `parent` exists, `now < parent.expires + grace`, and
+  `parent.generation == parent_generation`, the client MUST treat the subname as
+  unregistered (ignoring its `sealed` profile and page). Otherwise open `sealed`
+  with `sub_key` (and inherit the parent's `expires` / `lapsed` status).
+
+**Expiry.** A top-level name is held for a term and then lapses (unless
+permanent or deposit-held, where `expires == u64::MAX`). With `now` the reader's
 own clock in milliseconds and a grace period of 30 days (2,592,000,000 ms):
 
 - `now < expires`: the name is active.
@@ -357,17 +455,26 @@ So the bytes of a transaction's message are the tag `00`, then the `Instruction`
 
 | # | Instruction | Fields | Actors to declare, beyond the signer's (section 8.3) |
 |---|---|---|---|
-| 0 | `Register` | `id, sealed: Vec<u8>, term: u8, fee: u128, treasury: Option<AccountId>, now: u64, secret: [u8; 32], deposit: bool, length: LengthProof` | record, page, settings, commitment, and if `fee` is not 0 the signer's balance and the balance of the treasury (fee mode) or the name's deposit account (deposit mode) |
-| 1 | `Renew` | `id, term: u8, fee: u128, treasury: Option<AccountId>, now: u64` | record, settings, and if `fee` is not 0 the signer's balance and the treasury's |
-| 2 | `SetRecord` | `id, sealed: Vec<u8>` | record |
-| 3 | `SetPage` | `id, sealed: Vec<u8>` | record, page |
-| 4 | `Transfer` | `id, new_owner: [u8; 32]` (the new holder's owner tag) | record, page |
-| 5 | `Release` | `id, refund: u128` | record, page, and if `refund` is not 0 the deposit account's balance and the signer's |
-| 6 | `SetPrimary` | `name: String` | none: it writes the signer's own actor |
-| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [u128; 3], mode: u8, deposits: [u128; 2], claims_root: [u8; 32], claims_until: u64, claims_program: AccountId` | settings; the signer is the program's own account the first time, then the admin |
+| 0 | `Register` | `id` (base id), `sealed: Vec<u8>, term: u8, fee: u128, treasury: Option<AccountId>, now: u64, secret: [u8; 32], deposit: bool, length: LengthProof, price_tier: u8` | record (`slot_id`), page (`slot_id`), settings, commitment (`slot_id`), and if `fee` is not 0 the signer's balance and the balance of the treasury (fee mode) or the name's deposit account (deposit mode) |
+| 1 | `Renew` | `id` (`slot_id`), `term: u8, fee: u128, treasury: Option<AccountId>, now: u64` | record, settings, and if `fee` is not 0 the signer's balance and the treasury's |
+| 2 | `SetRecord` | `id` (`slot_id`), `sealed: Vec<u8>` | record |
+| 3 | `SetPage` | `id` (`slot_id`), `sealed: Vec<u8>` | record, page |
+| 4 | `Transfer` | `id` (`slot_id`), `new_owner: [u8; 32]` (the new holder's owner tag) | record, page |
+| 5 | `Release` | `id` (`slot_id`), `refund: u128` | record, page, and if `refund` is not 0 the deposit account's balance and the signer's |
+| 6 | `SetPrimary` | `name: String` (top-level or `label.parent`) | none: it writes the signer's own actor |
+| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [[u128; 4]; 3], mode: u8, deposits: [u128; 2], claims_root: [u8; 32], claims_until: u64, claims_program: AccountId` | settings; the signer is the program's own account the first time, then the admin |
 | 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment (private path: 10-minute window, 15-minute minimum age) |
-| 9 | `Claim` | `id, sealed: Vec<u8>, now: u64, proof: Vec<[u8; 32]>` | record, page, settings |
+| 9 | `Claim` | `id` (base id), `sealed: Vec<u8>, now: u64, proof: Vec<[u8; 32]>, price_tier: u8` | record (`slot_id`), page (`slot_id`), settings |
 | 10 | `CommitPublic` | `commitment: [u8; 32], now: u64` | commitment (public path: 1-minute window, 5-minute minimum age) |
+| 11 | `SetPrice` | `price_tier: u8, term: u8, price: u128` | settings; signer must be the admin |
+| 12 | `SetSubnameSale` | `id` (parent `slot_id`), `sale: Option<SubnameSale>` | parent record |
+| 13 | `CreateSubname` | `parent_id` (`slot_id`), `sub_id`, `owner: [u8; 32]`, `revocable: bool`, `sealed: Vec<u8>`, `now: u64` | parent record, subname record, subname page |
+| 14 | `RevokeSubname` | `parent_id`, `sub_id`, `now: u64` | parent record, subname record, subname page |
+| 15 | `BuySubname` | `parent_id`, `sub_id`, `sealed: Vec<u8>`, `price: u128`, `payout: Option<AccountId>`, `now: u64`, `secret: [u8; 32]` | parent record, subname record, subname page, commitment, and if `price` is not 0 the signer's balance and `payout`'s balance |
+| 16 | `SetSubnameRecord` | `parent_id`, `sub_id`, `sealed: Vec<u8>`, `now: Option<u64>` | subname record, plus parent record when `now` is `Some` (required for revocable) |
+| 17 | `SetSubnamePage` | `parent_id`, `sub_id`, `sealed: Vec<u8>`, `now: Option<u64>` | subname record, subname page, plus parent record when `now` is `Some` |
+| 18 | `TransferSubname` | `parent_id`, `sub_id`, `new_owner: [u8; 32]`, `now: Option<u64>` | subname record, subname page, plus parent record when `now` is `Some` |
+| 19 | `ReleaseSubname` | `parent_id`, `sub_id`, `now: Option<u64>` | subname record, subname page, plus parent record when `now` is `Some` |
 
 Rules:
 
@@ -392,12 +499,17 @@ Rules:
   bytes, of the clock program's actor state on the account whose ID is the ASCII
   bytes `/LEZ/ClockProgramAccount/0000001`. It does not use its own clock: a
   transaction whose `now` is ahead of the chain fails and is still charged.
-- **Fees.** `fee` must equal the settings' price for `term`, and `treasury` must
-  be the settings' treasury; the program then moves `fee` from the signer to
-  `treasury` with a native token transfer in the same transaction. When the
-  settings account is empty, the price for the term is 0, or the signer is the
-  treasury itself, `fee` is 0 and no treasury is named. A client reads the
-  settings account first.
+- **Fees.** In fee mode (`mode = 0`), `fee` must equal
+  `settings.prices[price_tier][term]`, and `treasury` must be the settings'
+  treasury; the program then moves `fee` from the signer to `treasury` with a
+  native token transfer in the same transaction. `term = 3` (`TERM_PERMANENT`)
+  sets `expires = u64::MAX` (on either `Register` or `Renew`). On `Renew`, the
+  name's `price_tier` is read directly from its stored `NameRecord` so a short
+  name cannot renew at a cheaper tier. When the settings account is empty, the
+  cell price is 0, or the signer is the treasury itself, `fee` is 0 and no
+  treasury is named. `SetPrice` lets the admin update any single cell of
+  `settings.prices` (affecting new purchases and renewals only). A client reads
+  the settings account first.
 - **Claiming is commit, then reveal** (since registry version 4), so nobody watching
   pending transactions can register an identifier first. `Commit` (private path) or
   `CommitPublic` (public path) stores, at
@@ -607,7 +719,72 @@ free of deposit until `claims_until`:
 
 ### 8.5 Proving a holder to another program
 
-A program can't read the registry's state. `Message::RequireHolder { tag }`, sent to a name's record actor, changes nothing and refuses unless `tag` holds that record. The board uses it to check that a poster holds the name.
+A program can't read the registry's state. `Message::RequireHolder { tag }`, sent to a top-level name's record actor, changes nothing and refuses unless `tag` holds that record. The board uses it to check that a poster holds the name.
+
+### 8.6 Subnames (v7)
+
+A top-level name holder (`parent`) may create or sell one-level subnames
+`label.parent`. Subnames cannot have sub-subnames: `CreateSubname` and
+`BuySubname` always look up the parent at `record_address(program, parent_id)`
+(`v5/name/`), while subnames live at `subname_record_address` (`v7/subname/`).
+
+- **Parent creation (`CreateSubname`).** Only the parent's holder (public or
+  private — checked via `owner_tag(parent_slot_id, signer)`) may call this,
+  while the parent is active (`now < parent.expires`, bounded to
+  `[now, now + TIME_WINDOW_MS)`). No deposit, no protocol fee (transaction gas
+  only), and no commit-reveal. The parent chooses `revocable: bool` per subname,
+  stored visibly on `SubnameRecord.kind`. Creating a subname refuses to
+  overwrite an existing `Permanent` subname or an active `Revocable` subname
+  matching the parent's current `generation`, but overwrites a stale `Revocable`
+  subname from an earlier parent generation (and empties its page).
+- **Revoking (`RevokeSubname`).** Only the parent's holder (while not past
+  grace) may revoke a `Revocable` subname, emptying its record and page.
+  `Permanent` subnames can never be revoked.
+- **Follow rules (without on-chain enumeration).** Every top-level `NameRecord`
+  carries a unique 32-byte `generation` token that changes on every `Register`,
+  `Claim`, and `Transfer`:
+  - **Parent transfer:** `Transfer` advances `parent.generation` and clears
+    `parent.subname_sale`. All `Permanent` subnames stay unaffected with their
+    holders. All `Revocable` subnames immediately detach from their previous
+    holders (their stored `parent_generation` no longer matches), stop resolving,
+    cannot be updated by their previous holders, and can be revoked or directly
+    reclaimed/reissued by the new parent holder in one transaction.
+  - **Parent release:** `Release` empties the parent's record. `Permanent`
+    subnames continue to resolve and can still be updated, transferred, and
+    released (`now: None`). `Revocable` subnames immediately become invalid;
+    even if someone later re-registers the parent, its fresh `generation` cannot
+    match the old one, so old revocable subnames stay released forever.
+  - **Parent lapse / renewal:** `Renew` keeps `parent.generation` unchanged, so
+    revocable subnames survive parent renewals and remain usable during the
+    parent's 30-day grace period, then lapse with the parent once grace ends.
+- **Using a subname (`SetSubnameRecord`, `SetSubnamePage`, `TransferSubname`,
+  `ReleaseSubname`).** Each takes `now: Option<u64>`:
+  - `Permanent` subnames pass `now: None` and never touch the parent's record.
+  - `Revocable` subnames MUST pass `now: Some(now)` (bounded to
+    `[now, now + TIME_WINDOW_MS)`); the program verifies the parent exists, has
+    not passed grace, and still holds the subname's `parent_generation`.
+  - `TransferSubname` empties `sealed` and the subname's page and preserves
+    `SubnameKind`. `ReleaseSubname` empties the subname's record and page,
+    freeing `label.parent` for the parent to issue or sell again.
+- **Public subname sales (`SetSubnameSale`, `BuySubname`).** The parent's holder
+  sets `sale: Some(SubnameSale { price, payout })` (or `None` to switch sales
+  off). Anyone may claim any free `label.parent` by committing via `Commit` or
+  `CommitPublic` over
+  `subname_commitment(parent_slot_id, sub_id, owner_tag(sub_id, buyer), secret)`
+  (`SHA-256("logos-names/v7/sub-commitment" ‖ parent_slot_id ‖ sub_id ‖ holder ‖ secret)`)
+  and revealing with `BuySubname`. Commit-reveal prevents blind mempool sniping
+  of irreversible permanent subnames (and protects slow-proving private buyers).
+  When `price > 0`, `BuySubname` transfers `price` in native tokens from the
+  buyer to `payout` in the same transaction; `price = 0` allows free permanent
+  claims. Sold subnames are always `Permanent`.
+  - **Private parent holder selling subnames:** LEZ 0.4's `native_token::Message::Transfer`
+    credits a public `AccountId` (shielded private credits require ML-KEM
+    ciphertexts a guest cannot verify or generate). A private parent holder
+    enables sales via a privacy-preserving `SetSubnameSale` (never revealing
+    their private holding account) pointing `payout` at a dedicated public
+    receiving account already admitted on chain, and can shield those proceeds
+    whenever desired.
+
 ## 9. Events
 
 The registry emits LEZ program events. The selector is the first 8 bytes of
@@ -615,11 +792,16 @@ The registry emits LEZ program events. The selector is the first 8 bytes of
 
 | Event | Selector (hex) | Data |
 |---|---|---|
-| `logos_names::Registered` | `e87848390f741b1a` | `id, expires: u64` |
-| `logos_names::Claimed` | `b04995efabf61acb` | `id` |
-| `logos_names::Renewed` | `c0a35e0e73dbcc59` | `id, expires: u64` (`now` plus the term: the earliest the new expiry can be) |
-| `logos_names::Transferred` | `b78a6f5ae756bf67` | `id` |
-| `logos_names::Released` | `3d2e60d8d0ed2a9a` | `id` |
+| `logos_names::Registered` | `e87848390f741b1a` | `id` (`slot_id`), `expires: u64` |
+| `logos_names::Claimed` | `b04995efabf61acb` | `id` (`slot_id`) |
+| `logos_names::Renewed` | `c0a35e0e73dbcc59` | `id` (`slot_id`), `expires: u64` (`now` plus the term, or `u64::MAX` for permanent) |
+| `logos_names::Transferred` | `b78a6f5ae756bf67` | `id` (`slot_id`) |
+| `logos_names::Released` | `3d2e60d8d0ed2a9a` | `id` (`slot_id`) |
+| `logos_names::SubnameCreated` | *(compute via `event_selector`)* | `sub_id: NameId, revocable: bool` |
+| `logos_names::SubnameBought` | *(compute via `event_selector`)* | `sub_id: NameId` |
+| `logos_names::SubnameRevoked` | *(compute via `event_selector`)* | `sub_id: NameId` |
+| `logos_names::SubnameTransferred` | *(compute via `event_selector`)* | `sub_id: NameId` |
+| `logos_names::SubnameReleased` | *(compute via `event_selector`)* | `sub_id: NameId` |
 
 Events are emitted before the registry has checked the record, so an event can
 exist for a change that was refused: they are hints to confirm against the
@@ -704,17 +886,36 @@ transaction's message is `00` followed by the encoding:
 
 | Instruction | Encoding |
 |---|---|
-| `Register { id, sealed: [ee, ff], term: 1, fee: 100000, treasury: None, now: 1700000000000, secret: 32 × 0x5a, deposit: false, length: Membership { index: 7, tier: 3, path: [] } }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `00` ‖ `0068e5cf8b010000` ‖ `5a` 32 times ‖ `00` ‖ `00` ‖ `07000000` ‖ `03` ‖ `00000000` |
-| `Renew { id, term: 2, fee: 0, treasury: None, now: 1700000000000 }` | `01` ‖ id ‖ `02` ‖ `00` 16 times ‖ `00` ‖ `0068e5cf8b010000` |
+| `Register { id, sealed: [ee, ff], term: 1, fee: 100000, treasury: None, now: 1700000000000, secret: 32 × 0x5a, deposit: false, length: Membership { index: 7, tier: 3, path: [] }, price_tier: 2 }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `00` ‖ `0068e5cf8b010000` ‖ `5a` × 32 ‖ `00` ‖ `00` ‖ `07000000` ‖ `03` ‖ `00000000` ‖ `02` |
+| `Renew { id, term: 2, fee: 0, treasury: None, now: 1700000000000 }` | `01` ‖ id ‖ `02` ‖ `00` × 16 ‖ `00` ‖ `0068e5cf8b010000` |
 | `SetRecord { id, sealed: [ee] }` | `02` ‖ id ‖ `01000000ee` |
 | `SetPage { id, sealed: [] }` | `03` ‖ id ‖ `00000000` |
-| `Transfer { id, new_owner: 32 bytes of 0x02 }` | `04` ‖ id ‖ `02` 32 times |
-| `Release { id, refund: 0 }` | `05` ‖ id ‖ `00` 16 times |
+| `Transfer { id, new_owner: 32 × 0x02 }` | `04` ‖ id ‖ `02` × 32 |
+| `Release { id, refund: 0 }` | `05` ‖ id ‖ `00` × 16 |
 | `SetPrimary { name: "jef" }` | `06030000006a6566` |
-| `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [1, 2, 3], mode: 0, deposits: [0, 0], claims_root: 32 × 0x00, claims_until: 0, claims_program: 32 × 0x07 }` | `07` ‖ `01` 32 times ‖ `02` 32 times ‖ three 16-byte little-endian numbers ‖ `00` ‖ `00` 72 times ‖ `07` 32 times |
-| `Commit { commitment: 32 × 0xc0, now: 1700000000000 }` | `08` ‖ `c0` 32 times ‖ `0068e5cf8b010000` |
-| `Claim { id, sealed: [ee], now: 1700000000000, proof: [32 × 0x01, 32 × 0x02] }` | `09` ‖ id ‖ `01000000ee` ‖ `0068e5cf8b010000` ‖ `02000000` ‖ `01` 32 times ‖ `02` 32 times |
-| `CommitPublic { commitment: 32 × 0xc0, now: 1700000000000 }` | `0a` ‖ `c0` 32 times ‖ `0068e5cf8b010000` |
+| `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [[1,2,3,4],[5,6,7,8],[9,10,11,12]], mode: 0, deposits: [0, 0], claims_root: 32 × 0x00, claims_until: 0, claims_program: 32 × 0x07 }` | `07` ‖ `01` × 32 ‖ `02` × 32 ‖ twelve 16-byte LE numbers (`01..0c`) ‖ `00` ‖ `00` × 72 ‖ `07` × 32 |
+| `Commit { commitment: 32 × 0xc0, now: 1700000000000 }` | `08` ‖ `c0` × 32 ‖ `0068e5cf8b010000` |
+| `Claim { id, sealed: [ee], now: 1700000000000, proof: [32 × 0x01, 32 × 0x02], price_tier: 1 }` | `09` ‖ id ‖ `01000000ee` ‖ `0068e5cf8b010000` ‖ `02000000` ‖ `01` × 32 ‖ `02` × 32 ‖ `01` |
+| `CommitPublic { commitment: 32 × 0xc0, now: 1700000000000 }` | `0a` ‖ `c0` × 32 ‖ `0068e5cf8b010000` |
+| `SetPrice { price_tier: 0, term: 3, price: 400000000 }` | `0b00030084d717000000000000000000000000` |
+| `SetSubnameSale { id, sale: Some({ price: 100000, payout: 32 × 0x02 }) }` | `0c` ‖ id ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `02` × 32 |
+| `SetSubnameSale { id, sale: None }` | `0c` ‖ id ‖ `00` |
+| `CreateSubname { parent_id: id, sub_id: 32 × 0x33, owner: 32 × 0x02, revocable: true, sealed: [ee], now: 1700000000000 }` | `0d` ‖ id ‖ `33` × 32 ‖ `02` × 32 ‖ `01` ‖ `01000000ee` ‖ `0068e5cf8b010000` |
+| `RevokeSubname { parent_id: id, sub_id: 32 × 0x33, now: 1700000000000 }` | `0e` ‖ id ‖ `33` × 32 ‖ `0068e5cf8b010000` |
+| `BuySubname { parent_id: id, sub_id: 32 × 0x33, sealed: [ee], price: 100000, payout: Some(32 × 0x02), now: 1700000000000, secret: 32 × 0x5a }` | `0f` ‖ id ‖ `33` × 32 ‖ `01000000ee` ‖ `a0860100000000000000000000000000` ‖ `01` ‖ `02` × 32 ‖ `0068e5cf8b010000` ‖ `5a` × 32 |
+| `SetSubnameRecord { parent_id: id, sub_id: 32 × 0x33, sealed: [ee], now: None }` | `10` ‖ id ‖ `33` × 32 ‖ `01000000ee` ‖ `00` |
+| `SetSubnameRecord { parent_id: id, sub_id: 32 × 0x33, sealed: [ee], now: Some(1700000000000) }` | `10` ‖ id ‖ `33` × 32 ‖ `01000000ee` ‖ `01` ‖ `0068e5cf8b010000` |
+| `SetSubnamePage { parent_id: id, sub_id: 32 × 0x33, sealed: [], now: None }` | `11` ‖ id ‖ `33` × 32 ‖ `00000000` ‖ `00` |
+| `TransferSubname { parent_id: id, sub_id: 32 × 0x33, new_owner: 32 × 0x02, now: Some(1700000000000) }` | `12` ‖ id ‖ `33` × 32 ‖ `02` × 32 ‖ `01` ‖ `0068e5cf8b010000` |
+| `ReleaseSubname { parent_id: id, sub_id: 32 × 0x33, now: None }` | `13` ‖ id ‖ `33` × 32 ‖ `00` |
+
+Account records (version 7):
+
+| Account record | Encoding |
+|---|---|
+| `NameRecord { version: 7, owner: 32 × 0x01, expires: u64::MAX, sealed: [ee], claimed: false, price_tier: 0, generation: 32 × 0x99, subname_sale: Some({ price: 100000, payout: 32 × 0x02 }) }` | `07` ‖ `01` × 32 ‖ `ffffffffffffffff` ‖ `01000000ee` ‖ `00` ‖ `00` ‖ `99` × 32 ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `02` × 32 |
+| `SubnameRecord { version: 7, owner: 32 × 0x02, kind: Permanent, sealed: [ee] }` | `07` ‖ `02` × 32 ‖ `00` ‖ `01000000ee` |
+| `SubnameRecord { version: 7, owner: 32 × 0x02, kind: Revocable { parent_generation: 32 × 0x99 }, sealed: [] }` | `07` ‖ `02` × 32 ‖ `01` ‖ `99` × 32 ‖ `00000000` |
 
 `claim_leaf(32 × 0x07, 32 × 0x08)` is `0ec9619438b0876b837235e0b00766a9244925d4fb7071f59221da38b98c9aff`.
 
@@ -1066,7 +1267,9 @@ The `version` byte in each structure and the `v5` in each derivation string
 identify this version. A future version uses new strings, so its identifiers
 and accounts never collide with this one's, and a client can support both.
 
-Record version 6 and the LEZ 0.4 transaction format keep every `v5` string, on
-purpose: a name keeps its identifier, key and record address across the chains,
-which is what lets a claim (section 8.4) find it. The `v6` strings are new values
-used only for claims.
+Record version 6 and the LEZ 0.4 transaction format kept every `v5` string so a
+name keeps its base identifier and key across chains for `Claim` (section 8.4).
+Version 7 keeps the `v5` Argon2id derivation and `v5`/`v6` strings unchanged and
+adds `v7` domain strings for length-tier slot identifiers (`v7/tier/`), subname
+accounts (`v7/subname/`, `v7/subpage/`), subname purchase commitments
+(`v7/sub-commitment`), and hold generation tokens (`v7/gen/*`).
