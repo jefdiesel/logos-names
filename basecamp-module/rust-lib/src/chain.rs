@@ -304,7 +304,10 @@ mod tests {
     /// channel 01…01): one sent with the account's 32 bytes, whose op id the sequencer named when
     /// it refused to decode it ("Skipping pending deposit event 852ee6f8… Unexpected variant tag:
     /// 41"), and one with LEZ 0.4's metadata (tag 1, Key, the account's key), minted: its receipt,
-    /// derived from the op id below, holds the bridge's state [1].
+    /// derived from the op id below, held the bridge's state [1]. The op ids are the Logos
+    /// Blockchain's and still hold on LEZ v0.4.0; the rc1 metadata (a 32-byte x-only key) does
+    /// not decode there (v0.4.0's key is a 33-byte `SigningKeyState`), and the receipt moved with
+    /// the bridge program (registry.rs tests where it is now).
     #[test]
     fn deposit_op_ids_are_the_ones_a_rc1_sequencer_used() {
         let channel = [1_u8; 32];
@@ -312,10 +315,11 @@ mod tests {
         let refused = deposit_op_id(&channel, &["40c4ae274f819ad7b5b6925a987175a92563c31ab5b81fdba11007b21f604c19".to_owned()], &bare).unwrap();
         assert_eq!(crate::registry::hex(&refused), "852ee6f8924ffa2775b0ce89430555519967b64bf31bd27e5ed37288f78a183f");
         let metadata = crate::registry::unhex("0100f5193a338bba3044151b4572e96ab9b1cfcae9cc802c403eb235c2f2fccc9819").unwrap();
-        assert_eq!(crate::deposit::credited(crate::deposit::Lez::V04, &metadata), Some(bare), "the key's account");
+        assert_eq!(crate::deposit::credited(crate::deposit::Lez::V04, &metadata), None, "an rc1 key is not a v0.4.0 key");
         let minted = deposit_op_id(&channel, &["efc36b4d59b3dd7c7cfa7a28456341807de2a74463aed87a0bdb635697f70c04".to_owned()], &metadata).unwrap();
         assert_eq!(crate::registry::hex(&minted), "0c9efe6b31411b532be65d990b5c52bed70a47ad76da43d57818dff903195734");
-        assert_eq!(crate::registry::account_text(&crate::registry::deposit_receipt(&minted)), "HKKoMBnoX6Cz1C1hBrgD9pjVLztqNwEMhCsPxVgfPqkp");
+        // rc1's receipt (under the old bridge id) was HKKoMBnoX6Cz1C1hBrgD9pjVLztqNwEMhCsPxVgfPqkp.
+        assert_ne!(crate::registry::account_text(&crate::registry::deposit_receipt(&minted)), "HKKoMBnoX6Cz1C1hBrgD9pjVLztqNwEMhCsPxVgfPqkp");
     }
 
     /// bridge-fee-reported-as-max: the node took 1614 (inputs 104298274, change
