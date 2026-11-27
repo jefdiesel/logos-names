@@ -1,4 +1,4 @@
-//! Engine-test harness: the real testimonial guest ELF on LEZ v0.4.0-rc1's real state machine
+//! Engine-test harness: the real testimonial guest ELF on LEZ v0.4.0's real state machine
 //! (`V03State`, `ValidatedStateDiff`), real signatures and the real timestamp check. No chain,
 //! no network, no fees, and no admission evidence ever: the program admits its own PDAs.
 
@@ -6,26 +6,27 @@ use std::collections::BTreeMap;
 
 use borsh::BorshSerialize;
 use lee::{
-    PrivateKey, PublicKey, PublicTransaction, V03State, ValidatedStateDiff,
+    Authority, GenesisBuilder, PublicTransaction, V03State, ValidatedStateDiff,
     program::{DEFAULT_PUBLIC_CYCLE_BUDGET, Program},
     public_transaction::{Message as TxMessage, WitnessSet},
+    signature::{INITIAL_KEY_TYPE, PublicAccountSecret, Signer, public_account_id},
 };
-use lee_core::account::{AccountId, Actor, Nonce};
+use lee_core::account::{Account, AccountId, Actor, Nonce};
 use testimonial_core::{Instruction, Listing, Message, actors_to_declare, walk};
 
 /// 2027-01-15 08:00:00 UTC.
 pub const T0: u64 = 1_800_000_000_000;
 
 pub struct Key {
-    pub key: PrivateKey,
+    pub secret: PublicAccountSecret,
     pub id: AccountId,
 }
 
 #[must_use]
 pub fn key(seed: u8) -> Key {
-    let key = PrivateKey::try_new([seed; 32]).expect("a valid key");
-    let id = AccountId::from(&PublicKey::new_from_private_key(&key));
-    Key { key, id }
+    let secret = PublicAccountSecret::new([seed; 32]);
+    let id = public_account_id(&secret);
+    Key { secret, id }
 }
 
 #[must_use]
@@ -81,10 +82,12 @@ impl Engine {
     /// programs.
     #[must_use]
     pub fn new(program: AccountId, forwarder: AccountId) -> Self {
-        let state = V03State::new().with_named_programs([
-            (program, Program::new(testimonial_elf().to_vec().into()).expect("the testimonial guest loads")),
-            (forwarder, Program::new(forwarder_elf().to_vec().into()).expect("the forwarder loads")),
-        ]);
+        let state = GenesisBuilder::new()
+            .with_programs_at([
+                (program, Program::new(testimonial_elf().to_vec().into()).expect("the testimonial guest loads"), false),
+                (forwarder, Program::new(forwarder_elf().to_vec().into()).expect("the forwarder loads"), false),
+            ])
+            .build();
         Self { state, program, forwarder, block: 0 }
     }
 
@@ -93,7 +96,7 @@ impl Engine {
     /// `UnadmittedPublicActor` before any program runs.
     pub fn fund(&mut self, accounts: &[AccountId]) {
         let state = std::mem::take(&mut self.state);
-        self.state = state.with_public_account_balances(accounts.iter().map(|a| (*a, 1_000_000)));
+        self.state = state.with_public_accounts(accounts.iter().map(|a| (*a, Account::funded(1_000_000))));
     }
 
     fn nonce(&self, id: AccountId) -> Nonce {
@@ -118,10 +121,18 @@ impl Engine {
             }
         }
         let nonces: BTreeMap<AccountId, Nonce> = signers.iter().map(|k| (k.id, self.nonce(k.id))).collect();
+        // A signer authorizes the actors on its own account; every other actor is plain.
+        let declared = declared.into_iter().map(|a| {
+            let authority = if nonces.contains_key(&a.account_id) { Authority::Signer } else { Authority::None };
+            (a, authority)
+        });
         // No admission evidence, ever.
-        let tx = TxMessage::new(root, message, declared, nonces, None, Vec::new());
-        let keys: Vec<&PrivateKey> = signers.iter().map(|k| &k.key).collect();
-        let witness = WitnessSet::for_message(&tx, &keys);
+        let tx = TxMessage::new(root, message, declared, nonces.clone(), None, Vec::new());
+        let keys: Vec<Signer> = signers
+            .iter()
+            .map(|k| Signer::new(&k.secret, nonces[&k.id], INITIAL_KEY_TYPE, INITIAL_KEY_TYPE))
+            .collect();
+        let witness = WitnessSet::sign(&tx, &keys);
         let tx = PublicTransaction::new(tx, witness);
         let tx_bytes = borsh::to_vec(&tx).expect("borsh").len();
         if !same_block || self.block == 0 {

@@ -11,7 +11,7 @@ alone, with plain sequencer reads**: no indexer, no server of ours, no trust in 
 |---|---|
 | `core/` | All program logic (`testimonial_core`): records, PDAs, the handler, the list walk and the adoption summary. Host tests. |
 | `methods/`, `methods/guest/` | The risc0 guest (`logos_testimonial`), one line: `actor_entrypoint!(testimonial_core::handle)`. |
-| `engine-test/` | The real guest ELF on LEZ v0.4.0-rc1's real state machine (`V03State`). `forwarder/` is a test-only guest that relays messages, to prove relayed posts are refused. `testimonial-imageid` writes the ELF and prints its image ID. |
+| `engine-test/` | The real guest ELF on LEZ v0.4.0's real state machine (`V03State`). `forwarder/` is a test-only guest that relays messages, to prove relayed posts are refused. `testimonial-imageid` writes the ELF and prints its image ID. |
 | `client/` | `testimonial`: `post`, `list` (with per-month counts and the adoption check), `show`, `address`. |
 
 ## Design
@@ -172,7 +172,7 @@ mini: `export PATH=$HOME/.cargo/bin:$HOME/.risc0/bin:/opt/homebrew/bin:$PATH`.
 
 ```sh
 cargo test -p testimonial_core                                   # host logic, fast
-cargo test --release -p testimonial_engine_test -- --nocapture   # real guest, real rc1 engine
+cargo test --release -p testimonial_engine_test -- --nocapture   # real guest, real v0.4.0 engine
 cargo build --release -p testimonial_client                      # the `testimonial` binary
 cargo run --release -p testimonial_engine_test --bin testimonial-imageid -- testimonial.bin
 ```
@@ -203,9 +203,10 @@ No Worker, server or database of ours is involved.
 
 - **Host tests:** `cargo test -p testimonial_core`: 11 pass (handler, guards, limits, sizes, the
   list walk against tampered state, months and the adoption bar over 150 posts).
-- **Engine tests** on LEZ v0.4.0-rc1 (real guest ELF, real signatures, no admission evidence):
-  8 pass. A post costs about 54,600 cycles and 533 transaction bytes; a worst-case post (every
-  field at its limit) 98,709 cycles and 1,604 bytes. `t08` posts 150 testimonials from 150
+- **Engine tests** on LEZ v0.4.0 (real guest ELF, real signatures, no admission evidence):
+  8 pass. A post costs about 62,400 cycles and 610 transaction bytes; a worst-case post (every
+  field at its limit) 107,722 cycles and 1,681 bytes. (On v0.4.0-rc1: 54,600 and 533; 98,709
+  and 1,604.) `t08` posts 150 testimonials from 150
   accounts over two months and the client's own `walk` + `summarize` read them back as meeting
   the bar.
 - **Live, on a throwaway local rc1 sequencer** (stopped afterwards): deployed through the loader
