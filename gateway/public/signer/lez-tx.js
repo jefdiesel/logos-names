@@ -1080,26 +1080,6 @@ const abytes = (value, length, title) => abytes$1(value, length, title);
 */
 const anumber = anumber$1;
 /**
-* Asserts something is a string.
-* @param value - Value to validate.
-* @param title - Label included in thrown errors.
-* @returns The validated string.
-* @throws On wrong argument types. {@link TypeError}
-* @example
-* Validate a label string.
-*
-* ```ts
-* astring('example', 'label');
-* ```
-*/
-function astring(value, title = "") {
-	if (typeof value !== "string") {
-		const prefix = title && `"${title}" `;
-		throw new TypeError(prefix + "expected string, got type=" + typeof value);
-	}
-	return value;
-}
-/**
 * Asserts something is a plain object-ish value, not null or array.
 * @param value - Value to validate.
 * @param title - Label included in thrown errors.
@@ -1193,7 +1173,7 @@ const isBytes = isBytes$1;
 * ```
 */
 const randomBytes = (bytesLength) => randomBytes$1(bytesLength);
-const _0n$5 = /* @__PURE__ */ BigInt(0);
+const _0n$4 = /* @__PURE__ */ BigInt(0);
 const _1n$3 = /* @__PURE__ */ BigInt(1);
 const atitle = (title) => title ? `"${title}" ` : "";
 /**
@@ -1255,24 +1235,6 @@ function asafenumber(value, title = "") {
 	}
 }
 /**
-* Encodes a bigint into even-length big-endian hex.
-* The historical "unpadded" name only means "no fixed-width field padding"; odd-length hex still
-* gets one leading zero nibble so the result always represents whole bytes.
-* @param num - Number to encode.
-* @returns Big-endian hex string.
-* @throws On wrong argument ranges or values. {@link RangeError}
-* @example
-* Encode a scalar into hex without a `0x` prefix.
-*
-* ```ts
-* numberToHexUnpadded(255n);
-* ```
-*/
-function numberToHexUnpadded(num) {
-	const hex = abignumber(num).toString(16);
-	return hex.length & 1 ? "0" + hex : hex;
-}
-/**
 * Parses a big-endian hex string into bigint.
 * Accepts odd-length hex through the native `BigInt('0x' + hex)` parser and currently surfaces the
 * same native `SyntaxError` for malformed hex instead of wrapping it in a library-specific error.
@@ -1288,7 +1250,7 @@ function numberToHexUnpadded(num) {
 */
 function hexToNumber(hex) {
 	if (typeof hex !== "string") throw new TypeError("hex string expected, got " + typeof hex);
-	return hex === "" ? _0n$5 : BigInt("0x" + hex);
+	return hex === "" ? _0n$4 : BigInt("0x" + hex);
 }
 /**
 * Parses big-endian bytes into bigint.
@@ -1409,7 +1371,7 @@ function asciiToBytes(ascii) {
 * ```
 */
 function isPosBig(n) {
-	return typeof n === "bigint" && _0n$5 <= n;
+	return typeof n === "bigint" && _0n$4 <= n;
 }
 /**
 * Checks whether a bigint lies inside a half-open range.
@@ -1461,8 +1423,8 @@ function aInRange(title, n, min, max) {
 * ```
 */
 function bitLen(n) {
-	if (n < _0n$5) throw new Error("expected non-negative bigint, got " + n);
-	return n === _0n$5 ? 0 : n.toString(2).length;
+	if (n < _0n$4) throw new Error("expected non-negative bigint, got " + n);
+	return n === _0n$4 ? 0 : n.toString(2).length;
 }
 /**
 * Calculate mask for N bits. Not using ** operator with bigints because of old engines.
@@ -1481,75 +1443,6 @@ const bitMask = (n) => {
 	asafenumber(n, "n");
 	return (_1n$3 << BigInt(n)) - _1n$3;
 };
-/**
-* Minimal HMAC-DRBG from NIST 800-90 for RFC6979 sigs.
-* @param hashLen - Hash output size in bytes. Callers are expected to pass a positive length; `0`
-*   is not rejected here and would make the internal generate loop non-progressing.
-* @param qByteLen - Requested output size in bytes. Callers are expected to pass a positive length.
-* @param hmacFn - HMAC implementation.
-* @returns Function that will call DRBG until the predicate returns anything
-*   other than `undefined`.
-* @throws On wrong argument types. {@link TypeError}
-* @example
-* Build a deterministic nonce generator for RFC6979-style signing.
-*
-* ```ts
-* import { createHmacDrbg } from '@noble/curves/utils.js';
-* import { hmac } from '@noble/hashes/hmac.js';
-* import { sha256 } from '@noble/hashes/sha2.js';
-* const hmacFn = (key: Uint8Array, msg: Uint8Array) => hmac(sha256, key, msg);
-* const drbg = createHmacDrbg(32, 32, hmacFn);
-* const seed = new Uint8Array(32);
-* drbg(seed, (bytes) => bytes);
-* ```
-*/
-function createHmacDrbg(hashLen, qByteLen, hmacFn) {
-	anumber$1(hashLen, "hashLen");
-	anumber$1(qByteLen, "qByteLen");
-	if (typeof hmacFn !== "function") throw new TypeError("hmacFn must be a function");
-	const u8n = (len) => new Uint8Array(len);
-	const NULL = Uint8Array.of();
-	const byte0 = Uint8Array.of(0);
-	const byte1 = Uint8Array.of(1);
-	const _maxDrbgIters = 1e3;
-	let v = u8n(hashLen);
-	let k = u8n(hashLen);
-	let i = 0;
-	const reset = () => {
-		v.fill(1);
-		k.fill(0);
-		i = 0;
-	};
-	const h = (...msgs) => hmacFn(k, concatBytes(v, ...msgs));
-	const reseed = (seed = NULL) => {
-		k = h(byte0, seed);
-		v = h();
-		if (seed.length === 0) return;
-		k = h(byte1, seed);
-		v = h();
-	};
-	const gen = () => {
-		if (i++ >= _maxDrbgIters) throw new Error("drbg: tried max amount of iterations");
-		let len = 0;
-		const out = [];
-		while (len < qByteLen) {
-			v = h();
-			const sl = v.slice();
-			out.push(sl);
-			len += v.length;
-		}
-		return concatBytes(...out);
-	};
-	const genUntil = (seed, pred) => {
-		reset();
-		reseed(seed);
-		let res = void 0;
-		while ((res = pred(gen())) === void 0) reseed();
-		reset();
-		return res;
-	};
-	return genUntil;
-}
 /**
 * Validates declared required and optional field types on a plain object.
 * Extra keys are intentionally ignored because many callers validate only the subset they use from
@@ -1593,7 +1486,7 @@ function validateObject(object, fields = {}, optFields = {}, title = "object") {
 * @module
 */
 /*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) */
-const _0n$4 = /* @__PURE__ */ BigInt(0);
+const _0n$3 = /* @__PURE__ */ BigInt(0);
 const _1n$2 = /* @__PURE__ */ BigInt(1);
 const _2n$2 = /* @__PURE__ */ BigInt(2);
 const _3n$1 = /* @__PURE__ */ BigInt(3);
@@ -1618,9 +1511,9 @@ const POW_WINDOWED_MIN = /* @__PURE__ */ BigInt("0x10000000000000000");
 * ```
 */
 function mod(a, b) {
-	if (b <= _0n$4) throw new Error("mod: expected positive modulus, got " + b);
+	if (b <= _0n$3) throw new Error("mod: expected positive modulus, got " + b);
 	const result = a % b;
-	return result >= _0n$4 ? result : b + result;
+	return result >= _0n$3 ? result : b + result;
 }
 /**
 * Efficiently raise num to a power with modular reduction.
@@ -1642,14 +1535,14 @@ function mod(a, b) {
 function pow(num, power, modulo) {
 	if (modulo <= _1n$2) throw new Error("pow: expected modulus > 1, got " + modulo);
 	if (typeof power !== "bigint") throw new TypeError("invalid exponent: expected bigint, got " + typeof power);
-	if (power < _0n$4) throw new Error("invalid exponent, negatives unsupported");
-	if (power === _0n$4) return _1n$2;
+	if (power < _0n$3) throw new Error("invalid exponent, negatives unsupported");
+	if (power === _0n$3) return _1n$2;
 	if (power === _1n$2) return num;
 	let d = num % modulo;
-	if (d < _0n$4) d += modulo;
+	if (d < _0n$3) d += modulo;
 	if (power < POW_WINDOWED_MIN) {
 		let p = _1n$2;
-		while (power > _0n$4) {
+		while (power > _0n$3) {
 			if (power & _1n$2) p = p * d % modulo;
 			d = d * d % modulo;
 			power >>= _1n$2;
@@ -1657,7 +1550,7 @@ function pow(num, power, modulo) {
 		return p;
 	}
 	const digits = [];
-	while (power > _0n$4) {
+	while (power > _0n$3) {
 		digits.push(Number(power & _15n));
 		power >>= _4n$2;
 	}
@@ -1694,9 +1587,9 @@ function pow(num, power, modulo) {
 */
 function pow2(x, power, modulo) {
 	if (modulo <= _1n$2) throw new Error("pow2: expected modulus > 1, got " + modulo);
-	if (power < _0n$4) throw new Error("pow2: expected non-negative exponent, got " + power);
+	if (power < _0n$3) throw new Error("pow2: expected non-negative exponent, got " + power);
 	let res = x;
-	while (power-- > _0n$4) {
+	while (power-- > _0n$3) {
 		res *= res;
 		res %= modulo;
 	}
@@ -1717,12 +1610,12 @@ function pow2(x, power, modulo) {
 * ```
 */
 function invert(number, modulo) {
-	if (number === _0n$4) throw new Error("invert: expected non-zero number");
+	if (number === _0n$3) throw new Error("invert: expected non-zero number");
 	if (modulo <= _1n$2) throw new Error("invert: expected modulus > 1, got " + modulo);
 	let a = mod(number, modulo);
 	let b = modulo;
-	let x = _0n$4, u = _1n$2;
-	while (a !== _0n$4) {
+	let x = _0n$3, u = _1n$2;
+	while (a !== _0n$3) {
 		const q = b / a;
 		const r = b - a * q;
 		const m = x - u * q;
@@ -1731,45 +1624,12 @@ function invert(number, modulo) {
 	if (b !== _1n$2) throw new Error("invert: does not exist");
 	return mod(x, modulo);
 }
-/**
-* Inverses number over modulo using Fermat's little theorem: `a^(p-2) ≡ a⁻¹ (mod p)`.
-*
-* Unlike {@link invert} (extended Euclidean), the exponent `p-2` is a public constant, so the
-* underlying square-and-multiply has the same control flow for every secret `a`: there is no
-* data-dependent branching or loop count that could leak `a` through timing (e.g. Minerva-style
-* ECDSA nonce-inversion attacks). This is only "algorithmically" constant-time — JS bigint
-* multiplication/reduction is still value-dependent — and it is roughly 4x slower than
-* {@link invert}.
-*
-* REQUIRES a prime modulus; Fermat's theorem does not hold otherwise. The result is verified to be
-* a real inverse, so a non-prime modulus (or a non-invertible input) fails closed with an error
-* instead of returning a wrong value.
-* @param a - Value to invert.
-* @param prime - Prime modulus.
-* @returns Multiplicative inverse in `[1, prime)`.
-* @throws If the modulus is below 2, the input reduces to zero, or the inverse does not exist.
-*   {@link Error}
-* @example
-* Compute one modular inverse without secret-dependent branching.
-*
-* ```ts
-* invertCt(3n, 11n); // 4n, since 3 * 4 = 12 ≡ 1 (mod 11)
-* ```
-*/
-function invertCt(a, prime) {
-	if (prime <= _1n$2) throw new Error("invertCt: expected prime modulus > 1, got " + prime);
-	const an = mod(a, prime);
-	if (an === _0n$4) throw new Error("invertCt: expected non-zero number");
-	const inverse = pow(an, prime - _2n$2, prime);
-	if (mod(an * inverse, prime) !== _1n$2) throw new Error("invertCt: does not exist");
-	return inverse;
-}
 function assertIsSquare(Fp, root, n) {
 	const F = Fp;
 	if (!F.eql(F.sqr(root), n)) throw new Error("Cannot find square root");
 }
 function aoddModulus(order, fnName) {
-	if ((order & _1n$2) === _0n$4) throw new Error(fnName + ": expected odd modulus, got " + order);
+	if ((order & _1n$2) === _0n$3) throw new Error(fnName + ": expected odd modulus, got " + order);
 }
 function sqrt3mod4(Fp, n) {
 	const F = Fp;
@@ -1835,7 +1695,7 @@ function tonelliShanks(P) {
 	aoddModulus(P, "tonelliShanks");
 	let Q = P - _1n$2;
 	let S = 0;
-	while (Q % _2n$2 === _0n$4) {
+	while (Q % _2n$2 === _0n$3) {
 		Q /= _2n$2;
 		S++;
 	}
@@ -2013,7 +1873,7 @@ function FpLegendre(Fp, n) {
 */
 function nLength(n, nBitLength) {
 	if (nBitLength !== void 0) anumber(nBitLength);
-	if (n <= _0n$4) throw new Error("invalid n length: expected positive n, got " + n);
+	if (n <= _0n$3) throw new Error("invalid n length: expected positive n, got " + n);
 	if (nBitLength !== void 0 && nBitLength < 1) throw new Error("invalid n length: expected positive bit length, got " + nBitLength);
 	const bits = bitLen(n);
 	if (nBitLength !== void 0 && nBitLength < bits) throw new Error(`invalid n length: expected nBitLength (${nBitLength}) >= bitLen(n) (${bits})`);
@@ -2029,7 +1889,7 @@ var _Field = class {
 	BITS;
 	BYTES;
 	isLE;
-	ZERO = _0n$4;
+	ZERO = _0n$3;
 	ONE = _1n$2;
 	_lengths;
 	_mod;
@@ -2059,10 +1919,10 @@ var _Field = class {
 	}
 	isValid(num) {
 		if (typeof num !== "bigint") throw new TypeError("invalid field element: expected bigint, got " + typeof num);
-		return _0n$4 <= num && num < this.ORDER;
+		return _0n$3 <= num && num < this.ORDER;
 	}
 	is0(num) {
-		return num === _0n$4;
+		return num === _0n$3;
 	}
 	isValidNot0(num) {
 		return !this.is0(num) && this.isValid(num);
@@ -2252,7 +2112,7 @@ function mapHashToField(key, fieldOrder, isLE = false) {
 * @module
 */
 /*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) */
-const _0n$3 = /* @__PURE__ */ BigInt(0);
+const _0n$2 = /* @__PURE__ */ BigInt(0);
 const _1n$1 = /* @__PURE__ */ BigInt(1);
 const _4n$1 = /* @__PURE__ */ BigInt(4);
 const BLIND_BYTES = 16;
@@ -2383,7 +2243,7 @@ function wnafDigits(n, W) {
 	const half = size / 2;
 	const mask = BigInt(size - 1);
 	const d = [];
-	while (n > _0n$3) {
+	while (n > _0n$2) {
 		let w = 0;
 		if (n & _1n$1) {
 			w = Number(n & mask);
@@ -2415,7 +2275,7 @@ function signedWindowDigits(n, W, windows) {
 		}
 		d.push(v);
 	}
-	if (n !== _0n$3) throw new Error("invalid wnaf");
+	if (n !== _0n$2) throw new Error("invalid wnaf");
 	return d;
 }
 /**
@@ -2733,7 +2593,7 @@ function createCurveFields(type, CURVE, curveOpts = {}, FpFnLE) {
 		"h"
 	]) {
 		const val = CURVE[p];
-		if (!(isPosBig(val) && val !== _0n$3)) throw new Error(`CURVE.${p} must be positive bigint`);
+		if (!(isPosBig(val) && val !== _0n$2)) throw new Error(`CURVE.${p} must be positive bigint`);
 	}
 	const Fp = createField(CURVE.p, curveOpts.Fp, FpFnLE);
 	const Fn = createField(CURVE.n, curveOpts.Fn, FpFnLE);
@@ -2858,165 +2718,7 @@ const hmac = /* @__PURE__ */ (() => {
 	return hmac_;
 })();
 //#endregion
-//#region node_modules/@noble/curves/abstract/der.js
-/**
-* ASN.1 DER (Distinguished Encoding Rules) helpers for ECDSA signatures.
-* Only implements the tiny subset needed for `SEQUENCE(INTEGER r, INTEGER s)`.
-* @module
-*/
-/*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) */
-const _0n$2 = /* @__PURE__ */ BigInt(0);
-/**
-* @param m - Error message.
-* @example
-* Throw a DER-specific error when signature parsing encounters invalid bytes.
-*
-* ```ts
-* new DERErr('bad der');
-* ```
-*/
-var DERErr = class extends Error {
-	constructor(m = "") {
-		super(m);
-	}
-};
-const _DER = {
-	Err: DERErr,
-	_tlv: {
-		encode: (tag, data) => {
-			const { Err: E } = _DER;
-			asafenumber(tag, "tag");
-			if (tag < 0 || tag > 255) throw new E("tlv.encode: wrong tag");
-			astring(data, "data");
-			if (data.length & 1) throw new E("tlv.encode: unpadded data");
-			const dataLen = data.length / 2;
-			const len = numberToHexUnpadded(dataLen);
-			if (len.length / 2 & 128) throw new E("tlv.encode: long form length too big");
-			const lenLen = dataLen > 127 ? numberToHexUnpadded(len.length / 2 | 128) : "";
-			return numberToHexUnpadded(tag) + lenLen + len + data;
-		},
-		decode(tag, data) {
-			const { Err: E } = _DER;
-			data = abytes(data, void 0, "DER data");
-			let pos = 0;
-			if (tag < 0 || tag > 255) throw new E("tlv.decode: wrong tag");
-			if (data.length < 2 || data[pos++] !== tag) throw new E("tlv.decode: wrong tlv");
-			const first = data[pos++];
-			const isLong = !!(first & 128);
-			let length = 0;
-			if (!isLong) length = first;
-			else {
-				const lenLen = first & 127;
-				if (!lenLen) throw new E("tlv.decode(long): indefinite length not supported");
-				if (lenLen > 4) throw new E("tlv.decode(long): byte length is too big");
-				const lengthBytes = data.subarray(pos, pos + lenLen);
-				if (lengthBytes.length !== lenLen) throw new E("tlv.decode: length bytes not complete");
-				if (lengthBytes[0] === 0) throw new E("tlv.decode(long): zero leftmost byte");
-				for (const b of lengthBytes) length = length << 8 | b;
-				pos += lenLen;
-				if (length < 128) throw new E("tlv.decode(long): not minimal encoding");
-			}
-			const v = data.subarray(pos, pos + length);
-			if (v.length !== length) throw new E("tlv.decode: wrong value length");
-			return {
-				v,
-				l: data.subarray(pos + length)
-			};
-		}
-	},
-	_int: {
-		encode(num) {
-			const { Err: E } = _DER;
-			abignumber(num);
-			if (num < _0n$2) throw new E("integer: negative integers are not allowed");
-			let hex = numberToHexUnpadded(num);
-			if (Number.parseInt(hex[0], 16) & 8) hex = "00" + hex;
-			if (hex.length & 1) throw new E("unexpected DER parsing assertion: unpadded hex");
-			return hex;
-		},
-		decode(data) {
-			const { Err: E } = _DER;
-			if (data.length < 1) throw new E("invalid signature integer: empty");
-			if (data[0] & 128) throw new E("invalid signature integer: negative");
-			if (data.length > 1 && data[0] === 0 && !(data[1] & 128)) throw new E("invalid signature integer: unnecessary leading zero");
-			return bytesToNumberBE(data);
-		}
-	},
-	toSig(bytes, maxScalarBytes) {
-		const { Err: E, _int: int, _tlv: tlv } = _DER;
-		if (maxScalarBytes !== void 0) {
-			asafenumber(maxScalarBytes, "maxScalarBytes");
-			if (maxScalarBytes < 1) throw new E("invalid signature: maxScalarBytes must be positive");
-		}
-		const data = abytes(bytes, void 0, "signature");
-		const { v: seqBytes, l: seqLeftBytes } = tlv.decode(48, data);
-		if (seqLeftBytes.length) throw new E("invalid signature: left bytes after parsing");
-		const { v: rBytes, l: rLeftBytes } = tlv.decode(2, seqBytes);
-		const { v: sBytes, l: sLeftBytes } = tlv.decode(2, rLeftBytes);
-		if (sLeftBytes.length) throw new E("invalid signature: left bytes after parsing");
-		if (maxScalarBytes !== void 0 && (rBytes.length > maxScalarBytes || sBytes.length > maxScalarBytes)) throw new E("invalid signature: integer too large");
-		return {
-			r: int.decode(rBytes),
-			s: int.decode(sBytes)
-		};
-	},
-	hexFromSig(sig) {
-		const { _tlv: tlv, _int: int } = _DER;
-		validateObject(sig, {
-			r: "bigint",
-			s: "bigint"
-		}, {}, "sig");
-		const seq = tlv.encode(2, int.encode(sig.r)) + tlv.encode(2, int.encode(sig.s));
-		return tlv.encode(48, seq);
-	}
-};
-/**
-* ASN.1 DER encoding utilities. ASN is very complex & fragile. Format:
-*
-*     [0x30 (SEQUENCE), bytelength, 0x02 (INTEGER), intLength, R, 0x02 (INTEGER), intLength, S]
-*
-* Docs: {@link https://letsencrypt.org/docs/a-warm-welcome-to-asn1-and-der/ | Let's Encrypt ASN.1 guide} and
-* {@link https://luca.ntop.org/Teaching/Appunti/asn1.html | Luca Deri's ASN.1 notes}.
-* @example
-* ASN.1 DER encoding utilities.
-*
-* ```ts
-* const der = DER.hexFromSig({ r: 1n, s: 2n });
-* ```
-*/
-const DER = /* @__PURE__ */ (() => {
-	Object.freeze(_DER._tlv);
-	Object.freeze(_DER._int);
-	return Object.freeze(_DER);
-})();
-//#endregion
 //#region node_modules/@noble/curves/abstract/weierstrass.js
-/**
-* Short Weierstrass curve methods. The formula is: y² = x³ + ax + b.
-*
-* ### Design rationale for types
-*
-* * Interaction between classes from different curves should fail:
-*   `k256.Point.BASE.add(p256.Point.BASE)`
-* * For this purpose we want to use `instanceof` operator, which is fast and works during runtime
-* * Different calls of `curve()` would return different classes -
-*   `curve(params) !== curve(params)`: if somebody decided to monkey-patch their curve,
-*   it won't affect others
-*
-* TypeScript can't infer types for classes created inside a function. Classes is one instance
-* of nominative types in TypeScript and interfaces only check for shape, so it's hard to create
-* unique type for every function call.
-*
-* We can use generic types via some param, like curve opts, but that would:
-*     1. Enable interaction between `curve(params)` and `curve(params)` (curves of same params)
-*     which is hard to debug.
-*     2. Params can be generic and we can't enforce them to be constant value:
-*     if somebody creates curve from non-constant params,
-*     it would be allowed to interact with other curves with non-constant params
-*
-* @todo https://www.typescriptlang.org/docs/handbook/release-notes/typescript-2-7.html#unique-symbol
-* @module
-*/
 /*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) */
 const divNearest = (num, den) => (num + (num >= 0 ? den : -den) / _2n$1) / den;
 /** Splits scalar for GLV endomorphism. */
@@ -3039,23 +2741,6 @@ function _splitEndoScalar(k, basis, n) {
 		k2neg,
 		k2
 	};
-}
-function validateSigFormat(format) {
-	if (![
-		"compact",
-		"recovered",
-		"der"
-	].includes(format)) throw new Error("Signature format must be \"compact\", \"recovered\", or \"der\"");
-	return format;
-}
-function validateSigOpts(opts, def) {
-	validateObject(opts);
-	const optsn = {};
-	for (let optName of Object.keys(def)) optsn[optName] = opts[optName] === void 0 ? def[optName] : opts[optName];
-	abool(optsn.lowS, "lowS");
-	abool(optsn.prehash, "prehash");
-	if (optsn.format !== void 0) validateSigFormat(optsn.format);
-	return optsn;
 }
 const _0n$1 = /* @__PURE__ */ BigInt(0);
 const _1n = /* @__PURE__ */ BigInt(1);
@@ -3516,427 +3201,6 @@ function getWLengths(Fp, Fn) {
 		signature: 2 * Fn.BYTES
 	};
 }
-/**
-* Sometimes users only need getPublicKey, getSharedSecret, and secret key handling.
-* This helper ensures no signature functionality is present. Less code, smaller bundle size.
-* @param Point - Weierstrass point constructor.
-* @param ecdhOpts - Optional randomness helpers:
-*   - `randomBytes` (optional): Optional RNG override.
-* @returns ECDH helper namespace.
-* @example
-* Sometimes users only need getPublicKey, getSharedSecret, and secret key handling.
-*
-* ```ts
-* import { ecdh } from '@noble/curves/abstract/weierstrass.js';
-* import { p256 } from '@noble/curves/nist.js';
-* const dh = ecdh(p256.Point);
-* const alice = dh.keygen();
-* const shared = dh.getSharedSecret(alice.secretKey, alice.publicKey);
-* ```
-*/
-function ecdh(Point, ecdhOpts = {}) {
-	validatePointCons(Point);
-	const { Fn } = Point;
-	const randomBytes_ = ecdhOpts.randomBytes === void 0 ? randomBytes : ecdhOpts.randomBytes;
-	const lengths = Object.assign(getWLengths(Point.Fp, Fn), { seed: Math.max(getMinHashLength(Fn.ORDER), 16) });
-	function isValidSecretKey(secretKey) {
-		try {
-			const num = Fn.fromBytes(secretKey);
-			return Fn.isValidNot0(num);
-		} catch (error) {
-			return false;
-		}
-	}
-	function isValidPublicKey(publicKey, isCompressed) {
-		const { publicKey: comp, publicKeyUncompressed } = lengths;
-		try {
-			const l = publicKey.length;
-			if (isCompressed === true && l !== comp) return false;
-			if (isCompressed === false && l !== publicKeyUncompressed) return false;
-			return !Point.fromBytes(publicKey).is0();
-		} catch (error) {
-			return false;
-		}
-	}
-	/**
-	* Produces cryptographically secure secret key from random of size
-	* (groupLen + ceil(groupLen / 2)) with modulo bias being negligible.
-	*/
-	function randomSecretKey(seed) {
-		seed = seed === void 0 ? randomBytes_(lengths.seed) : seed;
-		return mapHashToField(abytes(seed, lengths.seed, "seed"), Fn.ORDER);
-	}
-	/**
-	* Computes public key for a secret key. Checks for validity of the secret key.
-	* @param isCompressed - whether to return compact (default), or full key
-	* @returns Public key, full when isCompressed=false; short when isCompressed=true
-	*/
-	function getPublicKey(secretKey, isCompressed = true) {
-		return Point.BASE.multiply(Fn.fromBytes(secretKey)).toBytes(isCompressed);
-	}
-	/**
-	* Quick and dirty check for item being public key. Does not validate hex, or being on-curve.
-	*/
-	function isProbPub(item) {
-		const { secretKey, publicKey, publicKeyUncompressed } = lengths;
-		const allowedLengths = Fn._lengths;
-		if (!isBytes(item)) return void 0;
-		const l = abytes(item, void 0, "key").length;
-		const isPub = l === publicKey || l === publicKeyUncompressed;
-		const isSec = l === secretKey || !!allowedLengths?.includes(l);
-		if (isPub && isSec) return void 0;
-		return isPub;
-	}
-	/**
-	* ECDH (Elliptic Curve Diffie Hellman).
-	* Computes encoded shared point from secret key A and public key B.
-	* Checks: 1) secret key validity 2) shared key is on-curve.
-	* Does NOT hash the result or expose the SEC 1 x-coordinate-only `z`.
-	* Returns the encoded shared point on purpose: callers that need `x_P`
-	* can derive it from the encoded point, but `x_P` alone cannot recover the
-	* point/parity back.
-	* This helper only exposes the fully validated public-key path, not cofactor DH.
-	* @param isCompressed - whether to return compact (default), or full key
-	* @returns shared point encoding
-	*/
-	function getSharedSecret(secretKeyA, publicKeyB, isCompressed = true) {
-		if (isProbPub(secretKeyA) === true) throw new Error("first arg must be private key");
-		if (isProbPub(publicKeyB) === false) throw new Error("second arg must be public key");
-		const s = Fn.fromBytes(secretKeyA);
-		const b = Point.fromBytes(publicKeyB);
-		if (b.is0()) throw new Error("invalid public key: point at infinity");
-		return b.multiply(s).toBytes(isCompressed);
-	}
-	const utils = {
-		isValidSecretKey,
-		isValidPublicKey,
-		randomSecretKey
-	};
-	const keygen = createKeygen(randomSecretKey, getPublicKey);
-	Object.freeze(utils);
-	Object.freeze(lengths);
-	return Object.freeze({
-		getPublicKey,
-		getSharedSecret,
-		keygen,
-		Point,
-		utils,
-		lengths
-	});
-}
-/**
-* Creates ECDSA signing interface for given elliptic curve `Point` and `hash` function.
-*
-* @param Point - created using {@link weierstrass} function
-* @param hash - used for 1) message prehash-ing 2) k generation in `sign`, using hmac_drbg(hash)
-* @param ecdsaOpts - rarely needed, see {@link ECDSAOpts}:
-*   - `lowS`: Default low-S policy.
-*   - `hmac`: HMAC implementation used by RFC6979 DRBG.
-*   - `randomBytes`: Optional RNG override.
-*   - `bits2int`: Optional hash-to-int conversion override.
-*   - `bits2int_modN`: Optional hash-to-int-mod-n conversion override.
-*
-* @returns ECDSA helper namespace.
-* @example
-* Create an ECDSA signer/verifier bundle for one curve implementation.
-*
-* ```ts
-* import { ecdsa } from '@noble/curves/abstract/weierstrass.js';
-* import { p256 } from '@noble/curves/nist.js';
-* import { sha256 } from '@noble/hashes/sha2.js';
-* const p256ecdsa = ecdsa(p256.Point, sha256);
-* const { secretKey, publicKey } = p256ecdsa.keygen();
-* const msg = new TextEncoder().encode('hello noble');
-* const sig = p256ecdsa.sign(msg, secretKey);
-* const isValid = p256ecdsa.verify(sig, msg, publicKey);
-* ```
-*/
-function ecdsa(Point, hash, ecdsaOpts = {}) {
-	validatePointCons(Point);
-	const hash_ = hash;
-	ahash(hash_);
-	validateObject(ecdsaOpts, {}, {
-		hmac: "function",
-		lowS: "boolean",
-		randomBytes: "function",
-		bits2int: "function",
-		bits2int_modN: "function"
-	});
-	const opts = Object.assign({}, ecdsaOpts);
-	const randomBytes$3 = opts.randomBytes === void 0 ? randomBytes : opts.randomBytes;
-	const hmac$1 = opts.hmac === void 0 ? (key, msg) => hmac(hash_, key, msg) : opts.hmac;
-	const { Fp, Fn } = Point;
-	const { ORDER: CURVE_ORDER, BITS: fnBits } = Fn;
-	const blindLength = getMinHashLength(CURVE_ORDER);
-	const csprng = probeRandomBytes(randomBytes$3, blindLength);
-	const { keygen, getPublicKey, getSharedSecret, utils, lengths } = ecdh(Point, opts);
-	const defaultSigOpts = {
-		prehash: true,
-		lowS: typeof opts.lowS === "boolean" ? opts.lowS : true,
-		format: "compact",
-		extraEntropy: false
-	};
-	const hasLargeRecoveryLifts = CURVE_ORDER * _2n$1 + _1n < Fp.ORDER;
-	function isBiggerThanHalfOrder(number) {
-		return number > CURVE_ORDER >> _1n;
-	}
-	function validateRS(title, num) {
-		if (!Fn.isValidNot0(num)) throw new Error(`invalid signature ${title}: out of range 1..Point.Fn.ORDER`);
-		return num;
-	}
-	function assertFieldSignIsSupported() {
-		if (!Fp.isOdd) throw new Error("Field doesn't support isOdd");
-	}
-	function getRecoveryBit(x, y, r) {
-		assertFieldSignIsSupported();
-		return (x === r ? 0 : 2) | Number(Fp.isOdd(y));
-	}
-	function assertRecoverableCurve() {
-		if (hasLargeRecoveryLifts) throw new Error("\"recovered\" sig type is not supported for cofactor >2 curves");
-	}
-	function validateSigLength(bytes, format) {
-		validateSigFormat(format);
-		const size = lengths.signature;
-		const sizer = format === "compact" ? size : format === "recovered" ? size + 1 : void 0;
-		return abytes(bytes, sizer);
-	}
-	/**
-	* ECDSA signature with its (r, s) properties. Supports compact, recovered & DER representations.
-	*/
-	class Signature {
-		r;
-		s;
-		recovery;
-		constructor(r, s, recovery) {
-			this.r = validateRS("r", r);
-			this.s = validateRS("s", s);
-			if (recovery != null) {
-				assertRecoverableCurve();
-				if (![
-					0,
-					1,
-					2,
-					3
-				].includes(recovery)) throw new Error("invalid recovery id");
-				this.recovery = recovery;
-			}
-			Object.freeze(this);
-		}
-		static fromBytes(bytes, format = defaultSigOpts.format) {
-			validateSigLength(bytes, format);
-			let recid;
-			if (format === "der") {
-				if (bytes.length > 2 * Fn.BYTES + 16) throw new DER.Err("invalid signature: DER signature too long");
-				const { r, s } = DER.toSig(abytes(bytes), Fn.BYTES + 1);
-				return new Signature(r, s);
-			}
-			if (format === "recovered") {
-				recid = bytes[0];
-				format = "compact";
-				bytes = bytes.subarray(1);
-			}
-			const L = lengths.signature / 2;
-			const r = bytes.subarray(0, L);
-			const s = bytes.subarray(L, L * 2);
-			return new Signature(Fn.fromBytes(r), Fn.fromBytes(s), recid);
-		}
-		static fromHex(hex, format) {
-			return this.fromBytes(hexToBytes(hex), format);
-		}
-		assertRecovery() {
-			const { recovery } = this;
-			if (recovery == null) throw new Error("invalid recovery id: must be present");
-			return recovery;
-		}
-		addRecoveryBit(recovery) {
-			return new Signature(this.r, this.s, recovery);
-		}
-		recoverPublicKey(messageHash) {
-			const { r, s } = this;
-			const recovery = this.assertRecovery();
-			const radj = recovery === 2 || recovery === 3 ? r + CURVE_ORDER : r;
-			if (!Fp.isValid(radj)) throw new Error("invalid recovery id: sig.r+curve.n != R.x");
-			const x = Fp.toBytes(radj);
-			const R = Point.fromBytes(concatBytes(pprefix((recovery & 1) === 0), x));
-			const ir = Fn.inv(radj);
-			const h = bits2int_modN(abytes(messageHash, void 0, "msgHash"));
-			const u1 = Fn.create(-h * ir);
-			const u2 = Fn.create(s * ir);
-			const Q = Point.BASE.mulAddUnsafe(u1, R, u2);
-			if (Q.is0()) throw new Error("invalid recovery: point at infinify");
-			Q.assertValidity();
-			return Q;
-		}
-		hasHighS() {
-			return isBiggerThanHalfOrder(this.s);
-		}
-		toBytes(format = defaultSigOpts.format) {
-			validateSigFormat(format);
-			if (format === "der") return hexToBytes(DER.hexFromSig(this));
-			const { r, s } = this;
-			const rb = Fn.toBytes(r);
-			const sb = Fn.toBytes(s);
-			if (format === "recovered") {
-				assertRecoverableCurve();
-				return concatBytes(Uint8Array.of(this.assertRecovery()), rb, sb);
-			}
-			return concatBytes(rb, sb);
-		}
-		toHex(format) {
-			return bytesToHex(this.toBytes(format));
-		}
-	}
-	Object.freeze(Signature.prototype);
-	Object.freeze(Signature);
-	const bits2int = opts.bits2int === void 0 ? function bits2int_def(bytes) {
-		if (bytes.length > 8192) throw new Error("input is too large");
-		const num = bytesToNumberBE(bytes);
-		const delta = bytes.length * 8 - fnBits;
-		return delta > 0 ? num >> BigInt(delta) : num;
-	} : opts.bits2int;
-	const bits2int_modN = opts.bits2int_modN === void 0 ? function bits2int_modN_def(bytes) {
-		return Fn.create(bits2int(bytes));
-	} : opts.bits2int_modN;
-	const ORDER_MASK = bitMask(fnBits);
-	/** Converts to bytes. Checks if num in `[0..ORDER_MASK-1]` e.g.: `[0..2^256-1]`. */
-	function int2octets(num) {
-		aInRange("num < 2^" + fnBits, num, _0n$1, ORDER_MASK);
-		return Fn.toBytes(num);
-	}
-	function validateMsgAndHash(message, prehash) {
-		abytes(message, void 0, "message");
-		return prehash ? abytes(hash_(message), void 0, "prehashed message") : message;
-	}
-	/**
-	* Steps A, D of RFC6979 3.2.
-	* Creates RFC6979 seed; converts msg/privKey to numbers.
-	* Used only in sign, not in verify.
-	*
-	* Warning: we cannot assume here that message has same amount of bytes as curve order,
-	* this will be invalid at least for P521. Also it can be bigger for P224 + SHA256.
-	*/
-	function prepSig(message, secretKey, opts) {
-		const { lowS, prehash, extraEntropy } = validateSigOpts(opts, defaultSigOpts);
-		message = validateMsgAndHash(message, prehash);
-		const h1int = bits2int_modN(message);
-		const d = Fn.fromBytes(secretKey);
-		if (!Fn.isValidNot0(d)) throw new Error("invalid private key");
-		const seedArgs = [int2octets(d), int2octets(h1int)];
-		if (extraEntropy != null && extraEntropy !== false) {
-			const e = extraEntropy === true ? randomBytes$3(lengths.secretKey) : extraEntropy;
-			seedArgs.push(abytes(e, void 0, "extraEntropy"));
-		}
-		const seed = concatBytes(...seedArgs);
-		const m = h1int;
-		function k2sig(kBytes) {
-			const k = bits2int(kBytes);
-			if (!Fn.isValidNot0(k)) return;
-			const q = Point.BASE.multiply(k).toAffine();
-			const r = Fn.create(q.x);
-			if (r === _0n$1) return;
-			let s;
-			if (csprng !== void 0) {
-				const b = bytesToNumberBE(mapHashToField(csprng(blindLength), CURVE_ORDER));
-				const ibk = Fn.inv(Fn.mul(b, k));
-				const bm = Fn.mul(b, m);
-				const bd = Fn.mul(b, d);
-				s = Fn.create(ibk * Fn.create(bm + bd * r));
-			} else {
-				const ik = invertCt(k, CURVE_ORDER);
-				s = Fn.create(ik * Fn.create(m + r * d));
-			}
-			if (s === _0n$1) return;
-			let recovery = getRecoveryBit(q.x, q.y, r);
-			let normS = s;
-			if (lowS && isBiggerThanHalfOrder(s)) {
-				normS = Fn.neg(s);
-				recovery ^= 1;
-			}
-			return new Signature(r, normS, hasLargeRecoveryLifts ? void 0 : recovery);
-		}
-		return {
-			seed,
-			k2sig
-		};
-	}
-	/**
-	* Signs a message or message hash with a secret key.
-	* With the default `prehash: true`, raw message bytes are hashed internally;
-	* only `{ prehash: false }` expects a caller-supplied digest.
-	*
-	* ```
-	* sign(m, d) where
-	*   k = rfc6979_hmac_drbg(m, d)
-	*   (x, y) = G × k
-	*   r = x mod n
-	*   s = (m + dr) / k mod n
-	* ```
-	*/
-	function sign(message, secretKey, opts = {}) {
-		const { seed, k2sig } = prepSig(message, secretKey, opts);
-		return createHmacDrbg(hash_.outputLen, Fn.BYTES, hmac$1)(seed, k2sig).toBytes(opts.format);
-	}
-	/**
-	* Verifies a signature against message and public key.
-	* Rejects lowS signatures by default: see {@link ECDSAVerifyOpts}.
-	* Implements section 4.1.4 from https://www.secg.org/sec1-v2.pdf:
-	*
-	* ```
-	* verify(r, s, h, P) where
-	*   u1 = hs^-1 mod n
-	*   u2 = rs^-1 mod n
-	*   R = u1⋅G + u2⋅P
-	*   mod(R.x, n) == r
-	* ```
-	*/
-	function verify(signature, message, publicKey, opts = {}) {
-		const { lowS, prehash, format } = validateSigOpts(opts, defaultSigOpts);
-		publicKey = abytes(publicKey, void 0, "publicKey");
-		message = validateMsgAndHash(message, prehash);
-		if (!isBytes(signature)) {
-			const end = signature instanceof Signature ? ", use sig.toBytes()" : "";
-			throw new Error("verify expects Uint8Array signature" + end);
-		}
-		validateSigLength(signature, format);
-		try {
-			const sig = Signature.fromBytes(signature, format);
-			const P = Point.fromBytes(publicKey);
-			if (P.is0()) return false;
-			if (lowS && sig.hasHighS()) return false;
-			const { r, s } = sig;
-			const h = bits2int_modN(message);
-			const is = Fn.inv(s);
-			const u1 = Fn.create(h * is);
-			const u2 = Fn.create(r * is);
-			const R = Point.BASE.mulAddUnsafe(u1, P, u2);
-			if (R.is0()) return false;
-			const q = R.toAffine();
-			if (Fn.create(q.x) !== r) return false;
-			if (format === "recovered" && sig.recovery !== getRecoveryBit(q.x, q.y, r)) return false;
-			return true;
-		} catch (e) {
-			return false;
-		}
-	}
-	function recoverPublicKey(signature, message, opts = {}) {
-		const { prehash } = validateSigOpts(opts, defaultSigOpts);
-		message = validateMsgAndHash(message, prehash);
-		return Signature.fromBytes(signature, "recovered").recoverPublicKey(message).toBytes();
-	}
-	return Object.freeze({
-		keygen,
-		getPublicKey,
-		getSharedSecret,
-		utils,
-		lengths,
-		Point,
-		sign,
-		verify,
-		recoverPublicKey,
-		Signature,
-		hash: hash_
-	});
-}
 //#endregion
 //#region node_modules/@noble/curves/secp256k1.js
 /**
@@ -3985,26 +3249,6 @@ const Pointk1 = /* @__PURE__ */ weierstrass(secp256k1_CURVE, {
 	Fp: Fpk1,
 	endo: secp256k1_ENDO
 });
-/**
-* secp256k1 curve: ECDSA and ECDH methods.
-*
-* Uses sha256 to hash messages. To use a different hash,
-* pass `{ prehash: false }` to sign / verify.
-*
-* @example
-* Generate one secp256k1 keypair, sign a message, and verify it.
-*
-* ```js
-* import { secp256k1 } from '@noble/curves/secp256k1.js';
-* const { secretKey, publicKey } = secp256k1.keygen();
-* // const publicKey = secp256k1.getPublicKey(secretKey);
-* const msg = new TextEncoder().encode('hello noble');
-* const sig = secp256k1.sign(msg, secretKey);
-* const isValid = secp256k1.verify(sig, msg, publicKey);
-* // const sigKeccak = secp256k1.sign(keccak256(msg), secretKey, { prehash: false });
-* ```
-*/
-const secp256k1 = /* @__PURE__ */ ecdsa(Pointk1, sha256);
 /** An object mapping tags to their tagged hash prefix of [SHA256(tag) | SHA256(tag)] */
 const TAGGED_HASH_PREFIXES = Object.create(null);
 function taggedHash(tag, ...messages) {
@@ -4157,16 +3401,43 @@ function pad32(text) {
 	bytes.set(utf8.encode(text));
 	return bytes;
 }
-/** `b"/LEE/v0.3/Message/Public/\x00…"` (message.rs PREFIX). */
+/** `b"/LEE/v0.3/Message/Public/\x00…"` (message.rs:16 PREFIX). */
 const MESSAGE_PREFIX = pad32("/LEE/v0.3/Message/Public/");
-/** `b"/LEE/v0.3/AccountId/Public/\x00…"` (public_key.rs PUBLIC_ACCOUNT_ID_PREFIX). */
+/** `b"/LEE/v0.3/KeyedMessage/Public/\x00\x00"` (message.rs:17 KEYED_PREFIX). */
+const KEYED_MESSAGE_PREFIX = pad32("/LEE/v0.3/KeyedMessage/Public/");
+/** `b"/LEE/v0.3/AccountId/Public/\x00…"` (account.rs:259-260 PUBLIC_ACCOUNT_ID_PREFIX). */
 const ACCOUNT_ID_PREFIX = pad32("/LEE/v0.3/AccountId/Public/");
+/** `b"/LEE/v0.3/AccountId/Public/Schn/"` (account.rs:261 PREFIX_SCHNORR). */
+const ACCOUNT_ID_SCHNORR_PREFIX = pad32("/LEE/v0.3/AccountId/Public/Schn/");
+/** `b"/LEE/v0.3/KeySeed/\x00…"` (signing_keys.rs:15-16 DS_KEY_SEED). */
+const KEY_SEED_PREFIX = pad32("/LEE/v0.3/KeySeed/");
+/** `b"/LEE/v0.3/KeyGen/Schnorr/\x00…"` (schnorr.rs:9 DS_KEYGEN). */
+const SCHNORR_KEYGEN_PREFIX = pad32("/LEE/v0.3/KeyGen/Schnorr/");
+/** `b"/LEE/v0.3/KeyCommitment/Schnorr/"` (schnorr.rs:8 DS_KEY). */
+const SCHNORR_KEY_COMMIT_PREFIX = pad32("/LEE/v0.3/KeyCommitment/Schnorr/");
+/** `b"/LEE/v0.2/AccountId/PDA/\x00…"` (program/mod.rs:201-202 PROGRAM_DERIVED_ACCOUNT_ID_PREFIX). */
+const PDA_PREFIX = pad32("/LEE/v0.2/AccountId/PDA/");
+/** `b"/LEE/SystemUpgrader/v1/Name\x00…"` (program/mod.rs:127-128 SYSTEM_PROGRAM_SEED_PREFIX). */
+const SYSTEM_PROGRAM_SEED_PREFIX = pad32("/LEE/SystemUpgrader/v1/Name");
+/** `SYSTEM_UPGRADER_ACCOUNT_ID`: `[0xFD; 32]` (program/mod.rs:32). */
+const SYSTEM_UPGRADER_ACCOUNT_ID = (/* @__PURE__ */ new Uint8Array(32)).fill(253);
 const MASTER_PUBLIC_KEY = utf8.encode("/LEE-Keys/v1/Master/Public");
+const CHILD_PUBLIC_PREFIX = utf8.encode("/LEE-Keys/v1/Child/Public");
 /** `NATIVE_TOKEN_PROGRAM_ID`: 32 zero bytes; an account's balance is its actor state under this. */
 const NATIVE_TOKEN_PROGRAM_ID = /* @__PURE__ */ new Uint8Array(32);
 /** `LeeTransaction` borsh variant tags. */
 const LEE_TX_PUBLIC = 0;
-/** The wallet's assumed worst base fee and data size (lez/wallet/src/lib.rs). */
+/** `KeyType` borsh discriminants (`signing_key.rs:17-19`). */
+const KEY_TYPE_SCHNORR = 0;
+const KeyType = Object.freeze({ Schnorr: 0 });
+/** `Authority` borsh discriminants (`execution_state.rs:46-49`). */
+const AUTHORITY_NONE = 0;
+const AUTHORITY_SIGNER = 1;
+const Authority = Object.freeze({
+	None: 0,
+	Signer: 1
+});
+/** The wallet's assumed worst base fee and data size (lez/wallet/src/lib.rs:92-98). */
 const ASSUMED_BASE_FEE = 64n;
 const ASSUMED_DATA_BYTES = 100000n;
 /** The gas limit the names CLI gives a public native transfer: the native token meters no cycles. */
@@ -4234,8 +3505,26 @@ function toBase64(bytes) {
 function fromBase64(text) {
 	return Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
 }
+/**
+* `AccountId::from_system_program_name` (`program/mod.rs:48-56, 77-89, 125-140, 199-214`):
+* `PDA([0xFD; 32], sha256("/LEE/SystemUpgrader/v1/Name\0…" ‖ name_padded_32))`.
+*/
+function systemProgramId(name) {
+	const raw = typeof name === "string" ? utf8.encode(name) : name;
+	if (!(raw instanceof Uint8Array) || raw.length === 0 || raw.length > 32) throw new Error("a system program name is 1 to 32 bytes");
+	const padded = /* @__PURE__ */ new Uint8Array(32);
+	padded.set(raw);
+	const seed = sha256(concat(SYSTEM_PROGRAM_SEED_PREFIX, padded));
+	return sha256(concat(PDA_PREFIX, SYSTEM_UPGRADER_ACCOUNT_ID, seed));
+}
 const bytesToNumber = (bytes) => BigInt(`0x${toHex(bytes) || "0"}`);
-const numberToBytes32 = (n) => fromHex(n.toString(16).padStart(64, "0"));
+/** `PublicAccountSecret::new`: any 32-byte root secret for a public account (`signing_keys.rs:23-62`). */
+function checkAccountSecret(bytes) {
+	if (!(bytes instanceof Uint8Array) || bytes.length !== 32) throw new Error("a public account secret is 32 bytes");
+	return bytes;
+}
+/** `PublicAccountSecret::new_os_random`: 32 random bytes (`signing_keys.rs:54-56`). */
+const randomAccountSecret = () => crypto.getRandomValues(/* @__PURE__ */ new Uint8Array(32));
 /** `PrivateKey::try_new`: a valid secp256k1 secret key (1..n-1, big-endian). */
 function checkPrivateKey(bytes) {
 	if (!(bytes instanceof Uint8Array) || bytes.length !== 32) throw new Error("a private key is 32 bytes");
@@ -4243,8 +3532,6 @@ function checkPrivateKey(bytes) {
 	if (n === 0n || n >= N) throw new Error("invalid private key");
 	return bytes;
 }
-/** `PrivateKey::new_os_random`: a fresh signing key. */
-const randomPrivateKey = () => schnorr.utils.randomSecretKey();
 /** `PublicKey::new_from_private_key`: the x-only (BIP-340) public key, 32 bytes. */
 const publicKeyOf = (privateKey) => schnorr.getPublicKey(checkPrivateKey(privateKey));
 /** `PublicKey::try_new`: whether 32 bytes are a valid x-only key (on the curve, below p). */
@@ -4257,52 +3544,100 @@ function isValidPublicKey(bytes) {
 		return false;
 	}
 }
-/** `AccountId::from(&PublicKey)`: sha256(ACCOUNT_ID_PREFIX ‖ x-only key). */
-function accountIdOf(publicKey) {
-	if (publicKey.length !== 32) throw new Error("a public key is 32 bytes (x-only)");
-	return sha256(concat(ACCOUNT_ID_PREFIX, publicKey));
-}
-/** The public account a signing key controls. */
-const accountIdOfPrivateKey = (privateKey) => accountIdOf(publicKeyOf(privateKey));
-/** Like k256 `Scalar::from_repr`: a big-endian scalar, refused when it isn't below n. */
-function scalar(bytes) {
-	const n = bytesToNumber(bytes);
-	if (n >= N) throw new Error("scalar out of range");
-	return n;
+/** `key_seed` (`signing_keys.rs:149-156`): sha256(DS_KEY_SEED ‖ secret ‖ key_type u8 ‖ nonce u128 LE). */
+function keySeed(secret, nonce, keyType = 0) {
+	checkAccountSecret(secret);
+	if (keyType !== 0) throw new Error(`unsupported key type: ${keyType}`);
+	return sha256(concat(KEY_SEED_PREFIX, secret, Uint8Array.of(keyType), new Writer().u128(nonce).done()));
 }
 /**
-* `PrivateKey::tweak`: sk + sha256(compressed public key of sk) mod n. The wallet
-* signs with, and names the account after, this tweaked key (`ssk`).
+* `Schnorr::keygen` (`schnorr.rs:23-33, 83-92`): tries `ctr = 0..=255` with
+* `sha256(DS_KEYGEN ‖ seed ‖ ctr)` until a valid secp256k1 scalar is found.
 */
-function tweak(sk) {
-	checkPrivateKey(sk);
-	const hashed = sha256(secp256k1.getPublicKey(sk, true));
-	return checkPrivateKey(numberToBytes32((bytesToNumber(sk) + scalar(hashed)) % N));
+function schnorrKeygen(seed) {
+	if (!(seed instanceof Uint8Array) || seed.length !== 32) throw new Error("seed must be 32 bytes");
+	for (let ctr = 0; ctr <= 255; ctr += 1) {
+		const candidate = sha256(concat(SCHNORR_KEYGEN_PREFIX, seed, Uint8Array.of(ctr)));
+		const n = bytesToNumber(candidate);
+		if (n > 0n && n < N) return {
+			secretKey: candidate,
+			publicKey: schnorr.getPublicKey(candidate)
+		};
+	}
+	throw new Error("no valid secp256k1 scalar found in 256 candidates");
 }
-function keyNode(sk, cc, cci) {
-	const ssk = tweak(sk);
-	const pk = publicKeyOf(ssk);
+/** `signing_key::<Schnorr>` (`signing_keys.rs:160-168`): the account's per-nonce keypair. */
+function signingKey(secret, nonce, keyType = 0) {
+	if (keyType !== 0) throw new Error(`unsupported key type: ${keyType}`);
+	return schnorrKeygen(keySeed(secret, nonce, keyType));
+}
+/** `Schnorr::commit` (`schnorr.rs:53-58`): sha256(DS_KEY ‖ x-only pk). */
+function schnorrKeyCommit(publicKey) {
+	if (!(publicKey instanceof Uint8Array) || publicKey.length !== 32) throw new Error("a public key is 32 bytes (x-only)");
+	return sha256(concat(SCHNORR_KEY_COMMIT_PREFIX, publicKey));
+}
+/** `SigningKeyState { key_type, key_commitment }` (`signing_key.rs:36-39`). */
+function signingKeyState(keyCommitment, keyType = 0) {
+	if (keyType !== 0) throw new Error(`unsupported key type: ${keyType}`);
+	if (!(keyCommitment instanceof Uint8Array) || keyCommitment.length !== 32) throw new Error("a key commitment is 32 bytes");
 	return {
-		sk,
-		ssk,
-		pk,
-		cc,
-		cci,
-		accountId: accountIdOf(pk)
+		keyType,
+		keyCommitment
 	};
 }
-/** `ChildKeysPublic::root`: HMAC-SHA512(key "/LEE-Keys/v1/Master/Public", seed). */
+/** borsh(`SigningKeyState`): 1-byte `KeyType` tag ‖ 32-byte `KeyCommitment` (33 bytes, `signing_key.rs:36-48`). */
+function encodeSigningKeyState(state) {
+	if (state instanceof Uint8Array) {
+		if (state.length !== 33) throw new Error(`a SigningKeyState is 33 bytes, got ${state.length}`);
+		if (state[0] !== 0) throw new Error(`unsupported key type: ${state[0]}`);
+		return state;
+	}
+	if (!state || typeof state !== "object") throw new Error("expected a SigningKeyState (33 bytes or { keyType, keyCommitment })");
+	const { keyType, keyCommitment } = state;
+	if (keyType !== 0) throw new Error(`unsupported key type: ${keyType}`);
+	return new Writer().u8(keyType).fixed(keyCommitment, 32).done();
+}
+/** `key_state(secret, key_type, nonce)` (`signing_keys.rs:184-186`). */
+function keyState(secret, nonce, keyType = 0) {
+	const { publicKey } = signingKey(secret, nonce, keyType);
+	return signingKeyState(schnorrKeyCommit(publicKey), keyType);
+}
+/** `initial_key(secret)` (`signing_keys.rs:172-174`): the account's nonce-0 `SigningKeyState`. */
+const initialKey = (secret) => keyState(secret, 0n, 0);
+/** 33-byte borsh encoding of `initial_key(secret)` (66 hex chars, as `SigningKeyState::Display`). */
+const initialKeyBytes = (secret) => encodeSigningKeyState(initialKey(secret));
+/**
+* `AccountId::for_initial_key` (`account.rs:258-278`):
+* `sha256(ACCOUNT_ID_PREFIX ‖ sha256(ACCOUNT_ID_SCHNORR_PREFIX ‖ key_commitment))`.
+*/
+function accountIdForInitialKey(state) {
+	const encoded = encodeSigningKeyState(state);
+	const keyHash = sha256(concat(ACCOUNT_ID_SCHNORR_PREFIX, encoded.subarray(1)));
+	return sha256(concat(ACCOUNT_ID_PREFIX, keyHash));
+}
+/** `public_account_id(secret)` (`signing_keys.rs:178-180`): the public account `secret` controls. */
+const publicAccountId = (secret) => accountIdForInitialKey(initialKey(secret));
+/** `ChildKeysPublic::root` (`keys_public.rs:17-25`): HMAC-SHA512(key "/LEE-Keys/v1/Master/Public", seed)[..32]. */
 function publicRoot(seed) {
 	if (seed.length !== 64) throw new Error("seed must be 64 bytes");
-	const hash = hmac(sha512, MASTER_PUBLIC_KEY, seed);
-	return keyNode(checkPrivateKey(hash.slice(0, 32)), hash.slice(32), null);
+	const secret = hmac(sha512, MASTER_PUBLIC_KEY, seed).slice(0, 32);
+	return {
+		secret,
+		cci: null,
+		accountId: publicAccountId(secret)
+	};
 }
-/** `ChildKeysPublic::nth_child`: HMAC-SHA512(cc, 0 ‖ sk ‖ cci BE), sk' = left + sk mod n. */
+/** `ChildKeysPublic::nth_child` (`keys_public.rs:28-39`): HMAC-SHA512(key parent.secret, "/LEE-Keys/v1/Child/Public" ‖ cci BE)[..32]. */
 function publicChild(parent, cci) {
 	const index = /* @__PURE__ */ new Uint8Array(4);
 	new DataView(index.buffer).setUint32(0, cci, false);
-	const hash = hmac(sha512, parent.cc, concat(Uint8Array.of(0), parent.sk, index));
-	return keyNode(checkPrivateKey(numberToBytes32((scalar(hash.subarray(0, 32)) + scalar(parent.sk)) % N)), hash.slice(32), cci);
+	const parentSecret = checkAccountSecret(parent instanceof Uint8Array ? parent : parent.secret);
+	const secret = hmac(sha512, parentSecret, concat(CHILD_PUBLIC_PREFIX, index)).slice(0, 32);
+	return {
+		secret,
+		cci,
+		accountId: publicAccountId(secret)
+	};
 }
 /**
 * `Signature::new_with_aux_random`: k256 `sign_prehash_with_aux_rand`, i.e. BIP-340
@@ -4379,15 +3714,18 @@ const feeDeclaration = (payer, gasLimit, tip, maxFee) => ({
 	tip: BigInt(tip),
 	maxFee: BigInt(maxFee)
 });
-/** `Actor::new(account_id, program_account_id)`: one account's state under one program. */
-const actor = (accountId, programAccountId) => ({
+/** `Actor::new(account_id, program_account_id)` with optional `Authority` (default `Authority.None`). */
+const actor = (accountId, programAccountId, authority = 0) => ({
 	accountId,
-	programAccountId
+	programAccountId,
+	authority
 });
-/** `Actor::native_balance(account_id)`. */
-const nativeBalance = (accountId) => actor(accountId, NATIVE_TOKEN_PROGRAM_ID);
-/** `PublicAccountEvidence::Key(public_key)`: the x-only key behind a plain account. */
-const keyEvidence = (publicKey) => ({ publicKey });
+/** An actor carrying `Authority.Signer` (1). */
+const signerActor = (accountId, programAccountId) => actor(accountId, programAccountId, 1);
+/** `Actor::native_balance(account_id)` with optional `Authority` (default `Authority.None`). */
+const nativeBalance = (accountId, authority = 0) => actor(accountId, NATIVE_TOKEN_PROGRAM_ID, authority);
+/** `PublicAccountEvidence::Key(SigningKeyState)`: the 33-byte initial signing key state behind a plain account. */
+const keyEvidence = (keyStateOrBytes) => ({ keyState: encodeSigningKeyState(keyStateOrBytes) });
 /** `PublicAccountEvidence::Pda { program, seed }`: where a program-derived account comes from. */
 const pdaEvidence = (program, seed) => ({
 	program,
@@ -4398,46 +3736,64 @@ function compareBytes(a, b) {
 	return 0;
 }
 const compareActors = (a, b) => compareBytes(a.accountId, b.accountId) || compareBytes(a.programAccountId, b.programAccountId);
-/** Sorted and without repeats, as borsh writes a BTreeSet. It refuses any other order on reading. */
-function sortedUnique(items, compare) {
-	const sorted = [...items].sort(compare);
-	return sorted.filter((item, i) => i === 0 || compare(sorted[i - 1], item) !== 0);
+/** Sorted and deduplicated as borsh writes `BTreeMap<Actor, Authority>`; `Authority.Signer` wins on merge. */
+function mergeActors(items) {
+	const sorted = items.map((item) => ({
+		accountId: item.accountId,
+		programAccountId: item.programAccountId,
+		authority: item.authority ?? 0
+	})).sort(compareActors);
+	const out = [];
+	for (const item of sorted) {
+		if (item.authority !== 0 && item.authority !== 1) throw new Error(`invalid authority: ${item.authority}`);
+		const prev = out[out.length - 1];
+		if (prev && compareActors(prev, item) === 0) {
+			if (item.authority === 1) prev.authority = 1;
+		} else out.push(item);
+	}
+	return out;
 }
 function writeActor(w, { accountId, programAccountId }) {
 	w.fixed(accountId, 32).fixed(programAccountId, 32);
 }
 function writeEvidence(w, evidence) {
-	if (evidence.publicKey) w.u8(0).fixed(evidence.publicKey, 32);
+	if (evidence.keyState) w.u8(0).fixed(encodeSigningKeyState(evidence.keyState), 33);
 	else w.u8(1).fixed(evidence.program, 32).fixed(evidence.seed, 32);
 }
 /**
-* borsh(`public_transaction::Message`), in field order:
-*   public_context.actors               Vec of account_id [32] ‖ program_account_id [32], sorted
-*   public_context.authorized_accounts  Vec of account_id [32], sorted: exactly the signers
+* borsh(`public_transaction::Message`) in LEZ v0.4.0 (`message.rs:19-45, 141-160`,
+* `transaction_message.rs:15-51`, `execution_state.rs:45-60`), in exact field order:
+*   public_context.actors               u32 len + sorted (account_id [32] ‖ program_account_id [32] ‖ authority u8)
+*   public_context.authorized_accounts  u32 len + sorted account_id [32]: exactly the signers
 *   public_context.promotions           u32 0: a public transaction promotes nothing
+*   public_context.private_signers      u32 0: a public transaction declares no private signers
 *   execution.root.to                   account_id [32] ‖ program_account_id [32]
 *   execution.root.message              Vec<u8>
-*   execution.fee                       0, or 1 ‖ payer [32] ‖ gas_limit u64 ‖ tip u64 ‖ max_fee u128
-*   nonces                              Vec of account_id [32] ‖ nonce u128, sorted by account
-*   admission_evidence                  Vec of 0 ‖ public key [32], or 1 ‖ program [32] ‖ seed [32]
+*   nonces                              u32 len + sorted (account_id [32] ‖ nonce u128 LE)
+*   fee                                 0, or 1 ‖ payer [32] ‖ gas_limit u64 ‖ tip u64 ‖ max_fee u128
+*   admission_evidence                  u32 len + (0 ‖ key_type u8 ‖ commitment [32]) or (1 ‖ program [32] ‖ seed [32])
 *
 * `to` is the actor the transaction starts at, `data` the message to it. `actors` is everything
 * the transaction reaches; `to` joins it. `nonces` is `[{ accountId, nonce }]`, one per signer.
 */
-function encodeMessage({ to, data, actors, nonces, fee = null, evidence = [] }) {
-	const declared = sortedUnique([to, ...actors], compareActors);
+function encodeMessage({ to, data, actors = [], nonces, fee = null, evidence = [] }) {
+	const declared = mergeActors([to, ...actors]);
 	const signers = [...nonces].sort((a, b) => compareBytes(a.accountId, b.accountId));
 	if (signers.some(({ accountId }, i) => i > 0 && compareBytes(signers[i - 1].accountId, accountId) === 0)) throw new Error("an account can only have one nonce");
 	const w = new Writer().u32(declared.length);
-	for (const declaredActor of declared) writeActor(w, declaredActor);
+	for (const declaredActor of declared) {
+		writeActor(w, declaredActor);
+		w.u8(declaredActor.authority);
+	}
 	w.u32(signers.length);
 	for (const { accountId } of signers) w.fixed(accountId, 32);
 	w.u32(0);
+	w.u32(0);
 	writeActor(w, to);
 	w.vec(data);
-	w.option(fee, (out, { payer, gasLimit, tip, maxFee }) => out.fixed(payer, 32).u64(gasLimit).u64(tip).u128(maxFee));
 	w.u32(signers.length);
 	for (const { accountId, nonce } of signers) w.fixed(accountId, 32).u128(nonce);
+	w.option(fee, (out, { payer, gasLimit, tip, maxFee }) => out.fixed(payer, 32).u64(gasLimit).u64(tip).u128(maxFee));
 	w.u32(evidence.length);
 	for (const item of evidence) writeEvidence(w, item);
 	return w.done();
@@ -4447,18 +3803,100 @@ function messageHash(message) {
 	const bytes = message instanceof Uint8Array ? message : encodeMessage(message);
 	return sha256(concat(MESSAGE_PREFIX, bytes));
 }
-/** `WitnessSet::for_message`: one (signature, public key) per key, in order. */
-function witnessSetFor(message, privateKeys, aux = null) {
-	const hash = messageHash(message);
-	return privateKeys.map((key) => ({
-		signature: signHash(hash, key, aux),
-		publicKey: publicKeyOf(key)
-	}));
+/**
+* `hash_with_keys` (`transaction_message.rs:155-167`):
+* `sha256(KEYED_MESSAGE_PREFIX ‖ message_hash ‖ next_0(33) ‖ ... ‖ next_k(33))`.
+*/
+function hashWithKeys(msgHash32, nextKeys) {
+	if (!(msgHash32 instanceof Uint8Array) || msgHash32.length !== 32) throw new Error("expected a 32-byte message hash");
+	return sha256(concat(KEYED_MESSAGE_PREFIX, msgHash32, ...nextKeys.map(encodeSigningKeyState)));
 }
-/** borsh(`WitnessSet`): u32 count, then signature [64] ‖ x-only public key [32] each. */
+/** `Message::message_with_keys` (`transaction_message.rs:100-102`): the 32-byte value each signer signs. */
+function messageWithKeys(message, nextKeys) {
+	return hashWithKeys(messageHash(message), nextKeys);
+}
+function buildWitnessSet(message, messageBytes, secrets, aux = null) {
+	const nonceByAccount = /* @__PURE__ */ new Map();
+	for (const { accountId, nonce } of message.nonces) {
+		const hex = toHex(accountId);
+		if (nonceByAccount.has(hex)) throw new Error("an account can only have one nonce");
+		nonceByAccount.set(hex, BigInt(nonce));
+	}
+	const signers = secrets.map((secret) => {
+		checkAccountSecret(secret);
+		const accountId = publicAccountId(secret);
+		return {
+			secret,
+			accountId,
+			hex: toHex(accountId)
+		};
+	}).sort((a, b) => compareBytes(a.accountId, b.accountId));
+	const expected = [...nonceByAccount.keys()].sort();
+	const actual = signers.map((s) => s.hex);
+	if (actual.length !== expected.length || actual.some((hex, i) => hex !== expected[i])) throw new Error("the signing keys are not the accounts with nonces");
+	const prepared = signers.map(({ secret, accountId, hex }) => {
+		const nonce = nonceByAccount.get(hex);
+		const { secretKey, publicKey } = signingKey(secret, nonce, 0);
+		return {
+			nonce,
+			secretKey,
+			publicKey,
+			current: signingKeyState(schnorrKeyCommit(publicKey), 0),
+			next: keyState(secret, nonce + 1n, 0)
+		};
+	});
+	const msgHash = messageHash(messageBytes);
+	const keyedHash = hashWithKeys(msgHash, prepared.map((p) => p.next));
+	return {
+		msgHash,
+		keyedHash,
+		witnesses: prepared.map(({ nonce, secretKey, publicKey, current, next }) => {
+			const schnorrAuth = concat(signHash(keyedHash, secretKey, aux), publicKey);
+			return {
+				authData: nonce === 0n ? concat(encodeSigningKeyState(current), schnorrAuth) : schnorrAuth,
+				next
+			};
+		})
+	};
+}
+/**
+* `WitnessSet::sign` (`witness_set.rs:19-58`, `signing_keys.rs:105-145`):
+* one `{ authData, next }` entry per signer in ascending `AccountId` (`nonces`) order.
+* At nonce 0 `authData` is 129 bytes (`initial_key(33) ‖ sig(64) ‖ pk_0(32)`); at nonce > 0
+* it is 96 bytes (`sig(64) ‖ pk_n(32)`). `next` is the 33-byte `SigningKeyState` at `nonce + 1`.
+*/
+function witnessSetFor(message, secrets, aux = null) {
+	return buildWitnessSet(message, encodeMessage(message), secrets, aux).witnesses;
+}
+/**
+* Verifies one witness entry against `storedKeyState` (or `null` at nonce 0, where the initial
+* key prefixes `authData` and must derive `accountId`), mirroring `scheme.rs:91-142`.
+*/
+function verifyWitnessEntry(storedKeyState, accountId, keyedHash, authData) {
+	let current;
+	let rest;
+	if (storedKeyState !== null && storedKeyState !== void 0) {
+		current = encodeSigningKeyState(storedKeyState);
+		rest = authData;
+	} else {
+		if (authData.length < 33) return false;
+		const prefix = authData.subarray(0, 33);
+		if (prefix[0] !== 0) return false;
+		if (!equalBytes(accountIdForInitialKey(prefix), accountId)) return false;
+		current = prefix;
+		rest = authData.subarray(33);
+	}
+	if (rest.length !== 96) return false;
+	const signature = rest.subarray(0, 64);
+	const publicKey = rest.subarray(64, 96);
+	if (!isValidPublicKey(publicKey)) return false;
+	if (!equalBytes(schnorrKeyCommit(publicKey), current.subarray(1))) return false;
+	return verifyHash(signature, keyedHash, publicKey);
+}
+/** borsh(`WitnessSet`): u32 count, then `(Vec<u8> auth_data ‖ SigningKeyState next[33])` each (`witness_set.rs:6-15`). */
 function encodeWitnessSet(witnesses) {
 	const w = new Writer().u32(witnesses.length);
-	for (const { signature, publicKey } of witnesses) w.fixed(signature, 64).fixed(publicKey, 32);
+	for (const { authData, next } of witnesses) w.vec(authData).fixed(encodeSigningKeyState(next), 33);
 	return w.done();
 }
 /** borsh(`PublicTransaction`): message ‖ witness_set. */
@@ -4468,22 +3906,20 @@ const publicTransactionHash = (txBytes) => sha256(txBytes);
 /** borsh(`LeeTransaction::Public(tx)`): tag 0, then the transaction. */
 const encodeLeeTransaction = (txBytes) => concat(Uint8Array.of(0), txBytes);
 /**
-* Signs `message` with `privateKeys`, which must be exactly the accounts in `message.nonces`
-* (`check_signers`), and assembles it.
-* Returns the message hash, the transaction bytes, the tagged wire bytes, their base64
-* (the `sendTransaction` parameter) and the hash the sequencer reports (hex).
+* Signs `message` with `secrets` (`PublicAccountSecret`s), which must be exactly the accounts in
+* `message.nonces` (`check_signers`), and assembles the transaction.
+* Returns the message bytes, message hash, keyed message hash, witnesses, transaction bytes,
+* tagged wire bytes, their base64 (the `sendTransaction` parameter) and the hex transaction hash.
 */
-function signPublicTransaction(message, privateKeys, aux = null) {
-	const signing = privateKeys.map((key) => toHex(accountIdOfPrivateKey(key))).sort();
-	const expected = message.nonces.map(({ accountId }) => toHex(accountId)).sort();
-	if (signing.join() !== expected.join()) throw new Error("the signing keys are not the accounts with nonces");
+function signPublicTransaction(message, secrets, aux = null) {
 	const messageBytes = encodeMessage(message);
-	const witnesses = witnessSetFor(messageBytes, privateKeys, aux);
+	const { msgHash, keyedHash, witnesses } = buildWitnessSet(message, messageBytes, secrets, aux);
 	const txBytes = encodePublicTransaction(messageBytes, witnesses);
 	const wire = encodeLeeTransaction(txBytes);
 	return {
 		messageBytes,
-		messageHash: messageHash(messageBytes),
+		messageHash: msgHash,
+		messageWithKeys: keyedHash,
 		witnesses,
 		txBytes,
 		wire,
@@ -4495,15 +3931,15 @@ function signPublicTransaction(message, privateKeys, aux = null) {
 const transferInstruction = (to, amount) => new Writer().u8(0).fixed(to, 32).u128(amount).done();
 /**
 * The message the wallet's `NativeTokenTransfer::transfer` builds: sent to the sender's balance
-* actor, both balances declared, the sender's nonce, the sender paying the fee. The recipient's
-* credit runs in the same transaction because its balance is declared. An account that isn't on
-* the chain yet is admitted only with `evidence`: `[keyEvidence(its public key)]`.
+* actor (with `Authority.Signer`), both balances declared, the sender's nonce, the sender paying
+* the fee. An account that isn't on the chain yet is admitted only with `evidence`:
+* `[keyEvidence(initialKey(recipientSecret))]`.
 */
 function transferMessage({ from, to, nonce, amount, gasLimit = NATIVE_TRANSFER_GAS_LIMIT, tip = 0n, maxFee = null, evidence = [] }) {
 	return {
-		to: nativeBalance(from),
+		to: nativeBalance(from, 1),
 		data: transferInstruction(to, amount),
-		actors: [nativeBalance(to)],
+		actors: [nativeBalance(from, 1), nativeBalance(to, 0)],
 		nonces: [{
 			accountId: from,
 			nonce: BigInt(nonce)
@@ -4512,10 +3948,11 @@ function transferMessage({ from, to, nonce, amount, gasLimit = NATIVE_TRANSFER_G
 		evidence
 	};
 }
-/** A signed public transfer from the account of `privateKey`. */
-function signTransfer({ privateKey, to, nonce, amount, gasLimit, tip, maxFee, evidence, aux = null }) {
+/** A signed public transfer from the account of `secret` (or `privateKey` alias). */
+function signTransfer({ secret, privateKey, to, nonce, amount, gasLimit, tip, maxFee, evidence, aux = null }) {
+	const accountSecret = secret ?? privateKey;
 	return signPublicTransaction(transferMessage({
-		from: accountIdOfPrivateKey(privateKey),
+		from: publicAccountId(accountSecret),
 		to,
 		nonce,
 		amount,
@@ -4523,7 +3960,7 @@ function signTransfer({ privateKey, to, nonce, amount, gasLimit, tip, maxFee, ev
 		tip,
 		maxFee,
 		evidence
-	}), [privateKey], aux);
+	}), [accountSecret], aux);
 }
 /**
 * The fee reserve the sequencer holds from the payer (`fee_reserve`): gas_limit × base_fee_exec
@@ -4602,6 +4039,8 @@ const accountExists = async (url, accountId) => await getAccountView(url, native
 const sendTransaction = (url, signed) => rpc(url, "sendTransaction", [typeof signed === "string" ? signed : signed.base64 ?? toBase64(signed)]);
 /** `getTransaction`: null, or [base64 transaction, block ID] once it is in a block. */
 const getTransaction = (url, hashHex) => rpc(url, "getTransaction", [hashHex]);
+/** `getTransactionReceipt` (added in LEZ v0.4.0): null, or the transaction's receipt. */
+const getTransactionReceipt = (url, hashHex) => rpc(url, "getTransactionReceipt", [hashHex]);
 /**
 * Polls `getTransaction` until `hashHex` is in a block; resolves to the block ID. A block holds
 * failed transactions too, so callers check the effect (balances).
@@ -4617,4 +4056,4 @@ async function waitForTransaction(url, hashHex, { timeoutMs = 18e4, intervalMs =
 	throw new RpcError(`transaction ${hashHex} was not in a block after ${Math.round(timeoutMs / 1e3)} s`);
 }
 //#endregion
-export { ACCOUNT_ID_PREFIX, LEE_TX_PUBLIC, MESSAGE_PREFIX, NATIVE_TOKEN_PROGRAM_ID, NATIVE_TRANSFER_GAS_LIMIT, RpcError, Writer, accountExists, accountIdOf, accountIdOfPrivateKey, actor, base58Decode, base58Encode, checkPrivateKey, concat, encodeLeeTransaction, encodeMessage, encodePublicTransaction, encodeWitnessSet, equalBytes, feeDeclaration, feeReserve, formatAccountId, fromBase64, fromHex, getAccountBalance, getAccountView, getAccountsNonces, getFeeState, getTransaction, isValidPublicKey, keyEvidence, maxFeeFor, messageHash, nativeBalance, parseAccountId, pdaEvidence, publicChild, publicKeyOf, publicRoot, publicTransactionHash, randomPrivateKey, rpc, sendTransaction, sha256, signHash, signPublicTransaction, signTransfer, toBase64, toHex, transferInstruction, transferMessage, tweak, verifyHash, waitForTransaction, witnessSetFor };
+export { ACCOUNT_ID_PREFIX, ACCOUNT_ID_SCHNORR_PREFIX, AUTHORITY_NONE, AUTHORITY_SIGNER, Authority, KEYED_MESSAGE_PREFIX, KEY_SEED_PREFIX, KEY_TYPE_SCHNORR, KeyType, LEE_TX_PUBLIC, MESSAGE_PREFIX, NATIVE_TOKEN_PROGRAM_ID, NATIVE_TRANSFER_GAS_LIMIT, PDA_PREFIX, RpcError, SCHNORR_KEYGEN_PREFIX, SCHNORR_KEY_COMMIT_PREFIX, SYSTEM_PROGRAM_SEED_PREFIX, SYSTEM_UPGRADER_ACCOUNT_ID, Writer, accountExists, accountIdForInitialKey, actor, base58Decode, base58Encode, checkAccountSecret, checkPrivateKey, concat, encodeLeeTransaction, encodeMessage, encodePublicTransaction, encodeSigningKeyState, encodeWitnessSet, equalBytes, feeDeclaration, feeReserve, formatAccountId, fromBase64, fromHex, getAccountBalance, getAccountView, getAccountsNonces, getFeeState, getTransaction, getTransactionReceipt, hashWithKeys, initialKey, initialKeyBytes, isValidPublicKey, keyEvidence, keySeed, keyState, maxFeeFor, messageHash, messageWithKeys, nativeBalance, parseAccountId, pdaEvidence, publicAccountId, publicChild, publicKeyOf, publicRoot, publicTransactionHash, randomAccountSecret, rpc, schnorrKeyCommit, schnorrKeygen, sendTransaction, sha256, signHash, signPublicTransaction, signTransfer, signerActor, signingKey, signingKeyState, systemProgramId, toBase64, toHex, transferInstruction, transferMessage, verifyHash, verifyWitnessEntry, waitForTransaction, witnessSetFor };

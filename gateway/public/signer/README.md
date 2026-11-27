@@ -1,8 +1,8 @@
 # Names money-key signer
 
 A self-contained page, served on its **own origin** (a separate subdomain in
-production), embedded by the Names app as an iframe. It owns the wallet's secp256k1
-key: generates it, encrypts it with a **passkey** (WebAuthn PRF → AES-GCM, `vault.js`)
+production), embedded by the Names app as an iframe. It owns the wallet's LEZ account
+secret: generates it, encrypts it with a **passkey** (WebAuthn PRF → AES-GCM, `vault.js`)
 in this origin's `localStorage`, and only ever decrypts it into memory for the span of
 one signature. The private key **never** crosses `postMessage`.
 
@@ -46,7 +46,8 @@ and the signer origin to `http://localhost:8002`. Click **Connect**, then:
 
 1. **getAccount** → `{ account: null, canPersist: true }` before a key exists.
 2. **createAccount** → the iframe overlay appears with its own "Create your wallet key"
-   prompt; approving triggers the passkey. Returns `{ accountId, publicKey }`.
+   prompt; approving triggers the passkey. Returns `{ accountId, publicKey }` (on LEZ v0.4.0
+   `publicKey` is the account's 33-byte initial key, hex, as the faucet takes it).
 3. **getAccount** again → now returns the account.
 4. Fund that `accountId` on the LEZ (faucet/CLI), then **signAndSend** with a `to`,
    an `amount`, and `rpc` `https://testnet.lez.logos.co` → the iframe shows "Approve
