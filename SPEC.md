@@ -17,7 +17,16 @@ The registry is built so that knowing a name is the only way to find it.
 - **What a name resolves to is sealed**: encrypted under a key that is also
   derived from the name (section 5). The registry program stores the bytes and
   cannot read them.
-- **There is no list of names** and nothing links one record to another.
+- **There is no list of names** and nothing links one record to another, except
+  for two explicit opt-in/site-level public directories introduced in v8:
+  - **Marketplace directory (`MarketBucket`):** populated only when a seller
+    explicitly passes `display_name: Some(name)` on `List` (omitting it creates
+    an unlisted OTC sale).
+  - **Sites directory (`SiteBucket`):** populated by default when a top-level
+    name publishes a website, with an explicit owner opt-out (`discover=off`).
+    Names without a website and names published with `discover=off` never enter
+    `SiteBucket`. Even when listed, a private holder's `AccountId` remains hidden
+    behind its unlinkable `OwnerTag`.
 
 What this does not hide:
 
@@ -176,6 +185,10 @@ state per program, and the pair of account and program is an *actor*.
 | Settings | `PDA(program, SHA-256("logos-names/v5/config"))` |
 | Commitment | `PDA(program, SHA-256("logos-names/v5/commit/" ‖ c))`, section 8 |
 | Deposit (the native balance is the data) | `PDA(program, SHA-256("logos-names/v5/deposit/" ‖ slot_id))`, section 8.2 |
+| Market directory bucket (`0..16`, v8) | `PDA(program, SHA-256("logos-names/v8/market/" ‖ bucket))`, `bucket = slot_id[0] & 0x0f` |
+| Site directory header (v8) | `PDA(program, SHA-256("logos-names/v8/sites-meta"))` |
+| Site directory bucket (`0..16`, `page: u16 LE`, v8) | `PDA(program, SHA-256("logos-names/v8/sites/" ‖ bucket ‖ page_le))` |
+| Tied name NFT record (in `settings.nft_program`, v8) | `PDA(nft_program, SHA-256("lez-nft/v3/token/" ‖ token_id))`, `token_id = SHA-256("logos-names/v8/nft-token/" ‖ slot_id ‖ mint_generation)` |
 
 Keying a subname's record and page PDAs by both `parent_slot_id` and `sub_id`
 isolates every parent's subname namespace on chain: holding `alice` can never
@@ -215,12 +228,16 @@ UTF-8 bytes; `Vec<u8>` is a `u32` length and bytes; `Option<T>` is one tag byte
 (`0` none, `1` some) then `T`; fixed arrays `[T; N]` are `N` consecutive items
 with no length prefix; integers are little-endian; `AccountId` is 32 raw bytes.
 
-On the chain (version 7):
+On the chain (version 8):
 
 ```rust
 struct SubnameSale   { price: u128, payout: AccountId }
+struct Listing       { price: u128, pay_to: AccountId, expires_at: Option<u64>,
+                       nonce: u64, in_market: bool }
 struct NameRecord    { version: u8, owner: [u8; 32], expires: u64, sealed: Vec<u8>, claimed: bool,
-                       price_tier: u8, generation: [u8; 32], subname_sale: Option<SubnameSale> }
+                       price_tier: u8, generation: [u8; 32], subname_sale: Option<SubnameSale>,
+                       nft_token_id: [u8; 32], nft_shielded: bool, listing: Option<Listing>,
+                       listing_nonce: u64, site_listed: Option<u16> }
 enum   SubnameKind   { Permanent, Revocable { parent_generation: [u8; 32] } }
 struct SubnameRecord { version: u8, owner: [u8; 32], kind: SubnameKind, sealed: Vec<u8> }
 struct Commitment    { version: u8, made: u64, public: bool }
@@ -228,7 +245,16 @@ struct Page          { version: u8, sealed: Vec<u8> }
 struct PrimaryName   { version: u8, name: String }
 struct Settings      { version: u8, admin: AccountId, treasury: AccountId,
                        prices: [[u128; 4]; 3], mode: u8, deposits: [u128; 2],
-                       claims_root: [u8; 32], claims_until: u64, claims_program: AccountId }
+                       claims_root: [u8; 32], claims_until: u64, claims_program: AccountId,
+                       premium_start: u128, nft_program: AccountId }
+struct MarketEntry   { id: [u8; 32], price: u128, pay_to: AccountId, expires_at: Option<u64>,
+                       name_expires: u64, price_tier: u8, nonce: u64, nft_token_id: [u8; 32],
+                       display_name: Option<String> }
+struct MarketBucket  { version: u8, entries: Vec<MarketEntry> } // <= 64 entries
+struct SiteEntry     { id: [u8; 32], name: String, title: String, updated_at: u64, name_expires: u64 }
+struct SiteBucket    { version: u8, entries: Vec<SiteEntry> }   // <= 32 entries
+struct SiteDirHeader { version: u8, active_page: [u16; 16], total_listed: u32 }
+enum   SiteDirOp     { Keep, Upsert { name: String, title: String, page: u16, now: u64 }, Remove }
 ```
 
 - `NameRecord.sealed` and `SubnameRecord.sealed` are at most 12,288 bytes;
@@ -393,6 +419,7 @@ application-defined and should be namespaced, for example `myapp.setting`.
 | `blockchain` | The holder's Logos Blockchain public key, 64 lowercase hex characters, where `names chain send <amount> <name>` sends. It is followed through a `forward` like any payment. |
 | `forward` | Another name this one points to, written bare (`names`). See [Forwarding](#forwarding). |
 | `app.<module>` | An app this name publishes: JSON with the package's root hash, as the LEZ Program Registry defines it ([APPS.md](https://github.com/jefdiesel/lez-program-registry/blob/main/docs/APPS.md)). |
+| `discover` | Site directory opt-out flag (`discover=off`, trimmed and case-insensitive, mirroring `gateway=off`). Publishing a top-level website lists it in `SiteBucket` by default unless `discover=off` is set (section 8.10). |
 
 ### Forwarding
 
@@ -444,37 +471,56 @@ What a transaction sends the registry is a borsh `Message`, and a client only ev
 sends its first variant:
 
 ```rust
-enum Message { Instruction(Instruction), Effect(Effect) }
+enum Message {
+    Instruction(Instruction),                                // 0
+    Effect(Effect),                                          // 1
+    RequireHolder { tag: [u8; 32] },                         // 2
+    NftTransferHook {                                        // 3 (v8: from settings.nft_program's token PDA only)
+        id: [u8; 32],
+        token_id: [u8; 32],
+        expected_old_owner: [u8; 32],
+        new_owner: [u8; 32],
+        now: u64,
+    },
+}
 ```
 
 So the bytes of a transaction's message are the tag `00`, then the `Instruction`.
 `Effect` is how the registry talks to itself, and it refuses one from anyone else.
+`NftTransferHook` is accepted only on `record_address(program, &id)` from `(nft_token_address(settings.nft_program, token_id), settings.nft_program)`.
 
 `Instruction` is a borsh enum, in this order (the variant index is its first byte).
 `id` is 32 raw bytes.
 
 | # | Instruction | Fields | Actors to declare, beyond the signer's (section 8.3) |
 |---|---|---|---|
-| 0 | `Register` | `id` (base id), `sealed: Vec<u8>, term: u8, fee: u128, treasury: Option<AccountId>, now: u64, secret: [u8; 32], deposit: bool, length: LengthProof, price_tier: u8` | record (`slot_id`), page (`slot_id`), settings, commitment (`slot_id`), and if `fee` is not 0 the signer's balance and the balance of the treasury (fee mode) or the name's deposit account (deposit mode) |
-| 1 | `Renew` | `id` (`slot_id`), `term: u8, fee: u128, treasury: Option<AccountId>, now: u64` | record, settings, and if `fee` is not 0 the signer's balance and the treasury's |
-| 2 | `SetRecord` | `id` (`slot_id`), `sealed: Vec<u8>` | record |
-| 3 | `SetPage` | `id` (`slot_id`), `sealed: Vec<u8>` | record, page |
-| 4 | `Transfer` | `id` (`slot_id`), `new_owner: [u8; 32]` (the new holder's owner tag) | record, page |
-| 5 | `Release` | `id` (`slot_id`), `refund: u128` | record, page, and if `refund` is not 0 the deposit account's balance and the signer's |
+| 0 | `Register` | `id` (base id), `sealed: Vec<u8>, term: u8, fee: u128, treasury: Option<AccountId>, now: u64, secret: [u8; 32], deposit: bool, length: LengthProof, price_tier: u8` | record (`slot_id`), page (`slot_id`), settings, commitment (`slot_id`), `(new_token_pda, nft_program)`, plus `(old_token_pda, nft_program)` / market bucket / site bucket + header if overwriting a lapsed name, plus balances if `fee > 0` |
+| 1 | `Renew` | `id` (`slot_id`), `term: u8, fee: u128, treasury: Option<AccountId>, now: u64` | record, settings, `(token_pda, nft_program)`, plus market bucket if listed in market, site bucket if `site_listed`, plus balances if `fee > 0` |
+| 2 | `SetRecord` | `id` (`slot_id`), `sealed: Vec<u8>, site_dir: SiteDirOp` | record, plus site bucket + site dir header when `site_dir` is `Upsert` or `Remove` (on a listed name) |
+| 3 | `SetPage` | `id` (`slot_id`), `sealed: Vec<u8>, site_dir: SiteDirOp` | record, page, plus site bucket + site dir header when `site_dir` is `Upsert` or `Remove` |
+| 4 | `Transfer` | `id` (`slot_id`), `new_owner: [u8; 32]`, `now: u64` | record, page, settings, `(token_pda, nft_program)`, plus market bucket if `in_market`, site bucket + header if `site_listed` |
+| 5 | `Release` | `id` (`slot_id`), `refund: u128` | record, page, settings, `(token_pda, nft_program)`, plus market bucket / site bucket + header if listed, plus deposit & signer balances if `refund > 0` |
 | 6 | `SetPrimary` | `name: String` (top-level or `label.parent`) | none: it writes the signer's own actor |
-| 7 | `Configure` | `admin: AccountId, treasury: AccountId, prices: [[u128; 4]; 3], mode: u8, deposits: [u128; 2], claims_root: [u8; 32], claims_until: u64, claims_program: AccountId` | settings; the signer is the program's own account the first time, then the admin |
+| 7 | `Configure` | `admin, treasury, prices: [[u128; 4]; 3], mode: u8, deposits: [u128; 2], claims_root: [u8; 32], claims_until: u64, claims_program: AccountId, premium_start: u128, nft_program: AccountId` | settings; signer is the program's own account first time (permanently binding `nft_program`), then `admin` |
 | 8 | `Commit` | `commitment: [u8; 32], now: u64` | commitment (private path: 10-minute window, 15-minute minimum age) |
-| 9 | `Claim` | `id` (base id), `sealed: Vec<u8>, now: u64, proof: Vec<[u8; 32]>, price_tier: u8` | record (`slot_id`), page (`slot_id`), settings |
+| 9 | `Claim` | `id` (base id), `sealed: Vec<u8>, now: u64, proof: Vec<[u8; 32]>, price_tier: u8` | record (`slot_id`), page (`slot_id`), settings, `(new_token_pda, nft_program)`, plus `(old_token_pda, nft_program)` / market bucket / site bucket + header if overwriting |
 | 10 | `CommitPublic` | `commitment: [u8; 32], now: u64` | commitment (public path: 1-minute window, 5-minute minimum age) |
 | 11 | `SetPrice` | `price_tier: u8, term: u8, price: u128` | settings; signer must be the admin |
 | 12 | `SetSubnameSale` | `id` (parent `slot_id`), `sale: Option<SubnameSale>` | parent record |
 | 13 | `CreateSubname` | `parent_id` (`slot_id`), `sub_id`, `owner: [u8; 32]`, `revocable: bool`, `sealed: Vec<u8>`, `now: u64` | parent record, subname record, subname page |
 | 14 | `RevokeSubname` | `parent_id`, `sub_id`, `now: u64` | parent record, subname record, subname page |
-| 15 | `BuySubname` | `parent_id`, `sub_id`, `sealed: Vec<u8>`, `price: u128`, `payout: Option<AccountId>`, `now: u64`, `secret: [u8; 32]` | parent record, subname record, subname page, commitment, and if `price` is not 0 the signer's balance and `payout`'s balance |
+| 15 | `BuySubname` | `parent_id`, `sub_id`, `sealed: Vec<u8>`, `price: u128`, `payout: Option<AccountId>`, `now: u64`, `secret: [u8; 32]` | parent record, subname record, subname page, commitment, and if `price > 0` signer's and `payout`'s balances |
 | 16 | `SetSubnameRecord` | `parent_id`, `sub_id`, `sealed: Vec<u8>`, `now: Option<u64>` | subname record, plus parent record when `now` is `Some` (required for revocable) |
 | 17 | `SetSubnamePage` | `parent_id`, `sub_id`, `sealed: Vec<u8>`, `now: Option<u64>` | subname record, subname page, plus parent record when `now` is `Some` |
 | 18 | `TransferSubname` | `parent_id`, `sub_id`, `new_owner: [u8; 32]`, `now: Option<u64>` | subname record, subname page, plus parent record when `now` is `Some` |
 | 19 | `ReleaseSubname` | `parent_id`, `sub_id`, `now: Option<u64>` | subname record, subname page, plus parent record when `now` is `Some` |
+| 20 | `SetPremium` | `premium_start: u128` | settings; signer must be the admin |
+| 21 | `List` | `id` (`slot_id`), `price: u128`, `pay_to: AccountId`, `expires_at: Option<u64>`, `now: u64`, `display_name: Option<String>` | record, plus market bucket when `display_name.is_some()` or replacing an `in_market` listing |
+| 22 | `Cancel` | `id` (`slot_id`) | record, plus market bucket if `in_market` |
+| 23 | `Buy` | `id` (`slot_id`), `price: u128`, `pay_to: AccountId`, `treasury: AccountId`, `expected_nonce: u64`, `now: u64` | record, page, settings, `(token_pda, nft_program)`, signer balance, `pay_to` balance, `treasury` balance, plus market bucket if `in_market` and site bucket + header if `site_listed` |
+| 24 | `ShieldDeed` | `id` (`slot_id`), `deed_account: AccountId`, `now: u64` | record, settings, `(token_pda, nft_program)`, private `deed_account` witness |
+| 25 | `UnshieldDeed` | `id` (`slot_id`) | record, settings, `(token_pda, nft_program)`, private `deed_account` witness |
+| 26 | `RefreshShieldedDeed` | `id` (`slot_id`) | record, settings, `(token_pda, nft_program)`, private `deed_account` witness |
 
 Rules:
 
@@ -785,6 +831,111 @@ A top-level name holder (`parent`) may create or sell one-level subnames
     receiving account already admitted on chain, and can shield those proceeds
     whenever desired.
 
+### 8.7 Tied Top-Level Name NFTs (`lez_nft` v3 Lockstep, v8)
+
+Every top-level name has a tied 1-of-1 NFT in our standalone `lez_nft` v3
+program (`settings.nft_program`, bound once on initial `Configure` and
+immutable thereafter; must not be the native token program or the registry
+itself). **Subnames do not receive NFTs.** The deployer MUST run `Configure`
+before opening public registration so every registered name is paired with its
+NFT from birth.
+
+- **Single source of truth:** `names_core` is authoritative for name validity,
+  expiry, grace, `generation`, sealed profile/page, listings, and canonical
+  `owner`.
+- **Unified `OwnerTag`:** `lez_nft` v3 computes `owner_tag(&linked.target, account)`
+  (`SHA-256("logos-names/v5/owner" ‖ slot_id ‖ account)`) for linked tokens, so
+  `NameRecord.owner` and `NftRecord.owner` hold the identical 32-byte tag.
+- **Token ID lifecycle:** `token_id = SHA-256("logos-names/v8/nft-token/" ‖ slot_id ‖ mint_generation)`.
+  Stays fixed across `Transfer`, `Buy`, `NftTransferHook`, and `Renew`; rotates
+  on re-registration after grace or legacy `Claim` (atomically burning the old
+  token and minting the new token in the same transaction); burned on `Release`.
+- **Registry → NFT (`lez_nft::Message::AuthoritySync`, tag `0x02`):** Always
+  emitted by `Actor::new(settings_address(REGISTRY), REGISTRY)` to
+  `Actor::new(nft_token_address(nft_program, token_id), nft_program)` with one
+  of 7 `NftAuthorityOp` variants: `Mint` (`0`), `Transfer` (`1`), `Burn` (`2`),
+  `SetExpiry` (`3`), `Shield` (`4`), `Unshield` (`5`), `RefreshShielded` (`6`).
+- **NFT → Registry (`names_core::Message::NftTransferHook`, tag `0x03`):** Plain
+  transfers initiated on `lez_nft` send `NftTransferHook` to
+  `(record_address(REGISTRY, &id), REGISTRY)` (no callback back to `lez_nft`,
+  zero cycles). `names_core` verifies `from == (nft_token_address(settings.nft_program, token_id), settings.nft_program)`,
+  checks active/unshielded/owner/token match, clears profile, page, subname
+  sales, listing, and site directory entry, advances `generation`, updates
+  `owner`, and bounds the tx to `[now, now + TIME_WINDOW_MS)`. Plain transfers
+  in either direction charge **0 protocol fee**.
+- **Opt-in LP-0001 Shielded Deeds:** `ShieldDeed { id, deed_account, now }`
+  moves custody into a private PDA `deed_account = for_private_pda(nft_program, nft_deed_seed(token_id), npk, vpk)`
+  (without exposing `npk`/`vpk` in public calldata). Refused if listed, lapsed,
+  already shielded, or unclaimed before `claims_until`. While `nft_shielded`,
+  `Transfer`, `NftTransferHook`, `List`, `Buy`, and `Release` are refused until
+  `UnshieldDeed { id }` is called. `Renew` still succeeds publicly and
+  `RefreshShieldedDeed { id }` updates `PrivateDeed.expires`.
+
+### 8.8 Atomic Secondary Sales (`List`, `Cancel`, `Buy`, v8)
+
+Top-level names support atomic fixed-price resale with a **fixed 2.5% (`1 / 40`)
+treasury fee** (`sale_split(price) = (price - fee, fee)` where
+`fee = price.div_ceil(40)`, `MIN_SALE_PRICE = 40`):
+
+- **`List`:** Signed by active, unshielded holder. Increments monotonic
+  `NameRecord.listing_nonce` (defeating price-hike / relist front-running).
+  `pay_to` is an admitted public `AccountId` (a fresh unlinked public account
+  for private sellers). If `display_name: Some(name)` (validated as a top-level
+  label), inserts/updates `MarketBucket(slot_id[0] & 0x0f)` (≤ 64 entries/bucket,
+  lazily pruning expired entries); if `None`, creates an unlisted OTC sale
+  touching no market bucket. Clients reading `MarketBucket` MUST verify
+  `tiered_id(Argon2id(display_name), price_tier) == entry.id` locally and drop spoofs.
+- **`Cancel`:** Signed by holder (allowed even during grace). Clears `listing`
+  and removes from `MarketBucket` if `in_market`.
+- **`Buy`:** Signed by buyer (public or private), bounded to `[now, now + 10m)`.
+  Commits to exact `(price, pay_to, treasury, expected_nonce)`. Refuses self-buy,
+  shielded deeds, lapsed names (`now >= expires`), expired listings, or stale
+  nonces. Transfers `price - fee` (97.5%) to `pay_to` and `fee` (2.5%) to
+  `settings.treasury` (or a single transfer of `price` when `pay_to == treasury`),
+  clears profile/page/subname_sale/listing/site_listed, advances `generation`,
+  and syncs `NftAuthorityOp::Transfer` to `lez_nft` atomically in one transaction.
+- **Listing death:** Listings die immediately on `Transfer`, `NftTransferHook`,
+  `Release`, `Claim`, `Buy`, listing expiry, name expiry (`now >= expires`), and
+  are permanently cleared on `Renew` during grace so a dead listing never resurrects.
+
+### 8.9 Re-Release Premium (21-Day Falling Dutch Auction, v8)
+
+In fee mode (`MODE_FEE`), when a lapsed term name passes its 30-day grace period
+(`now >= held.expires + GRACE_MS`), re-registration during the next 21 days
+(`PREMIUM_DURATION_MS = 21 * DAY_MS`) owes `base_price + rerelease_premium(settings.premium_start, elapsed)`:
+
+- Halves every 24 hours with linear intra-day interpolation, reaching `0`
+  continuously at day 21 (`DEFAULT_PREMIUM_START = 4_000_000_000`; `0` disables).
+- Admin-adjustable via `Configure` or `SetPremium`.
+- Paid 100% to `settings.treasury` inside the single `Register` transfer.
+- Never applies to never-registered names, voluntarily released names (`Release`
+  empties the record), `MODE_DEPOSIT`, or treasury self-registrations.
+- Fee-mode `RequirePrice` enforces `fee >= owed` when `owed > 0` (and `fee == 0`
+  when `owed == 0`), allowing in-flight private proofs to succeed if the admin
+  lowers prices or `premium_start` mid-proof while rejecting underpayment.
+
+### 8.10 Sites Directory (`SiteBucket` & `SiteDirHeader`, Option A, v8)
+
+Top-level names that publish a website are discoverable by default via 16
+paginated `SiteBucket(bucket, page)` PDAs (`bucket = slot_id[0] & 0x0f`,
+`MAX_SITE_BUCKET_ENTRIES = 32` per page) and one `SiteDirHeader` PDA:
+
+- **Holder control:** `SetRecord` and `SetPage` carry `site_dir: SiteDirOp`
+  (`Keep`, `Upsert { name, title, page, now }`, or `Remove`).
+  - Routine edits and `discover=off` sites pass `SiteDirOp::Keep` (zero extra
+    actors or write gas).
+  - `Upsert` validates `name` as a top-level label (`<= 32` B) and `title`
+    (`<= 64` B, no ASCII control bytes), bounds `[now, now + 10m)`, refuses
+    lapsed names, lazily prunes entries past their 30-day grace period, enforces
+    `page <= SiteDirHeader.active_page[bucket]` (preventing pagination griefing),
+    and advances `active_page[bucket]` when the frontier page reaches 32 live entries.
+  - `Remove` deletes the entry and decrements `SiteDirHeader.total_listed`.
+- **Automatic lifecycle sync:** `Transfer`, `NftTransferHook`, `Buy`, `Release`,
+  `Claim`, and lapsed `Register` atomically remove any `SiteEntry` when
+  `record.site_listed.is_some()`. `Renew` updates `SiteEntry.name_expires`.
+- **Mandatory client spoof check:** Readers MUST normalize `entry.name`, run
+  Argon2id + `tiered_id`, and drop any entry whose derived `slot_id != entry.id`.
+
 ## 9. Events
 
 The registry emits LEZ program events. The selector is the first 8 bytes of
@@ -802,6 +953,11 @@ The registry emits LEZ program events. The selector is the first 8 bytes of
 | `logos_names::SubnameRevoked` | *(compute via `event_selector`)* | `sub_id: NameId` |
 | `logos_names::SubnameTransferred` | *(compute via `event_selector`)* | `sub_id: NameId` |
 | `logos_names::SubnameReleased` | *(compute via `event_selector`)* | `sub_id: NameId` |
+| `logos_names::Listed` | *(compute via `event_selector`)* | `id: NameId, price: u128, expires_at: Option<u64>, nonce: u64` |
+| `logos_names::ListingCancelled` | *(compute via `event_selector`)* | `id: NameId` |
+| `logos_names::Sold` | *(compute via `event_selector`)* | `id: NameId, price: u128, fee: u128` |
+| `logos_names::SiteListed` | *(compute via `event_selector`)* | `id: NameId, updated_at: u64` |
+| `logos_names::SiteUnlisted` | *(compute via `event_selector`)* | `id: NameId` |
 
 Events are emitted before the registry has checked the record, so an event can
 exist for a change that was refused: they are hints to confirm against the
@@ -888,12 +1044,13 @@ transaction's message is `00` followed by the encoding:
 |---|---|
 | `Register { id, sealed: [ee, ff], term: 1, fee: 100000, treasury: None, now: 1700000000000, secret: 32 × 0x5a, deposit: false, length: Membership { index: 7, tier: 3, path: [] }, price_tier: 2 }` | `00` ‖ id ‖ `02000000eeff` ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `00` ‖ `0068e5cf8b010000` ‖ `5a` × 32 ‖ `00` ‖ `00` ‖ `07000000` ‖ `03` ‖ `00000000` ‖ `02` |
 | `Renew { id, term: 2, fee: 0, treasury: None, now: 1700000000000 }` | `01` ‖ id ‖ `02` ‖ `00` × 16 ‖ `00` ‖ `0068e5cf8b010000` |
-| `SetRecord { id, sealed: [ee] }` | `02` ‖ id ‖ `01000000ee` |
-| `SetPage { id, sealed: [] }` | `03` ‖ id ‖ `00000000` |
-| `Transfer { id, new_owner: 32 × 0x02 }` | `04` ‖ id ‖ `02` × 32 |
+| `SetRecord { id, sealed: [ee], site_dir: Keep }` | `02` ‖ id ‖ `01000000ee` ‖ `00` |
+| `SetRecord { id, sealed: [ee], site_dir: Upsert { name: "alice", title: "hi", page: 0, now: 1700000000000 } }` | `02` ‖ id ‖ `01000000ee` ‖ `0105000000616c69636502000000686900000068e5cf8b010000` |
+| `SetPage { id, sealed: [], site_dir: Remove }` | `03` ‖ id ‖ `00000000` ‖ `02` |
+| `Transfer { id, new_owner: 32 × 0x02, now: 1700000000000 }` | `04` ‖ id ‖ `02` × 32 ‖ `0068e5cf8b010000` |
 | `Release { id, refund: 0 }` | `05` ‖ id ‖ `00` × 16 |
 | `SetPrimary { name: "jef" }` | `06030000006a6566` |
-| `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [[1,2,3,4],[5,6,7,8],[9,10,11,12]], mode: 0, deposits: [0, 0], claims_root: 32 × 0x00, claims_until: 0, claims_program: 32 × 0x07 }` | `07` ‖ `01` × 32 ‖ `02` × 32 ‖ twelve 16-byte LE numbers (`01..0c`) ‖ `00` ‖ `00` × 72 ‖ `07` × 32 |
+| `Configure { admin: 32 × 0x01, treasury: 32 × 0x02, prices: [[1,2,3,4],[5,6,7,8],[9,10,11,12]], mode: 0, deposits: [0, 0], claims_root: 32 × 0x00, claims_until: 0, claims_program: 32 × 0x07, premium_start: 4000000000, nft_program: 32 × 0x09 }` | `07` ‖ `01` × 32 ‖ `02` × 32 ‖ twelve 16-byte LE numbers (`01..0c`) ‖ `00` ‖ `00` × 72 ‖ `07` × 32 ‖ `00286bee000000000000000000000000` ‖ `09` × 32 |
 | `Commit { commitment: 32 × 0xc0, now: 1700000000000 }` | `08` ‖ `c0` × 32 ‖ `0068e5cf8b010000` |
 | `Claim { id, sealed: [ee], now: 1700000000000, proof: [32 × 0x01, 32 × 0x02], price_tier: 1 }` | `09` ‖ id ‖ `01000000ee` ‖ `0068e5cf8b010000` ‖ `02000000` ‖ `01` × 32 ‖ `02` × 32 ‖ `01` |
 | `CommitPublic { commitment: 32 × 0xc0, now: 1700000000000 }` | `0a` ‖ `c0` × 32 ‖ `0068e5cf8b010000` |
@@ -904,18 +1061,40 @@ transaction's message is `00` followed by the encoding:
 | `RevokeSubname { parent_id: id, sub_id: 32 × 0x33, now: 1700000000000 }` | `0e` ‖ id ‖ `33` × 32 ‖ `0068e5cf8b010000` |
 | `BuySubname { parent_id: id, sub_id: 32 × 0x33, sealed: [ee], price: 100000, payout: Some(32 × 0x02), now: 1700000000000, secret: 32 × 0x5a }` | `0f` ‖ id ‖ `33` × 32 ‖ `01000000ee` ‖ `a0860100000000000000000000000000` ‖ `01` ‖ `02` × 32 ‖ `0068e5cf8b010000` ‖ `5a` × 32 |
 | `SetSubnameRecord { parent_id: id, sub_id: 32 × 0x33, sealed: [ee], now: None }` | `10` ‖ id ‖ `33` × 32 ‖ `01000000ee` ‖ `00` |
-| `SetSubnameRecord { parent_id: id, sub_id: 32 × 0x33, sealed: [ee], now: Some(1700000000000) }` | `10` ‖ id ‖ `33` × 32 ‖ `01000000ee` ‖ `01` ‖ `0068e5cf8b010000` |
 | `SetSubnamePage { parent_id: id, sub_id: 32 × 0x33, sealed: [], now: None }` | `11` ‖ id ‖ `33` × 32 ‖ `00000000` ‖ `00` |
 | `TransferSubname { parent_id: id, sub_id: 32 × 0x33, new_owner: 32 × 0x02, now: Some(1700000000000) }` | `12` ‖ id ‖ `33` × 32 ‖ `02` × 32 ‖ `01` ‖ `0068e5cf8b010000` |
 | `ReleaseSubname { parent_id: id, sub_id: 32 × 0x33, now: None }` | `13` ‖ id ‖ `33` × 32 ‖ `00` |
+| `SetPremium { premium_start: 4000000000 }` | `1400286bee000000000000000000000000` |
+| `List { id, price: 10000000, pay_to: 32 × 0x02, expires_at: Some(1700000000000), now: 1700000000000, display_name: Some("alice") }` | `15` ‖ id ‖ `80969800000000000000000000000000` ‖ `02` × 32 ‖ `01` ‖ `0068e5cf8b010000` ‖ `0068e5cf8b010000` ‖ `01` ‖ `05000000616c696365` |
+| `List { id, price: 10000000, pay_to: 32 × 0x02, expires_at: None, now: 1700000000000, display_name: None }` | `15` ‖ id ‖ `80969800000000000000000000000000` ‖ `02` × 32 ‖ `00` ‖ `0068e5cf8b010000` ‖ `00` |
+| `Cancel { id }` | `16` ‖ id |
+| `Buy { id, price: 10000000, pay_to: 32 × 0x02, treasury: 32 × 0x03, expected_nonce: 1, now: 1700000000000 }` | `17` ‖ id ‖ `80969800000000000000000000000000` ‖ `02` × 32 ‖ `03` × 32 ‖ `0100000000000000` ‖ `0068e5cf8b010000` |
+| `ShieldDeed { id, deed_account: 32 × 0x0a, now: 1700000000000 }` | `18` ‖ id ‖ `0a` × 32 ‖ `0068e5cf8b010000` |
+| `UnshieldDeed { id }` | `19` ‖ id |
+| `RefreshShieldedDeed { id }` | `1a` ‖ id |
 
-Account records (version 7):
+Cross-program messages (v8):
+
+| Message | Encoding |
+|---|---|
+| `names_core::Message::NftTransferHook { id, token_id: 32 × 0x44, expected_old_owner: 32 × 0x01, new_owner: 32 × 0x02, now: 1700000000000 }` | `03` ‖ id ‖ `44` × 32 ‖ `01` × 32 ‖ `02` × 32 ‖ `0068e5cf8b010000` |
+| `lez_nft::Message::AuthoritySync(Transfer { token_id: 32 × 0x44, new_owner: 32 × 0x02 })` | `0201` ‖ `44` × 32 ‖ `02` × 32 |
+| `lez_nft::Message::AuthoritySync(Burn { token_id: 32 × 0x44 })` | `0202` ‖ `44` × 32 |
+| `lez_nft::Message::AuthoritySync(SetExpiry { token_id: 32 × 0x44, expires: u64::MAX })` | `0203` ‖ `44` × 32 ‖ `ffffffffffffffff` |
+| `lez_nft::Message::AuthoritySync(Shield { token_id: 32 × 0x44, deed_account: 32 × 0x0a, expires: u64::MAX })` | `0204` ‖ `44` × 32 ‖ `0a` × 32 ‖ `ffffffffffffffff` |
+| `lez_nft::Message::AuthoritySync(Unshield { token_id: 32 × 0x44 })` | `0205` ‖ `44` × 32 |
+| `lez_nft::Message::AuthoritySync(RefreshShielded { token_id: 32 × 0x44, expires: u64::MAX })` | `0206` ‖ `44` × 32 ‖ `ffffffffffffffff` |
+
+Account records (version 8):
 
 | Account record | Encoding |
 |---|---|
-| `NameRecord { version: 7, owner: 32 × 0x01, expires: u64::MAX, sealed: [ee], claimed: false, price_tier: 0, generation: 32 × 0x99, subname_sale: Some({ price: 100000, payout: 32 × 0x02 }) }` | `07` ‖ `01` × 32 ‖ `ffffffffffffffff` ‖ `01000000ee` ‖ `00` ‖ `00` ‖ `99` × 32 ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `02` × 32 |
-| `SubnameRecord { version: 7, owner: 32 × 0x02, kind: Permanent, sealed: [ee] }` | `07` ‖ `02` × 32 ‖ `00` ‖ `01000000ee` |
-| `SubnameRecord { version: 7, owner: 32 × 0x02, kind: Revocable { parent_generation: 32 × 0x99 }, sealed: [] }` | `07` ‖ `02` × 32 ‖ `01` ‖ `99` × 32 ‖ `00000000` |
+| `NameRecord { version: 8, owner: 32 × 0x01, expires: u64::MAX, sealed: [ee], claimed: false, price_tier: 0, generation: 32 × 0x99, subname_sale: Some({ price: 100000, payout: 32 × 0x02 }), nft_token_id: 32 × 0x44, nft_shielded: false, listing: Some({ price: 10000000, pay_to: 32 × 0x03, expires_at: None, nonce: 1, in_market: true }), listing_nonce: 1, site_listed: Some(0) }` | `08` ‖ `01` × 32 ‖ `ffffffffffffffff` ‖ `01000000ee` ‖ `00` ‖ `00` ‖ `99` × 32 ‖ `01` ‖ `a0860100000000000000000000000000` ‖ `02` × 32 ‖ `44` × 32 ‖ `00` ‖ `01` ‖ `80969800000000000000000000000000` ‖ `03` × 32 ‖ `00` ‖ `0100000000000000` ‖ `01` ‖ `0100000000000000` ‖ `010000` |
+| `SubnameRecord { version: 8, owner: 32 × 0x02, kind: Permanent, sealed: [ee] }` | `08` ‖ `02` × 32 ‖ `00` ‖ `01000000ee` |
+| `SubnameRecord { version: 8, owner: 32 × 0x02, kind: Revocable { parent_generation: 32 × 0x99 }, sealed: [] }` | `08` ‖ `02` × 32 ‖ `01` ‖ `99` × 32 ‖ `00000000` |
+| `SiteDirHeader { version: 8, active_page: [0; 16], total_listed: 1 }` | `08` ‖ `00` × 32 ‖ `01000000` |
+| `SiteBucket { version: 8, entries: [{ id, name: "alice", title: "hi", updated_at: 1700000000000, name_expires: u64::MAX }] }` | `0801000000` ‖ id ‖ `05000000616c696365` ‖ `020000006869` ‖ `0068e5cf8b010000` ‖ `ffffffffffffffff` |
+| `MarketBucket { version: 8, entries: [{ id, price: 10000000, pay_to: 32 × 0x02, expires_at: None, name_expires: u64::MAX, price_tier: 0, nonce: 1, nft_token_id: 32 × 0x44, display_name: Some("alice") }] }` | `0801000000` ‖ id ‖ `80969800000000000000000000000000` ‖ `02` × 32 ‖ `00` ‖ `ffffffffffffffff` ‖ `00` ‖ `0100000000000000` ‖ `44` × 32 ‖ `01` ‖ `05000000616c696365` |
 
 `claim_leaf(32 × 0x07, 32 × 0x08)` is `0ec9619438b0876b837235e0b00766a9244925d4fb7071f59221da38b98c9aff`.
 
@@ -1273,3 +1452,7 @@ Version 7 keeps the `v5` Argon2id derivation and `v5`/`v6` strings unchanged and
 adds `v7` domain strings for length-tier slot identifiers (`v7/tier/`), subname
 accounts (`v7/subname/`, `v7/subpage/`), subname purchase commitments
 (`v7/sub-commitment`), and hold generation tokens (`v7/gen/*`).
+Version 8 keeps all `v5`/`v6`/`v7` strings unchanged and adds `v8` domain
+strings for tied top-level name NFT token IDs (`v8/nft-token/`), marketplace
+directory buckets (`v8/market/`), and the sites directory (`v8/sites-meta`,
+`v8/sites/`).
