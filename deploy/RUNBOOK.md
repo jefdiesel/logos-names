@@ -6,7 +6,10 @@ what did not, and the kit edits the run needed).
 
 ## Monday checklist
 
-**Jef provides** (nothing here is in git; ids are public account ids, never keys):
+**Jef provides** (nothing here is in git; ids are public account ids, never keys). Paths in this
+file use two env vars, set them on the deploy machine first: `LNS_DEPLOY_DIR` (the folder that
+will hold the deployer wallet, e.g. on the Mini's external disk) and `SHORTLIST_BUILD_DIR` (where
+the locked-name shards were built, section 4).
 
 | What | Where it goes |
 |---|---|
@@ -15,17 +18,22 @@ what did not, and the kit edits the run needed).
 | The upgrade-key wallet folder (new, mode 700; password kept apart) | `[keys].upgrade_wallet_dir` and `LEE_WALLET_HOME_DIR` |
 | Deployer payer, admin, treasury, NFT admin (`Public/…` ids) | `[accounts]` `deployer_payer`, `admin`, `treasury`, `nft_admin` |
 | Owners of the held names `jef`, `logos`, `web`, `android` | `[[held_names]].owner` (empty = stays with the admin) |
-| Admin funds for the held names: each is placed permanent at the 1-5 character price (400 M today), 1.6 B for all four (it goes to the treasury) | the admin account, before `post-deploy.sh` |
+| Admin funds for the held names: each is placed permanent at its length tier's price (`jef`, `logos`, `web` 400 M each, `android` 100 M), 1.3 B for all four plus ~50 M fees (it goes to the treasury) | the admin account, before `post-deploy.sh` |
 | A funded smoke wallet and its public account | `SMOKE_WALLET`, `[post_deploy].smoke_public_owner` |
 | `true` for `admin`, `treasury`, `nft_admin`, `rpc_url`, `upgrade_wallet_dir`, `image_ids` | `[confirmed_by_jef]` |
 
-**We do before Monday:** the reproducible (Docker) guest builds of both programs and their ids
-in `deploy/expected-image-ids.txt` (only the `.example` exists; the rehearsal used non-Docker
-builds), and the `names`, `lez-nft`, `lns_imageid` binaries on the Mini (section 1). The
-v0.4.0 tools use risc0-zkvm 3.1.0 and the names CLI proves through an external `r0vm`, which
-must be 3.1.0: the Mini's guarded `r0vm` points at 3.0.5 (`REAL=` in `~/.cargo/bin/r0vm`).
-Install 3.1.0 (`rzup install r0vm 3.1.0`) and point the guard at it, keeping the guard (Jef's
-call; any proof the CLI makes on the Mini, such as a private registration, needs it).
+**Before Monday, still open** (details in section 1):
+
+1. **Reproducible image ids: not built yet.** Needs Docker (GitHub Actions, or the Dell when it
+   is back); the agent's push of the build-only branch was refused, so Jef runs one of the two
+   ways in section 1.1. Until `deploy/expected-image-ids.txt` exists, `deploy.sh --send` refuses
+   a live deploy.
+2. **r0vm 3.1.0 on the Mini, behind the guard** (Jef runs it; section 1.4). Every `names` call
+   runs the registry program in r0vm before it sends (public calls too), and the v0.4.0 tools
+   need r0vm 3.1.0; the Mini has only the guarded 3.0.5. Memory rule:
+   `feedback-no-big-risc0-proofs-on-mini.md` (one proof at a time, mimo unloaded for a private
+   proof, never `r0vm.real` directly).
+3. **Binaries on the Mini:** `names`, `lez-nft`, `lns_imageid` (section 1.2).
 
 **Commands, in order** (on the Mini; `<wallet>` = the upgrade-key wallet folder):
 
@@ -60,10 +68,23 @@ or replace it with the official URL), the Names Wallet module `DEFAULT_REGISTRY`
 `site/networks/<channel>.json`), the MCP server and the board. Then host the locked-name
 shards (section 4).
 
-**Still placeholder today:** every `PLACEHOLDER` in `params.toml` (`rpc_url`,
-`upgrade_wallet_dir`, the four `[accounts]`), `expected_channel_id` (empty), the held-name
-owners, the `[post_deploy]` smoke wallet/owners, `deploy/expected-image-ids.txt` (missing),
-and the old registry id `38jEfVV1…h2gq` in every client default.
+**Still placeholder today, and who provides it**
+
+| Placeholder | Where | Who |
+|---|---|---|
+| Official LEZ v0.4 RPC URL | `params.toml` `[network].rpc_url` | Jef (from Logos) |
+| Channel id of that chain | `[network].expected_channel_id` (empty) | Jef (`getChannelId` on it) |
+| Upgrade-key wallet folder | `[keys].upgrade_wallet_dir`, `LEE_WALLET_HOME_DIR` | Jef (new folder, mode 700) |
+| Deployer payer | `[accounts].deployer_payer` | Jef (made by the checklist's first command, funded ~200 M) |
+| Admin, treasury, NFT admin ids | `[accounts].admin`, `treasury`, `nft_admin` | Jef |
+| Owners of `jef`, `logos`, `web`, `android` | `[[held_names]].owner` (empty = stays with the admin) | Jef |
+| Admin funds for the held names | the admin account, before `post-deploy.sh` | Jef: 1.3 B LEZ (`jef`, `logos`, `web` at the 1-5 tier's permanent 400 M each, `android` at the 6-7 tier's 100 M; measured in the clean rehearsal) plus ~50 M for fees. Not 1.6 B: `android` has 7 characters |
+| Smoke wallet + its funded public account | `SMOKE_WALLET`, `[post_deploy].smoke_public_owner` | Jef (any funded test wallet, not the admin or treasury) |
+| `deploy/expected-image-ids.txt` | missing | the Docker build (section 1.1): Jef starts it |
+| The Docker-built ELFs on the Mini | `[artifacts].registry_elf`, `nft_elf` (or `NAMES_ELF`/`NFT_ELF`) | from the same build's artifact |
+| r0vm 3.1.0 behind the guard | the Mini, `~/.risc0/extensions/v3.1.0-…` | Jef (section 1.4) |
+| `true` for `admin`, `treasury`, `nft_admin`, `rpc_url`, `upgrade_wallet_dir`, `image_ids` | `[confirmed_by_jef]` | Jef |
+| The old registry id `38jEfVV1…h2gq` in every client default | section 3 | us, after the deploy |
 
 ## 0. Rules
 
@@ -82,20 +103,55 @@ and the old registry id `38jEfVV1…h2gq` in every client default.
 
 ## 1. Before Monday
 
-1. **Reproducible guest builds.** The rehearsal used local (non-Docker) builds:
-   registry image `e93931586973b7c24e0990c19c13ced7a250cd2b1b409650746381d395b95501`,
-   lez_nft image `5a47f6b61b45f1e8dd59808f00f0e351baf327a868ec5185115b46d761cdbf3e`.
-   Build both with the Docker reproducible build (`cargo risczero build` on
-   `methods/guest` in each repo), put the ids in `deploy/expected-image-ids.txt`
-   (`registry_image_id = …`, `nft_image_id = …`), and point `[artifacts]` at those ELFs.
-   `deploy.sh --send` refuses if the ELFs' ids differ from that file.
-2. **Binaries** for the deploy machine (Mini or Colab, never the laptop disk):
+1. **Reproducible guest builds.** Both `methods/build.rs` (this repo and lez_nft `v3-lez04`
+   fabe6c7) build their guest in RISC Zero's builder `risczero/risc0-guest-builder:r0.1.97.0`
+   pinned by digest `sha256:7ae0a27f…4468` when `RISC0_USE_DOCKER=1` (the rfp-022 recipe; a
+   native build is unchanged). `deploy/repro-build.sh --nft-src <lez_nft tree> --out <dir>`
+   builds both and writes `<dir>/expected-image-ids.txt` (both ids and both ELF sha256),
+   the two ELFs and `SHA256SUMS`. Needs Docker on linux/amd64 (not Colab, not the Mini).
+   Two ways to run it twice:
+   - **GitHub Actions** (`.github/workflows/lns-repro-images.yml`: two fresh runners plus a
+     compare job). The build-only branch is made, not pushed: commit `<BUILD_SHA>` = this
+     branch + the lez_nft tree in `vendor/lez-nft-v3` (no CLAUDE.md/.claude). Pushing it makes
+     the registry and lez_nft v3 source public (key scan done: clean). Jef, in this repo:
+     ```
+     git push origin <BUILD_SHA>:refs/heads/repro/lns-04-images
+     ```
+     ```
+     gh run watch -R jefdiesel/logos-names $(gh run list -R jefdiesel/logos-names -b repro/lns-04-images -L 1 --json databaseId -q '.[0].databaseId')
+     ```
+     ```
+     gh run download -R jefdiesel/logos-names -n lns-guests-a -D lns-guests-a
+     ```
+   - **The Dell** (when it is reachable): `deploy/repro-build.sh` twice into two folders, with
+     `docker builder prune -af` between, then `diff` the two `expected-image-ids.txt`.
+
+   Then copy that `expected-image-ids.txt` to `deploy/expected-image-ids.txt`, commit it, put
+   the two ELFs on the Mini and point `[artifacts]` at them. `deploy.sh --send` refuses when an
+   ELF's id or sha256 is not the file's (checked by `deploy/test-dry-run.sh` offline and by the
+   rehearsal on a chain). The rehearsal's native ids (`e9393158…5501` registry, `5a47f6b6…3f3e`
+   lez_nft) are not reproducible and must not go in that file.
+2. **Binaries** for the deploy machine (the Mini; never the laptop disk):
    `names` (this repo, `cargo build --release -p names_cli`), `lez-nft`
-   (`../lez-nft`, branch `v3-lez04`, `cargo build --release -p lez_nft_cli`) and
+   (lez_nft `v3-lez04`, `cargo build --release -p lez_nft_cli`) and
    `lns_imageid` (`deploy/imageid`, `cargo build --release`). Set `[tooling]` or
-   `NAMES_CLI` / `NFT_CLI` / `IMAGEID`.
+   `NAMES_CLI` / `NFT_CLI` / `IMAGEID`. The CLIs load the programs from the chain, so they
+   need not be Docker builds.
 3. **Offline checks:** `deploy/test-dry-run.sh` (16 checks, no chain needed).
-4. **Rehearsal** (optional, ~35 min): see section 5.
+4. **Rehearsal**: see section 5 (the clean run took <REHEARSAL_MIN> min).
+5. **r0vm 3.1.0 on the Mini, guarded** (Jef runs these; nothing else on the Mini changes).
+   Rules: memory `feedback-no-big-risc0-proofs-on-mini.md`. The guarded 3.0.5 stays where it
+   is (`~/.cargo/bin/r0vm`, used by the rc3 stack); the names CLI finds rzup's copy for its own
+   risc0 version (`~/.risc0/extensions/v3.1.0-…/r0vm`) before PATH, so that copy must be the
+   guard wrapper, made in the same command as the install:
+   ```
+   ssh minim4 '~/.risc0/bin/rzup install r0vm 3.1.0 && E=$(ls -d ~/.risc0/extensions/v3.1.0-*/ | head -1) && E=${E%/} && mv "$E/r0vm" "$E/r0vm.real" && sed "s#^\(G=.*REAL=\).*#\1$E/r0vm.real#" ~/.risc0/extensions/v3.0.5-cargo-risczero-aarch64-apple-darwin/r0vm > "$E/r0vm" && chmod 755 "$E/r0vm" && grep REAL= "$E/r0vm" && "$E/r0vm" --version'
+   ```
+   Check: the `REAL=` line names `…v3.1.0-…/r0vm.real`, `--version` prints 3.1.0,
+   `~/.cargo/bin/r0vm --version` still prints 3.0.5, and the first `names` call adds a
+   `start … end` pair to `~/.local/r0vm-guard/r0vm.log`. A private registration on the Mini:
+   one at a time, `mimo` unloaded first, free memory checked.
+
 
 ## 2. Monday, in order
 
@@ -175,7 +231,13 @@ Boots a standalone sequencer on 127.0.0.1:3940 and runs: deploy.sh --send, a pri
 a public and a private registration side by side, the tied NFT check (collection and deed
 metadata), list + buy with the 2.5% split, a `cid` site written the way `lns publish` writes it
 (`names profile --cid`) and its sites-directory entry, `discover=off` and back on, an on-chain
-page, a subname, and an in-place upgrade with the header key. Results go to
+page, a subname, an in-place upgrade with the header key, then `post-deploy.sh --send` with the
+same params (the operator funds the admin; the four held names, `web` handed to a user and the
+rest kept by the admin; a rerun that must skip them all; the smoke from `SMOKE_WALLET`), and
+last the private registration's reveal. Before the real send it checks the image gate: a send
+with a wrong registry ELF must refuse with nothing sent. `EXPECTED_IDS` (default
+`deploy/expected-image-ids.txt`) is the gate's file; without one the rehearsal pins the given
+ELFs' own ids and writes a WARN line. Every result line carries its elapsed time. Results go to
 `deploy/rehearsal/results.txt` (`--from STEP` appends to it; a plain run truncates it and
 `--fresh` wipes the whole folder, so copy the tracked file out first). Needs `r0vm` 3.1.0 on the machine (the sequencer
 and the CLI both run guests through it).
