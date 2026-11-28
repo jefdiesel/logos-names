@@ -35,9 +35,6 @@ use crate::{
     parse_new_owner, readable, save_defaults,
 };
 
-const GEN_REGISTER_DOMAIN: &[u8] = b"logos-names/v7/gen/register";
-const GEN_CLAIM_DOMAIN: &[u8] = b"logos-names/v7/gen/claim";
-
 /// Text entry key that opts a top-level website out of the on-chain sites directory (`discover=off`).
 pub const DISCOVER_KEY: &str = "discover";
 
@@ -46,32 +43,19 @@ pub fn slot_id(name: &str, base_id: &NameId) -> NameId {
     tiered_id(base_id, price_tier_for_len(name.len()))
 }
 
-/// Deterministic `generation` for `Instruction::Register` (matches `names_core::register_generation`).
-pub fn register_generation(
-    slot_id: &NameId,
-    owner: &[u8; 32],
-    now: u64,
-    secret: &[u8; 32],
-) -> [u8; 32] {
-    Sha256::new()
-        .chain_update(GEN_REGISTER_DOMAIN)
-        .chain_update(slot_id)
-        .chain_update(owner)
-        .chain_update(now.to_le_bytes())
-        .chain_update(secret)
-        .finalize()
-        .into()
+pub use names_core::{claim_generation, register_generation};
+
+/// `lez_nft` v3's config PDA seed domain (`lez_nft::config_seed`).
+const NFT_CONFIG_SEED_DOMAIN: &[u8] = b"lez-nft/v3/config";
+
+/// `lez_nft::config_address(nft_program)`: the NFT program's Config, which every
+/// linked Mint (Register, Claim) must declare as `(config, nft_program)`.
+pub fn nft_config_address(nft_program: &AccountId) -> AccountId {
+    AccountId::for_public_pda(nft_program, &nft_config_seed())
 }
 
-/// Deterministic `generation` for `Instruction::Claim` (matches `names_core::claim_generation`).
-pub fn claim_generation(slot_id: &NameId, owner: &[u8; 32], now: u64) -> [u8; 32] {
-    Sha256::new()
-        .chain_update(GEN_CLAIM_DOMAIN)
-        .chain_update(slot_id)
-        .chain_update(owner)
-        .chain_update(now.to_le_bytes())
-        .finalize()
-        .into()
+fn nft_config_seed() -> lee_core::program::PdaSeed {
+    lee_core::program::PdaSeed::new(Sha256::digest(NFT_CONFIG_SEED_DOMAIN).into())
 }
 
 /// Whether the profile sets `discover=off` (trimmed, ASCII case-insensitive; mirrors `gateway=off`).
@@ -307,35 +291,30 @@ pub fn upgrade_settings_bytes(bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-/// UNCONFIRMED ENCODING: `lez_nft` v3 `Message::Instruction(Instruction::Transfer { .. })`.
-///
-/// The parallel `lez_nft` v3 repository is outside this workspace (see `notes/NFT-V3-CHANGES.md`
-/// and `neon-job/CHANGES.md`). Based on `notes/NFT-V3-CHANGES.md`, `lez_nft` v3 exposes:
-/// - `Message::Instruction` (tag `0x00`)
-/// - `Instruction::Transfer { token_id: [u8; 32], new_owner: [u8; 32], sealed: Vec<u8>, now: u64, linked_target: Option<AccountId> }`
-///
-/// CHECK WHEN COMPILING AGAINST `lez_nft` v3:
-/// 1. Confirm the exact Borsh variant discriminant of `lez_nft::Instruction::Transfer` (assumed `0x02`
-///    below after `Mint = 0`, `SetMetadata = 1`, `Transfer = 2` — verify against `lez-nft`!).
-/// 2. Confirm whether `linked_target` is `Option<AccountId>` (the name's record PDA) or a richer enum.
-/// 3. Confirm `names_core`'s `Message::NftTransferHook` matches `lez_nft` v3's emitted hook bytes.
-pub const UNCONFIRMED_NFT_TRANSFER_VARIANT: u8 = 2;
+/// `lez_nft` v3 `Message::Instruction(Instruction::Transfer { token_id, new_owner,
+/// sealed: None, now: Some(now), linked_target: Some(slot_id) })`, from
+/// lez-nft v3-lez04 `core/src/lib.rs`: `Message::Instruction` is variant 0 and
+/// `Instruction::Transfer` variant 3. For a linked token `new_owner` is the
+/// registry's `owner_tag(slot_id, account)` and `linked_target` is the name's
+/// `slot_id` (`linked.target`).
+pub const NFT_INSTRUCTION_TRANSFER: u8 = 3;
 
 pub fn encode_lez_nft_transfer(
     token_id: &[u8; 32],
     new_owner_tag: &[u8; 32],
     now: u64,
-    linked_record_pda: AccountId,
+    slot_id: &NameId,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 1 + 32 + 32 + 4 + 8 + 1 + 32);
+    let mut out = Vec::with_capacity(2 + 32 + 32 + 1 + 9 + 33);
     out.push(0x00); // Message::Instruction
-    out.push(UNCONFIRMED_NFT_TRANSFER_VARIANT); // Instruction::Transfer (UNCONFIRMED discriminant)
+    out.push(NFT_INSTRUCTION_TRANSFER);
     out.extend_from_slice(token_id);
     out.extend_from_slice(new_owner_tag);
-    out.extend_from_slice(&0u32.to_le_bytes()); // sealed: Vec<u8> (empty)
+    out.push(0); // sealed: None
+    out.push(1); // now: Some
     out.extend_from_slice(&now.to_le_bytes());
-    out.push(1); // linked_target: Some(record_pda)
-    out.extend_from_slice(linked_record_pda.value());
+    out.push(1); // linked_target: Some(slot_id)
+    out.extend_from_slice(slot_id);
     out
 }
 
@@ -520,6 +499,19 @@ impl Client {
             let zero = AccountId::new([0u8; 32]);
             if s.nft_program != zero && *token_id != [0u8; 32] {
                 mentions.push(self.nft_actor(s.nft_program, token_id));
+            }
+        }
+    }
+
+    /// Appends `(lez_nft::config_address(nft), nft)`, which a Register or Claim that mints
+    /// the tied NFT must declare (lez_nft checks the registry is authorised in it).
+    pub fn push_nft_config_mention(&self, mentions: &mut Vec<AccountMention>, settings: Option<&names_core::Settings>) {
+        if let Some(s) = settings {
+            if s.nft_program != AccountId::new([0u8; 32]) {
+                mentions.push(
+                    AccountIdentity::PublicPda { program: s.nft_program, seed: nft_config_seed() }
+                        .select_program_actor_state(s.nft_program),
+                );
             }
         }
     }
@@ -1347,8 +1339,7 @@ impl Client {
         }
         let now = self.now().await;
         let new_tag = owner_tag(&slot, &new_owner);
-        let rec_pda = record_address(&self.program, &slot);
-        let message = encode_lez_nft_transfer(&record.nft_token_id, &new_tag, now, rec_pda);
+        let message = encode_lez_nft_transfer(&record.nft_token_id, &new_tag, now, &slot);
         let [rec_seed, page_seed, _] = name_seeds(&slot);
         let mut mentions = vec![
             self.signer(holder).select_program_actor_state(settings.nft_program),
@@ -1784,20 +1775,29 @@ mod tests {
     }
 
     #[test]
-    fn encode_lez_nft_transfer_layout_is_stable() {
-        let token = [0xAA; 32];
-        let owner = [0xBB; 32];
-        let pda = AccountId::new([0xCC; 32]);
-        let bytes = encode_lez_nft_transfer(&token, &owner, 42, pda);
-        assert_eq!(bytes[0], 0x00);
-        assert_eq!(bytes[1], UNCONFIRMED_NFT_TRANSFER_VARIANT);
-        assert_eq!(&bytes[2..34], &token);
-        assert_eq!(&bytes[34..66], &owner);
-        assert_eq!(&bytes[66..70], &0u32.to_le_bytes());
-        assert_eq!(&bytes[70..78], &42u64.to_le_bytes());
-        assert_eq!(bytes[78], 1);
-        assert_eq!(&bytes[79..111], &[0xCC; 32]);
+    fn encode_lez_nft_transfer_matches_lez_nft_borsh() {
+        // borsh::to_vec(&lez_nft_core::Message::Instruction(Instruction::Transfer {
+        //     token_id: [0xaa; 32], new_owner: [0xbb; 32], sealed: None, now: Some(42),
+        //     linked_target: Some([0xcc; 32]) })) from lez-nft v3-lez04 (3562907).
+        let expected = concat!(
+            "0003",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "00012a0000000000000001",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
+        assert_eq!(hex::encode(encode_lez_nft_transfer(&[0xAA; 32], &[0xBB; 32], 42, &[0xCC; 32])), expected);
     }
+
+    #[test]
+    fn nft_config_address_matches_lez_nft() {
+        // lez_nft_core::config_address(&AccountId::new([0x11; 32])) from lez-nft v3-lez04.
+        assert_eq!(
+            hex::encode(nft_config_address(&AccountId::new([0x11; 32])).value()),
+            "dccc936f962a2f004d6300848470c962dc8ce8a6619d1651fab9ea1eb1ad453a"
+        );
+    }
+
 
     #[test]
     fn v8_cli_commands_parse_cleanly() {
