@@ -52,7 +52,10 @@ fixed before resuming, then post-deploy.sh on the same chain. The final scripts 
   on-chain page added                         PASS still listed, once
   subname blog.<name> (permanent)             PASS resolves
 7 in-place upgrade with the header key        PASS header still holds the same image; names and settings intact
-8 private registration (15-min wait + proofs) PENDING
+8 private registration (setup + commit, 15-min wait, reveal; three real proofs, ~13 min each)
+                                              PASS rehearsalpriv1844 registered privately (proof: real, not dev mode)
+  (the run's final summary lines then hit a bash syntax error: rehearse.sh was replaced on
+  the VM while it was running; every step's PASS line had already been written)
 9 post-deploy.sh --send, held name `web` (locked, 3 chars): admin registered it permanent
   (paid the 1-5 char permanent price, 400 M, to the treasury), then transferred it
                                               PASS held_by = the owner from [[held_names]]; rerun skips it cleanly
