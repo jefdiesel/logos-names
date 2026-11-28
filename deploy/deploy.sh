@@ -90,7 +90,9 @@ N() { "$NAMES_CLI" "$@"; }
 NFT() { "$NFT_CLI" --rpc "$RPC" "$@"; }
 rpc() { curl -sf -m 15 -X POST "$RPC" -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}"; }
 balance() { N wallet account get --account-id "Public/$1" 2>/dev/null | sed -nE 's/^Balance:? ?([0-9]+).*/\1/p' | head -1; }
-pk_of() { N wallet account get --account-id "Public/$1" --keys 2>/dev/null | sed -nE 's/^pk ([0-9a-f]{64}).*/\1/p' | head -1; }
+# The account's initial key, for crediting a public account the chain has not seen yet. LEZ v0.4.0
+# prints it as `initial key <hex>` and takes it as `--to-initial-key` (rc3 printed `pk <hex>`).
+pk_of() { N wallet account get --account-id "Public/$1" --keys 2>/dev/null | sed -nE 's/^(initial key|pk) ([0-9a-f]{64,66}).*/\2/p' | head -1; }
 header_image() { $LIB header-image "$RPC" "$1" 2>/dev/null || true; }
 segments_needed() { local size; size=$(wc -c < "$1" | tr -d ' '); echo $(( (size + 98303) / 98304 )); }
 run() { # print, and send only with --send
@@ -193,14 +195,14 @@ step_configure_registry() {
   if [ $SEND = 1 ]; then
     local hb; hb=$(balance "$REG_HEADER"); hb=${hb:-0}
     if [ "$hb" -lt $((REG_FUND / 2)) ]; then
-      run N wallet auth-transfer send --from "Public/$PAYER" --to-pk "$(pk_of "$REG_HEADER")" --amount "$REG_FUND" || die "funding the registry header failed"
+      run N wallet auth-transfer send --from "Public/$PAYER" --to-initial-key "$(pk_of "$REG_HEADER")" --amount "$REG_FUND" || die "funding the registry header failed"
     fi
     # Credits to a public account LEZ 0.4 has never seen revert: admit the treasury first.
     local tb; tb=$(balance "$TREASURY"); if [ -z "$tb" ] || [ "$tb" = 0 ]; then
       local tpk; tpk=$(pk_of "$TREASURY")
-      if [ -n "$tpk" ]; then run N wallet auth-transfer send --from "Public/$PAYER" --to-pk "$tpk" --amount "$TREASURY_FUND"
-      elif [ -n "${TREASURY_PUBLIC_KEY:-}" ]; then run N wallet auth-transfer send --from "Public/$PAYER" --to-pk "$TREASURY_PUBLIC_KEY" --amount "$TREASURY_FUND"
-      else die "treasury Public/$TREASURY is new to the chain and not in this wallet: export TREASURY_PUBLIC_KEY=<its 64-hex public key>"; fi
+      if [ -n "$tpk" ]; then run N wallet auth-transfer send --from "Public/$PAYER" --to-initial-key "$tpk" --amount "$TREASURY_FUND"
+      elif [ -n "${TREASURY_PUBLIC_KEY:-}" ]; then run N wallet auth-transfer send --from "Public/$PAYER" --to-initial-key "$TREASURY_PUBLIC_KEY" --amount "$TREASURY_FUND"
+      else die "treasury Public/$TREASURY is new to the chain and not in this wallet: export TREASURY_PUBLIC_KEY=<its initial key, as 'wallet account get --keys' prints it>"; fi
     fi
   fi
   run N --program "${REG_HEADER:-<reg>}" configure --signer "${REG_HEADER:-<reg>}" --admin "$ADMIN" --treasury "$TREASURY" \
@@ -220,8 +222,8 @@ s = json.load(open(sys.argv[1])); admin, treasury, mode, prices, premium, nft = 
 flat = []
 pr = s.get("prices")
 if isinstance(pr, dict):
-    for tier in ("5", "6-7", "8+"):
-        row = pr.get(tier) or {}
+    for tier, alt in (("tier_5", "5"), ("tier_6_7", "6-7"), ("tier_8_plus", "8+")):
+        row = pr.get(tier) or pr.get(alt) or {}
         flat += [str(row.get(t)) for t in ("30d", "1y", "5y", "permanent")]
 elif isinstance(pr, list):
     flat = [str(x) for row in pr for x in (row if isinstance(row, list) else [row])]

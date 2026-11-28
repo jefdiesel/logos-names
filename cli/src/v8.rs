@@ -377,7 +377,20 @@ pub fn require_subname(name: &str) -> Result<(&str, &str)> {
         .ok_or_else(|| anyhow!("{name} is not a subname (write it as <label>.<parent>, e.g. blog.alice)"))
 }
 
+/// Whether the profile points the name at a Logos Storage site (a non-empty `cid` entry, as
+/// `lns publish` writes and the gateway serves).
+pub fn has_cid_site(profile: &Profile) -> bool {
+    profile
+        .texts
+        .iter()
+        .any(|t| t.key == "cid" && !t.value.trim().is_empty())
+}
+
 /// Computes what `SiteDirOp` a profile edit should send for a top-level name.
+///
+/// A name has a site when it has an on-chain page OR a `cid` site in its profile; every such
+/// name is listed in the sites directory unless the profile sets `discover=off`. A name whose
+/// last site was removed (no page, `cid` cleared) leaves the directory.
 pub fn site_dir_op_for_edit(
     name: &str,
     record: &NameRecord,
@@ -386,14 +399,15 @@ pub fn site_dir_op_for_edit(
     now: u64,
     active_page: u16,
 ) -> SiteDirOp {
-    let off = discover_is_off(profile);
-    if off {
+    let has_site = has_page || has_cid_site(profile);
+    if discover_is_off(profile) || !has_site {
         if record.site_listed.is_some() {
             SiteDirOp::Remove
         } else {
             SiteDirOp::Keep
         }
-    } else if has_page && record.site_listed.is_none() {
+    } else if record.site_listed.is_none() && now < record.expires {
+        // The registry refuses to list a lapsed name (in grace): it stays unlisted until renewed.
         let title = site_title_for(name, profile, None);
         SiteDirOp::Upsert {
             name: name.to_owned(),
@@ -419,7 +433,8 @@ pub fn site_dir_op_for_page(
     active_page: u16,
 ) -> SiteDirOp {
     if !publishing {
-        return if record.site_listed.is_some() {
+        // Removing the page leaves the listing alone while a `cid` site remains.
+        return if record.site_listed.is_some() && !(has_cid_site(profile) && !discover_is_off(profile)) {
             SiteDirOp::Remove
         } else {
             SiteDirOp::Keep
@@ -432,6 +447,9 @@ pub fn site_dir_op_for_page(
         } else {
             SiteDirOp::Keep
         }
+    } else if now >= record.expires {
+        // The registry refuses an Upsert on a lapsed name (in grace).
+        SiteDirOp::Keep
     } else {
         let title = site_title_for(name, profile, title_override);
         let page = record.site_listed.unwrap_or(active_page);
@@ -1725,6 +1743,62 @@ mod tests {
                 now: 1000,
             }
         );
+    }
+
+    #[test]
+    fn cid_site_is_listed_like_an_onchain_page() {
+        let cid = |v: &str| names_seal::TextRecord { key: "cid".to_owned(), value: v.to_owned() };
+        let mut profile = Profile::default();
+        profile.texts.push(cid("zDvZRwzm1234"));
+        profile.texts.push(names_seal::TextRecord { key: "display".to_owned(), value: "Alice".to_owned() });
+        let mut rec = NameRecord {
+            version: VERSION,
+            owner: [1; 32],
+            expires: u64::MAX,
+            sealed: Vec::new(),
+            claimed: false,
+            price_tier: 0,
+            generation: [2; 32],
+            subname_sale: None,
+            nft_token_id: [3; 32],
+            nft_shielded: false,
+            listing: None,
+            listing_nonce: 0,
+            site_listed: None,
+        };
+        // `lns publish` = `names profile <name> --cid <root>`: no page, but a cid site -> listed.
+        assert_eq!(
+            site_dir_op_for_edit("alice", &rec, &profile, false, 1000, 2),
+            SiteDirOp::Upsert { name: "alice".to_owned(), title: "Alice".to_owned(), page: 2, now: 1000 }
+        );
+        // Already listed: a routine edit touches no directory actor.
+        rec.site_listed = Some(2);
+        assert_eq!(site_dir_op_for_edit("alice", &rec, &profile, false, 1000, 2), SiteDirOp::Keep);
+        // Removing the on-chain page keeps the listing while the cid site remains.
+        assert_eq!(
+            site_dir_op_for_page("alice", &rec, &profile, false, false, false, None, 1000, 2),
+            SiteDirOp::Keep
+        );
+        // discover=off unlists a cid site.
+        profile.texts.push(names_seal::TextRecord { key: DISCOVER_KEY.to_owned(), value: "off".to_owned() });
+        assert_eq!(site_dir_op_for_edit("alice", &rec, &profile, false, 1000, 2), SiteDirOp::Remove);
+        rec.site_listed = None;
+        assert_eq!(site_dir_op_for_edit("alice", &rec, &profile, false, 1000, 2), SiteDirOp::Keep);
+        // Clearing the cid with no page left unlists the name.
+        profile.texts.retain(|t| t.key != DISCOVER_KEY && t.key != "cid");
+        rec.site_listed = Some(2);
+        assert_eq!(site_dir_op_for_edit("alice", &rec, &profile, false, 1000, 2), SiteDirOp::Remove);
+        // An empty cid value is no site.
+        profile.texts.push(cid("  "));
+        assert!(!has_cid_site(&profile));
+        rec.site_listed = None;
+        assert_eq!(site_dir_op_for_edit("alice", &rec, &profile, false, 1000, 2), SiteDirOp::Keep);
+        // A page alone still lists, as before.
+        assert!(matches!(site_dir_op_for_edit("alice", &rec, &profile, true, 1000, 2), SiteDirOp::Upsert { .. }));
+        // A lapsed name (in grace) is not listed: the registry would refuse the Upsert.
+        rec.expires = 500;
+        assert_eq!(site_dir_op_for_edit("alice", &rec, &profile, true, 1000, 2), SiteDirOp::Keep);
+        assert_eq!(site_dir_op_for_page("alice", &rec, &profile, true, false, false, None, 1000, 2), SiteDirOp::Keep);
     }
 
     #[test]

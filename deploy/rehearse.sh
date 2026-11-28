@@ -3,7 +3,8 @@
 #   boot a standalone sequencer (the testnet kit), deploy.sh --send (both programs, NFT
 #   Configure, registry Configure, read back), then what users do: change a price, register a
 #   public name and a private name (their waits overlap), check the tied NFT, list + buy with the
-#   2.5% split, publish a site and see it in the sites directory, make a subname, and upgrade the
+#   2.5% split, publish a cid site (as `lns publish` does) and see it in the sites directory, opt
+#   out with discover=off and back in, add an on-chain page, make a subname, and upgrade the
 #   registry with its header key.
 #
 #   deploy/rehearse.sh [--fresh] [--skip-private] [--from STEP]
@@ -34,7 +35,7 @@ export NAMES_CLI NFT_CLI IMAGEID NAMES_ELF NFT_ELF
 mkdir -p "$R"; chmod 700 "$R"
 
 T0=$(date +%s)
-RESULTS=$R/results.txt; : > "$RESULTS"
+RESULTS=$R/results.txt; [ "$FROM" = boot ] && : > "$RESULTS"; touch "$RESULTS"   # --from STEP appends
 say() { printf '\n######## %s  (+%ss)\n' "$*" "$(( $(date +%s) - T0 ))"; }
 ok() { echo "PASS $*" | tee -a "$RESULTS"; }
 bad() { echo "FAIL $*" | tee -a "$RESULTS"; FAILED=1; }
@@ -68,6 +69,9 @@ J
   chmod 600 "$1/created.txt"
 }
 export LEE_WALLET_PASSWORD=""
+# The names CLI talks to LOGOS_NAMES_RPC (default: the public testnet), not the wallet config's
+# sequencer: point it at the local chain before any wallet call.
+export LOGOS_NAMES_RPC=$RPC LEZ_NFT_RPC=$RPC
 W=$R/deployer; WU1=$R/user-pub; WU2=$R/user-priv; WU3=$R/buyer
 for d in "$W" "$WU1" "$WU2" "$WU3"; do new_wallet "$d"; done
 ST=$R/ids.env; touch "$ST"
@@ -79,10 +83,10 @@ acct() { # VAR WALLET
   local id; id=$(LEE_WALLET_HOME_DIR=$2 "$NAMES_CLI" wallet account new public 2>&1 | id_of Public)
   [ -n "$id" ] || die "could not make $1"; save "$1" "$id"
 }
-pk() { LEE_WALLET_HOME_DIR=$1 "$NAMES_CLI" wallet account get --account-id "Public/$2" --keys 2>/dev/null | sed -nE 's/^pk ([0-9a-f]{64}).*/\1/p' | head -1; }
+pk() { LEE_WALLET_HOME_DIR=$1 "$NAMES_CLI" wallet account get --account-id "Public/$2" --keys 2>/dev/null | sed -nE 's/^(initial key|pk) ([0-9a-f]{64,66}).*/\2/p' | head -1; }
 bal() { LEE_WALLET_HOME_DIR=$W "$NAMES_CLI" wallet account get --account-id "Public/$1" 2>/dev/null | sed -nE 's/^Balance:? ?([0-9]+).*/\1/p' | head -1; }
 fund() { # WALLET ID AMOUNT (from the operator)
-  kitw auth-transfer send --from "Public/$OP" --to-pk "$(pk "$1" "$2")" --amount "$3" 2>&1 | quiet | tail -2
+  kitw auth-transfer send --from "Public/$OP" --to-initial-key "$(pk "$1" "$2")" --amount "$3" 2>&1 | quiet | tail -2
 }
 acct PAYER "$W"; acct ADMIN "$W"; acct TREASURY "$W"
 acct U1 "$WU1"; acct U3 "$WU3"
@@ -101,12 +105,21 @@ import re, sys
 src, dst, rpc, payer, admin, treasury, names, nft, imageid, reg_elf, nft_elf, state = sys.argv[1:13]
 s = open(src).read()
 s = s.replace("rehearsal = false", "rehearsal = true", 1)
-def setv(key, val, s):
-    return re.sub(rf'(?m)^{key} = .*$', f'{key} = "{val}"', s, count=1)
-for k, v in [("rpc_url", rpc), ("deployer_payer", payer), ("nft_admin", admin), ("admin", admin), ("treasury", treasury),
-             ("names_cli", names), ("nft_cli", nft), ("imageid_cmd", imageid), ("registry_elf", reg_elf), ("nft_elf", nft_elf),
-             ("state_file", state), ("upgrade_wallet_dir", "rehearsal")]:
-    s = setv(k, v, s)
+def setv(section, key, val, s):
+    # Only inside [section]: [confirmed_by_jef] has keys with the same names (rpc_url, admin, ...).
+    head = re.search(rf'(?m)^\[{re.escape(section)}\]\s*$', s)
+    assert head, f"no [{section}] in params.toml"
+    nxt = re.search(r'(?m)^\[', s[head.end():])
+    end = head.end() + (nxt.start() if nxt else len(s) - head.end())
+    body, n = re.subn(rf'(?m)^{key} = .*$', f'{key} = "{val}"', s[head.end():end], count=1)
+    assert n == 1, f"no {key} in [{section}]"
+    return s[:head.end()] + body + s[end:]
+for sec, k, v in [("network", "rpc_url", rpc), ("accounts", "deployer_payer", payer), ("accounts", "nft_admin", admin),
+                  ("accounts", "admin", admin), ("accounts", "treasury", treasury),
+                  ("tooling", "names_cli", names), ("tooling", "nft_cli", nft), ("tooling", "imageid_cmd", imageid),
+                  ("artifacts", "registry_elf", reg_elf), ("artifacts", "nft_elf", nft_elf),
+                  ("tooling", "state_file", state), ("keys", "upgrade_wallet_dir", "rehearsal")]:
+    s = setv(sec, k, v, s)
 s = s.replace('name = "lez-v0.4-testnet"', 'name = "local-rehearsal"', 1)
 open(dst, "w").write(s)
 PY
@@ -131,7 +144,7 @@ NEWPRICE=150000   # 8+ characters, 30 days (default 100000)
 if reached price; then
   say "3. admin changes one price cell (8+ characters, 30 days -> $NEWPRICE)"
   N "$W" set-price --tier 8+ --term 30d "$NEWPRICE" 2>&1 | quiet | tail -3
-  got=$(N "$W" settings | $PY -c 'import json,sys; s=json.load(sys.stdin); p=s["prices"]; print(p["8+"]["30d"] if isinstance(p,dict) else p[2][0])')
+  got=$(N "$W" settings | $PY -c 'import json,sys; s=json.load(sys.stdin); p=s["prices"]; print((p.get("tier_8_plus") or p.get("8+"))["30d"] if isinstance(p,dict) else p[2][0])')
   [ "$got" = "$NEWPRICE" ] && ok "set-price: settings show $got" || bad "set-price: settings show $got"
 fi
 
@@ -145,15 +158,15 @@ if reached register; then
     ( set +e
       LEE_WALLET_HOME_DIR=$WU2 "$NAMES_CLI" --program "$REG" setup > "$R/setup-priv.log" 2>&1
       U2P=$(id_of Public < "$R/setup-priv.log"); [ -n "$U2P" ] || U2P=$(LEE_WALLET_HOME_DIR=$WU2 "$NAMES_CLI" wallet account list 2>/dev/null | id_of Public)
-      kitw auth-transfer send --from "Public/$OP" --to-pk "$(pk "$WU2" "$U2P")" --amount 300000000 >> "$R/setup-priv.log" 2>&1
+      kitw auth-transfer send --from "Public/$OP" --to-initial-key "$(pk "$WU2" "$U2P")" --amount 300000000 >> "$R/setup-priv.log" 2>&1
       LEE_WALLET_HOME_DIR=$WU2 "$NAMES_CLI" --program "$REG" setup >> "$R/setup-priv.log" 2>&1
       LEE_WALLET_HOME_DIR=$WU2 "$NAMES_CLI" --program "$REG" register "$PRIVNAME" --term 30d --wait > "$R/reg-priv.log" 2>&1; echo "EXIT $?" >> "$R/reg-priv.log" ) &
     PRIVPID=$!
   fi
   wait $PUBPID || true
   tail -4 "$R/reg-pub.log"
-  owner=$(N "$WU1" resolve "$PUBNAME" 2>/dev/null | $PY -c 'import json,sys; r=json.load(sys.stdin); print(r.get("account") or r.get("owner") or "")' 2>/dev/null || true)
-  grep -q "EXIT 0" "$R/reg-pub.log" && ok "public registration of $PUBNAME (5-minute wait) landed; resolve owner $owner" || bad "public registration (see $R/reg-pub.log)"
+  owner=$(N "$WU1" resolve "$PUBNAME" 2>/dev/null | $PY -c 'import json,sys; r=json.load(sys.stdin); print(r.get("held_by") or r.get("account") or r.get("owner") or "")' 2>/dev/null || true)
+  grep -q "EXIT 0" "$R/reg-pub.log" && ok "public registration of $PUBNAME (5-minute wait) landed; held by $owner" || bad "public registration (see $R/reg-pub.log)"
   t_after=$(bal "$TREASURY")
   [ $((t_after - t_before)) = "$NEWPRICE" ] && ok "treasury got exactly the new price $NEWPRICE" || bad "treasury delta $((t_after - t_before)), expected $NEWPRICE"
   N "$WU1" resolve "$PUBNAME" > "$R/resolve-pub.json" 2>&1 || true
@@ -182,14 +195,24 @@ if reached market; then
   grep -q "$U3" "$R/resolve-bought.json" && ok "$PUBNAME now resolves to the buyer" || bad "after the buy (see $R/resolve-bought.json)"
 fi
 
-# ---- 6. site ------------------------------------------------------------------------------
+# ---- 6. sites: a cid site (what `lns publish` writes), discover=off, an on-chain page, a subname
+CID=${CID:-zDvZRwzkxrehearsal1cidsite0000000000000000000000}
+sites_has() { N "$WU3" sites --json > "$R/sites.json" 2>&1 || true; grep -q "\"name\": \"$1\"" "$R/sites.json"; }
 if reached site; then
-  say "6. U3 publishes a site on $PUBNAME; it appears in the sites directory"
+  say "6. U3 publishes a cid site on $PUBNAME the way lns publish does (names profile --cid), then discover=off, then a page"
+  N "$WU3" profile "$PUBNAME" --cid "$CID" --display "Rehearsal site" 2>&1 | quiet | tail -2
+  N "$WU3" resolve "$PUBNAME" > "$R/resolve-cid.json" 2>&1 || true
+  sites_has "$PUBNAME" && ok "cid site (no on-chain page) listed in the sites directory" || bad "cid site not in the sites directory (see $R/sites.json)"
+  grep -q '"title": "Rehearsal site"' "$R/sites.json" && ok "directory entry: title from the display text" || bad "directory entry title (see $R/sites.json)"
+  N "$WU3" profile "$PUBNAME" --no-discover 2>&1 | quiet | tail -2
+  sites_has "$PUBNAME" && bad "discover=off: still listed (see $R/sites.json)" || ok "discover=off removes the site from the directory"
+  N "$WU3" profile "$PUBNAME" --discover 2>&1 | quiet | tail -2
+  sites_has "$PUBNAME" && ok "clearing discover=off lists the cid site again" || bad "re-list after --discover (see $R/sites.json)"
   printf '<!doctype html><title>%s</title><h1>Rehearsal site</h1><p>Published on a local LEZ v0.4.0 chain.</p>\n' "$PUBNAME" > "$R/index.html"
   N "$WU3" set-page "$PUBNAME" "$R/index.html" 2>&1 | quiet | tail -3
   N "$WU3" resolve "$PUBNAME" > "$R/resolve-site.json" 2>&1 || true
   N "$WU3" sites > "$R/sites.txt" 2>&1 || true
-  grep -q "$PUBNAME" "$R/sites.txt" && ok "site listed in the sites directory" || bad "sites directory (see $R/sites.txt)"
+  sites_has "$PUBNAME" && ok "on-chain page published; site still listed once" || bad "sites directory after set-page (see $R/sites.json)"
   N "$WU3" subname create "blog.$PUBNAME" --owner "Public/$U3" --permanent 2>&1 | quiet | tail -2 || true
   N "$WU3" resolve "blog.$PUBNAME" > "$R/resolve-sub.json" 2>&1 && ok "subname blog.$PUBNAME resolves" || bad "subname (see $R/resolve-sub.json)"
 fi

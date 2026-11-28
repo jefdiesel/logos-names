@@ -1,0 +1,76 @@
+LNS registry v8 + lez_nft v3: deploy rehearsal on a local LEZ v0.4.0 chain
+Date: 2026-11-28. Machine: Colab VM (8 cores, 50 GB), session `lnsdeploy`.
+Chain: standalone sequencer_service v0.4.0 (a255b42) on 127.0.0.1:3940, 5 s blocks, via the
+testnet kit (jefdiesel/logos-execution-zone testnet-0.4, rc3 era) with two edits (below).
+Source: lns-04-release b54d8aa + this commit's CLI and deploy-kit fixes (checked by sha256).
+Guest images (non-Docker builds): registry e93931586973b7c24e0990c19c13ced7a250cd2b1b409650746381d395b95501,
+lez_nft 5a47f6b61b45f1e8dd59808f00f0e351baf327a868ec5185115b46d761cdbf3e (the ELF did not change with the CLI fix).
+
+How it ran: not one clean pass. Five resumed runs of deploy/rehearse.sh on the same chain
+(boot, then --from fund, --from deploy x3), each stopped by a kit/v0.4.0 drift that was
+fixed before resuming, then post-deploy.sh on the same chain. The final scripts have not run from --fresh end to end.
+
+== Failures found and fixed ==========================================================
+1. boot: kit up.sh imports the test key with `--private-key`; v0.4.0 wallet wants `--secret`.
+   Fixed by hand on the VM (kit file, not in this repo).
+2. boot: kit chain.sh writes `cross_zone` into the sequencer config; v0.4.0 has no such
+   field. Fixed by hand on the VM: `c.pop("cross_zone", None)`.
+3. fund: v0.4.0 prints a public key as `initial key <hex>` and takes `--to-initial-key`
+   (rc3: `pk` / `--to-pk`); and the names CLI ignores the wallet config's sequencer and uses
+   LOGOS_NAMES_RPC (default: the public testnet), so every wallet call timed out after 60 s.
+   Fixed in deploy.sh + rehearse.sh (both key forms parsed; RPC exported before any wallet call).
+4. deploy: rehearse.sh's params rewrite hit `[confirmed_by_jef]` keys of the same name
+   (rpc_url, admin, ...) instead of `[network]`/`[accounts]`. Fixed: section-aware rewrite.
+5. configure-nft: the sequencer's r0vm was 3.0.3; v0.4.0 uses risc0-zkvm 3.1.0
+   ("r0vm server is not compatible"). Fixed on the VM: `rzup install r0vm 3.1.0`.
+   The Mini's guarded r0vm is 3.0.5: it needs 3.1.0 too (RUNBOOK checklist).
+6. verify: deploy.sh read the price table as `5`/`6-7`/`8+`; the CLI prints `tier_5`/
+   `tier_6_7`/`tier_8_plus`. On-chain prices were right. Fixed: both key forms accepted.
+7. post-deploy: the resolve JSON has `held_by`, not `account`; the smoke picked the
+   wallet's first (unfunded) account. Fixed: `held_by` read, `smoke_public_owner` used.
+
+== Steps (final state) ================================================================
+0 boot chain                                  PASS chain up at http://127.0.0.1:3940
+1 fund deployer/admin/treasury/users          PASS accounts funded
+2 deploy.sh --send: accounts, deploy lez_nft (6 segments), deploy registry (8 segments),
+  configure lez_nft (admin, authorise registry, reserve LNS collection), fund header +
+  configure registry (binds nft_program), read back
+                                              PASS both programs deployed and configured, read back
+                                                   (images OK; settings admin/treasury/mode/prices/premium/nft_program OK)
+3 set-price 8+ / 30d -> 150000                PASS settings show 150000
+4 public registration (5-min wait)            PASS landed; treasury got exactly 150000
+  tied NFT                                    PASS token minted in the LNS collection (= lib.py lns_collection_id)
+  deed metadata                               PASS lns://deed/<name>
+5 list 1000000 + buy                          PASS listing in the market directory
+                                              PASS seller +975000 (97.5%), treasury +25000 (2.5%)
+                                              PASS name resolves to the buyer
+6 cid site, as `lns publish` writes it (names profile --cid, no on-chain page)
+                                              PASS listed in the sites directory   <- the directory fix
+  directory entry                             PASS title from the display text ("Rehearsal site")
+  discover=off                                PASS removed from the directory
+  discover back on                            PASS cid site listed again
+  on-chain page added                         PASS still listed, once
+  subname blog.<name> (permanent)             PASS resolves
+7 in-place upgrade with the header key        PASS header still holds the same image; names and settings intact
+8 private registration (15-min wait + proofs) PENDING
+9 post-deploy.sh --send, held name `web` (locked, 3 chars): admin registered it permanent
+  (paid the 1-5 char permanent price, 400 M, to the treasury), then transferred it
+                                              PASS held_by = the owner from [[held_names]]; rerun skips it cleanly
+  post-deploy.sh --send --skip-held, smoke public 30d registration from SMOKE_WALLET
+                                              PASS treasury +150000 (the changed 8+/30d price)
+  checklist's first command (`names wallet account new public` in an empty folder)
+                                              PASS prints a Public/ id, makes the wallet
+
+== Measured ==========================================================================
+Payer spent 55.4 M in total for both deploys, the registry header's 10 M Configure fund and
+the 8-segment upgrade (default local fees). Registry Configure fee 365896; NFT Configure ~4.4 k.
+Proofs on 8 Colab cores (CPU, real, not dev mode): about 13 minutes each.
+
+== Known limits (not fixed here) =======================================================
+- The web app (gateway/public/app/register.js) still sends SiteDirOp::Keep on its direct
+  profile write, so a cid set from the web app is listed only on the next CLI/module edit.
+- The Names Wallet module path is unit-tested (decision table) but not run on chain.
+- A name in grace is not listed (the registry refuses the Upsert); it is listed on the next
+  edit after renewal.
+- The CLI labels a locked 1-4 character name as "5 chars" when quoting its price (it is the
+  1-5 character tier).

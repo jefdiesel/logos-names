@@ -37,7 +37,7 @@ STATE=${STATE:-$(rel "$(p 'd["tooling"].get("state_file","state/deploy-state.env
 [ -n "${REG_HEADER:-}" ] || die "no registry id in $STATE"
 export LOGOS_NAMES_RPC=$RPC LOGOS_NAMES_PROGRAM=$REG_HEADER
 N() { "$NAMES_CLI" --program "$REG_HEADER" "$@"; }
-holder() { N resolve "$1" 2>/dev/null | $PY -c 'import json,sys; r=json.load(sys.stdin); print(r.get("account") or r.get("holder") or ("registered" if r.get("name") else ""))' 2>/dev/null || true; }
+holder() { N resolve "$1" 2>/dev/null | $PY -c 'import json,sys; r=json.load(sys.stdin); print(r.get("held_by") or r.get("account") or r.get("holder") or ("registered" if r.get("name") else ""))' 2>/dev/null || true; }
 bal() { N wallet account get --account-id "Public/$1" 2>/dev/null | sed -nE 's/^Balance:? ?([0-9]+).*/\1/p' | head -1; }
 run() { info "\$ $*"; [ $SEND = 1 ] || return 0; "$@" 2>&1 | grep -vE '^(Stored|Transaction data)' | cut -c1-220; return "${PIPESTATUS[0]}"; }
 
@@ -52,7 +52,7 @@ if [ $HELD = 1 ]; then
     else info "$name is registered already ($cur)"; fi
     if [ "$owner" != - ] && [ "$owner" != PLACEHOLDER ]; then
       cur=$(holder "$name")
-      if [ $SEND = 0 ] || [ "$cur" = "$ADMIN" ] || [ "$cur" = registered ]; then run N transfer "$name" "$owner" || die "handing $name to $owner failed"
+      if [ $SEND = 0 ] || [ "$cur" = "$ADMIN" ]; then run N transfer "$name" "$owner" || die "handing $name to $owner failed"
       else info "$name is not held by the admin any more ($cur): not transferring"; fi
     else info "$name has no owner in params: it stays with the admin"; fi
   done
@@ -62,7 +62,9 @@ if [ $SMOKE = 1 ]; then
   NAME=$(p 'd["post_deploy"].get("smoke_public_name","")'); TERM_=$(p 'd["post_deploy"].get("smoke_term","30d")')
   say "smoke: register $NAME publicly for $TERM_ from SMOKE_WALLET"
   [ -n "${SMOKE_WALLET:-}" ] || { info "SMOKE_WALLET not set: skipping"; exit 0; }
-  U=$(LEE_WALLET_HOME_DIR=$SMOKE_WALLET "$NAMES_CLI" wallet account list 2>/dev/null | id_of Public)
+  # [post_deploy].smoke_public_owner names the funded account; else the wallet's first public one.
+  U=$(p 'd["post_deploy"].get("smoke_public_owner","")' | id_of Public)
+  [ -n "$U" ] || U=$(LEE_WALLET_HOME_DIR=$SMOKE_WALLET "$NAMES_CLI" wallet account list 2>/dev/null | id_of Public)
   [ -n "$U" ] || die "no public account in $SMOKE_WALLET"
   before=$(bal "$TREASURY")
   LEE_WALLET_HOME_DIR=$SMOKE_WALLET run N register "$NAME" --owner "Public/$U" --term "$TERM_" --wait || die "smoke registration failed"

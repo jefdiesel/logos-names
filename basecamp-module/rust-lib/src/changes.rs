@@ -15,9 +15,10 @@
 
 use crate::registry::{
     account_text, bucket_of, commitment, commitment_seed, deposit_seed, is_valid_name,
-    market_bucket_seed, name_seed, nft_config_seed, nft_token_id, nft_token_seed, owner_tag, page_seed, pda,
+    market_bucket_seed, name_seed, nft_config_seed, nft_token_id, nft_token_seed, owner_tag, page_address, page_seed, pda,
     price_tier_for_len, register_generation, rerelease_premium, seal_page,
-    settings_seed, site_bucket_seed, site_dir_header_seed, slot_id, AccountId, Derived, NameId,
+    discover_is_off, settings_seed, site_bucket_seed, site_dir_header_seed, site_title_for, slot_id, split_subname,
+    AccountId, Derived, NameId,
     OwnerTag, Profile, Registry, Resolved, Settings, SiteDirOp, SubnameSale, Writer,
     MAX_SEALED_PAGE_LEN, MAX_SEALED_RECORD_LEN, NAME_SUFFIX, NATIVE_TOKEN, VPK_LEN,
 };
@@ -150,6 +151,18 @@ pub fn encode_renew(id: &NameId, term: u8, fee: u128, treasury: Option<&AccountI
     writer.optional(treasury);
     writer.u64(now);
     writer.0
+}
+
+/// Whether the profile points the name at a Logos Storage site (a non-empty `cid` entry).
+pub fn has_cid_site(profile: &Profile) -> bool {
+    profile.texts.iter().any(|(k, v)| k == "cid" && !v.trim().is_empty())
+}
+
+/// The sites-directory step for a top-level name: `Some(true)` lists it, `Some(false)` unlists
+/// it, `None` leaves the directory alone. Listed while it has a site and no `discover=off`.
+fn site_dir_step(listed: bool, has_site: bool, discover_off: bool) -> Option<bool> {
+    let want = has_site && !discover_off;
+    (want != listed).then_some(want)
 }
 
 /// v8 `SetRecord { id, sealed, site_dir }` (`0x02`).
@@ -474,7 +487,7 @@ impl Registry {
     fn edit_profile(&self, name: &str, derived: &Derived, held: &[AccountId], edit: Edit<'_>) -> Result<Change, String> {
         let (record, holder) = self.holder(name, derived, held)?;
         let slot = slot_id(name, &derived.id);
-        let mut profile = record.profile;
+        let mut profile = record.profile.clone();
         edit(&mut profile)?;
         if profile.texts.len() > MAX_TEXT_RECORDS {
             return Err(format!("a name holds at most {MAX_TEXT_RECORDS} entries"));
@@ -485,12 +498,58 @@ impl Registry {
                 profile.sealed_len()
             ));
         }
+        let has_page = !self.state(&page_address(&self.program, &slot))?.is_empty();
+        let (site_dir, site_mentions) = self.site_dir_for(name, &slot, &record, &profile, has_page)?;
+        let mut mentions = vec![registry_actor(&self.program, name_seed(&slot))];
+        mentions.extend(site_mentions);
         Ok(Change::new(
             &self.program,
-            encode_set_record(&slot, &profile.seal(&derived.key)?, &SiteDirOp::Keep),
+            encode_set_record(&slot, &profile.seal(&derived.key)?, &site_dir),
             holder,
-            vec![registry_actor(&self.program, name_seed(&slot))],
+            mentions,
         ))
+    }
+
+    /// The sites-directory step for a top-level name after a profile or page change, and the
+    /// directory actors it reaches. A name is listed while it has a site (an on-chain page or a
+    /// `cid` site, as `lns publish` writes) unless its profile sets `discover=off`; it leaves the
+    /// directory when its last site goes or `discover=off` is set. Same rule as the CLI.
+    fn site_dir_for(
+        &self,
+        name: &str,
+        slot: &NameId,
+        record: &Resolved,
+        profile: &Profile,
+        has_page: bool,
+    ) -> Result<(SiteDirOp, Vec<Mention>), String> {
+        if split_subname(name).is_some() {
+            return Ok((SiteDirOp::Keep, Vec::new()));
+        }
+        let actors = |page: u16| {
+            vec![
+                registry_actor(&self.program, site_bucket_seed(bucket_of(slot), page)),
+                registry_actor(&self.program, site_dir_header_seed()),
+            ]
+        };
+        let has_site = has_page || has_cid_site(profile);
+        match (site_dir_step(record.site_listed.is_some(), has_site, discover_is_off(profile)), record.site_listed) {
+            (None, _) => return Ok((SiteDirOp::Keep, Vec::new())),
+            (Some(false), Some(page)) => return Ok((SiteDirOp::Remove, actors(page))),
+            (Some(false), None) => return Ok((SiteDirOp::Keep, Vec::new())),
+            (Some(true), _) => {}
+        }
+        let now = self.now()?;
+        if now >= record.expires {
+            // The registry refuses to list a lapsed name (in grace): it stays unlisted until renewed.
+            return Ok((SiteDirOp::Keep, Vec::new()));
+        }
+        let page = self.site_dir_header()?.active_page[usize::from(bucket_of(slot))];
+        let title = match site_title_for(profile) {
+            t if t.is_empty() => name.to_owned(),
+            t => t,
+        };
+        let op = SiteDirOp::Upsert { name: name.to_owned(), title, page, now };
+        Ok((op, actors(page)))
     }
 
     /// A change that reaches the name's record and page.
@@ -715,10 +774,13 @@ impl Registry {
         if body.len() > MAX_SEALED_PAGE_LEN - PAGE_OVERHEAD {
             return Err(format!("a page is at most {} bytes", MAX_SEALED_PAGE_LEN - PAGE_OVERHEAD));
         }
-        let (_, holder) = self.holder(name, derived, held)?;
+        let (record, holder) = self.holder(name, derived, held)?;
         let slot = slot_id(name, &derived.id);
         let sealed = if body.is_empty() { Vec::new() } else { seal_page(&derived.key, content_type, body)? };
-        Ok(self.on_record_and_page(&slot, holder, encode_set_page(&slot, &sealed, &SiteDirOp::Keep)))
+        let (site_dir, site_mentions) = self.site_dir_for(name, &slot, &record, &record.profile, !body.is_empty())?;
+        let mut change = self.on_record_and_page(&slot, holder, encode_set_page(&slot, &sealed, &site_dir));
+        change.mentions.extend(site_mentions);
+        Ok(change)
     }
 
     /// Hands the name to `new_owner`; only its tag reaches the chain. The
@@ -811,6 +873,23 @@ mod tests {
 
     /// Bytes from the compiled v8 borsh vectors in `vectors.json` (written by
     /// gateway/app-src/vectors from names_core; same inputs as lez-tx.test.mjs).
+    #[test]
+    fn cid_sites_are_listed_like_pages() {
+        let mut profile = Profile::default();
+        assert!(!has_cid_site(&profile));
+        profile.texts.push(("cid".into(), "  ".into()));
+        assert!(!has_cid_site(&profile), "an empty cid is no site");
+        profile.texts[0].1 = "zDvZRwzm1234".into();
+        assert!(has_cid_site(&profile));
+        // (listed, has_site, discover_off) -> step
+        assert_eq!(site_dir_step(false, true, false), Some(true), "a new site (page or cid) is listed");
+        assert_eq!(site_dir_step(true, true, false), None, "a listed site is left alone");
+        assert_eq!(site_dir_step(true, true, true), Some(false), "discover=off unlists");
+        assert_eq!(site_dir_step(false, true, true), None);
+        assert_eq!(site_dir_step(true, false, false), Some(false), "the last site removed unlists");
+        assert_eq!(site_dir_step(false, false, false), None);
+    }
+
     #[test]
     fn instructions_encode_as_core_does() {
         let vectors: Value = serde_json::from_str(include_str!("../../../gateway/app-src/vectors/vectors.json")).expect("JSON");

@@ -1931,7 +1931,7 @@ impl Registry {
     }
 
     /// The registry's state on `account`; empty when the account holds none.
-    fn state(&self, account: &AccountId) -> Result<Vec<u8>, String> {
+    pub(crate) fn state(&self, account: &AccountId) -> Result<Vec<u8>, String> {
         self.actor_state(account, &self.program)
     }
 

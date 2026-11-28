@@ -1,7 +1,67 @@
 # LNS registry v8 + lez_nft v3: Monday deploy on the official LEZ v0.4 testnet
 
-Branch `lns-04-release`. Everything here was rehearsed end to end on a local LEZ v0.4.0
-chain with `deploy/rehearse.sh` (results: the commit that last touched this file).
+Branch `lns-04-release`. Rehearsed end to end on a local LEZ v0.4.0 chain with
+`deploy/rehearse.sh`; step-by-step results in `deploy/rehearsal/results.txt` (what passed,
+what did not, and the kit edits the run needed).
+
+## Monday checklist
+
+**Jef provides** (nothing here is in git; ids are public account ids, never keys):
+
+| What | Where it goes |
+|---|---|
+| Official LEZ v0.4 testnet RPC URL, when Logos publishes it | `params.toml` `[network].rpc_url` |
+| Its channel id (`getChannelId` on that RPC) | `params.toml` `[network].expected_channel_id` |
+| The upgrade-key wallet folder (new, mode 700; password kept apart) | `[keys].upgrade_wallet_dir` and `LEE_WALLET_HOME_DIR` |
+| Deployer payer, admin, treasury, NFT admin (`Public/…` ids) | `[accounts]` `deployer_payer`, `admin`, `treasury`, `nft_admin` |
+| Owners of the held names `jef`, `logos`, `web`, `android` | `[[held_names]].owner` (empty = stays with the admin) |
+| Admin funds for the held names: each is placed permanent at the 1-5 character price (400 M today), 1.6 B for all four (it goes to the treasury) | the admin account, before `post-deploy.sh` |
+| A funded smoke wallet and its public account | `SMOKE_WALLET`, `[post_deploy].smoke_public_owner` |
+| `true` for `admin`, `treasury`, `nft_admin`, `rpc_url`, `upgrade_wallet_dir`, `image_ids` | `[confirmed_by_jef]` |
+
+**We do before Monday:** the reproducible (Docker) guest builds of both programs and their ids
+in `deploy/expected-image-ids.txt` (only the `.example` exists; the rehearsal used non-Docker
+builds), and the `names`, `lez-nft`, `lns_imageid` binaries on the Mini (section 1). The
+v0.4.0 tools use risc0-zkvm 3.1.0 and the names CLI proves through an external `r0vm`, which
+must be 3.1.0: the Mini's guarded `r0vm` points at 3.0.5 (`REAL=` in `~/.cargo/bin/r0vm`).
+Install 3.1.0 (`rzup install r0vm 3.1.0`) and point the guard at it, keeping the guard (Jef's
+call; any proof the CLI makes on the Mini, such as a private registration, needs it).
+
+**Commands, in order** (on the Mini; `<wallet>` = the upgrade-key wallet folder):
+
+```
+deploy/test-dry-run.sh
+```
+```
+LEE_WALLET_HOME_DIR=<wallet> LOGOS_NAMES_RPC=<official rpc> names wallet account new public
+```
+(fund that payer from the faucet, put its id in `[accounts].deployer_payer`)
+```
+LEE_WALLET_HOME_DIR=<wallet> deploy/deploy.sh --params deploy/params.toml
+```
+```
+LEE_WALLET_HOME_DIR=<wallet> deploy/deploy.sh --params deploy/params.toml --send
+```
+(back up `<wallet>` now: it holds both upgrade keys)
+```
+LEE_WALLET_HOME_DIR=<wallet> deploy/post-deploy.sh --params deploy/params.toml --send
+```
+```
+SMOKE_WALLET=<smoke wallet> deploy/post-deploy.sh --params deploy/params.toml --send --skip-held
+```
+
+**Then the program ids go into the clients** (section 3 lists every file): the names CLI
+`DEFAULT_PROGRAM` and `DEFAULT_RPC` (today's default `https://testnet.lez.logos.co`: confirm it
+or replace it with the official URL), the Names Wallet module `DEFAULT_REGISTRY` (+ version bump), the web app
+`CHAINS`/`DEFAULTS` (no entry for the official chain yet), the gateway `DEFAULT_CONFIG` /
+`lns.json`, the LNS browser, the Android app, the nameswallet site (a new
+`site/networks/<channel>.json`), the MCP server and the board. Then host the locked-name
+shards (section 4).
+
+**Still placeholder today:** every `PLACEHOLDER` in `params.toml` (`rpc_url`,
+`upgrade_wallet_dir`, the four `[accounts]`), `expected_channel_id` (empty), the held-name
+owners, the `[post_deploy]` smoke wallet/owners, `deploy/expected-image-ids.txt` (missing),
+and the old registry id `38jEfVV1…h2gq` in every client default.
 
 ## 0. Rules
 
@@ -44,12 +104,14 @@ chain with `deploy/rehearse.sh` (results: the commit that last touched this file
    ```
    LEE_WALLET_HOME_DIR=<wallet> names wallet account new public
    ```
-   Fund the payer from the faucet. A deploy costs gas by program size; budget ~3 B for both
-   programs plus Configure (measured in the rehearsal: see section 5).
+   Fund the payer from the faucet. Measured in the rehearsal (local v0.4.0 chain, default
+   fees): both deploys (14 segments), the registry header's 10 M Configure fund and a full
+   in-place upgrade of the registry together took 55.4 M from the payer; 200 M is ample. The
+   official chain's fees may differ: check one `--dry-run` quote first.
 3. Fill `[accounts]`: `deployer_payer`, `admin`, `treasury`, `nft_admin` (public ids only),
    `[keys].upgrade_wallet_dir` (the wallet folder's path), and `[[held_names]].owner`.
    If the treasury is not in the deployer wallet and has never been used on the chain, export
-   `TREASURY_PUBLIC_KEY=<its 64-hex public key>` (LEZ 0.4 rejects credits to an unseen account).
+   `TREASURY_PUBLIC_KEY=<its initial key>` (the `initial key` line of `names wallet account get --account-id Public/<id> --keys` in the wallet that holds it) (LEZ 0.4 rejects credits to an unseen account).
 4. Jef sets `true` for `admin`, `treasury`, `nft_admin`, `rpc_url`, `upgrade_wallet_dir`,
    `image_ids` in `[confirmed_by_jef]` (and `prices` / `premium_start` / `held_names` if he
    wants to confirm the defaults; they stay admin-adjustable either way).
@@ -109,8 +171,20 @@ NAMES_CLI=… NFT_CLI=… IMAGEID=… NAMES_ELF=… NFT_ELF=… deploy/rehearse.
 ```
 Boots a standalone sequencer on 127.0.0.1:3940 and runs: deploy.sh --send, a price change,
 a public and a private registration side by side, the tied NFT check (collection and deed
-metadata), list + buy with the 2.5% split, a site with the sites directory, a subname, and an
-in-place upgrade with the header key. Results go to `deploy/rehearsal/results.txt`.
+metadata), list + buy with the 2.5% split, a `cid` site written the way `lns publish` writes it
+(`names profile --cid`) and its sites-directory entry, `discover=off` and back on, an on-chain
+page, a subname, and an in-place upgrade with the header key. Results go to
+`deploy/rehearsal/results.txt` (`--from STEP` appends to it; `--fresh` wipes the whole folder,
+including that file, so copy it out first). Needs `r0vm` 3.1.0 on the machine (the sequencer
+and the CLI both run guests through it).
+
+The testnet kit (`jefdiesel/logos-execution-zone` branch `testnet-0.4`, still on rc3) needs two
+edits before it boots LEZ v0.4.0 binaries (made by hand on the rehearsal machine; not yet in
+the fork): in `testnet/up.sh` the import flag is `--secret` (was `--private-key`), and in
+`testnet/sequencer/chain.sh` (and `testnet/docker/make-config.sh`) the config line
+`c["cross_zone"] = None` must become `c.pop("cross_zone", None)` (v0.4.0 has no such field).
+v0.4.0 also prints a public account's key as `initial key <hex>` and takes it as
+`--to-initial-key` (rc3: `pk` / `--to-pk`); `deploy.sh` and `rehearse.sh` use the new form.
 
 ## 6. What can be undone
 

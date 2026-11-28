@@ -2204,7 +2204,8 @@ impl Client {
         validate_profile(&profile).map_err(|reason| anyhow!(reason))?;
         let sealed = seal_profile(&key, &profile);
         let has_page = !self.actor_state(page_address(&self.program, &slot)).await?.is_empty();
-        let active_page = if has_page && record.site_listed.is_none() && !v8::discover_is_off(&profile) {
+        let has_site = has_page || v8::has_cid_site(&profile);
+        let active_page = if has_site && record.site_listed.is_none() && !v8::discover_is_off(&profile) {
             self.site_dir_header().await?.active_page[usize::from(names_core::bucket_of(&slot))]
         } else {
             0
