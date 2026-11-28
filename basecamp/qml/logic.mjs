@@ -484,6 +484,16 @@ export function activityLine(entry, now, account) {
         break
     case "token_send": title = "Sent a token"; sub = "to " + whoShown(e.to); break
     case "transfer": title = "Gave " + (e.name || "a name") + " away"; sub = "to " + whoShown(e.to); sign = ""; break
+    case "transfer_via_nft": title = "Transferred " + (e.name || "a name") + " via NFT"; sub = "to " + whoShown(e.to); sign = ""; break
+    case "renew": title = "Renewed " + (e.name || "a name"); sub = "on LEZ" + (e.term ? " (" + termLabel(e.term) + ")" : ""); break
+    case "list": title = "Listed " + (e.name || "a name") + " for sale"; sub = "on LEZ"; sign = ""; break
+    case "cancel": title = "Cancelled listing for " + (e.name || "a name"); sub = "on LEZ"; sign = ""; break
+    case "buy": title = "Bought " + (e.name || "a name"); sub = "on LEZ"; break
+    case "subname_create": title = "Created subname " + (e.name || ""); sub = "on LEZ"; sign = ""; break
+    case "subname_revoke": title = "Revoked subname " + (e.name || ""); sub = "on LEZ"; sign = ""; break
+    case "subname_sale": title = "Updated subname sales for " + (e.name || "a name"); sub = "on LEZ"; sign = ""; break
+    case "subname_buy": title = "Bought subname " + (e.name || ""); sub = "on LEZ"; break
+    case "set_discover": title = "Updated site listing for " + (e.name || "a name"); sub = "on LEZ"; sign = ""; break
     case "receive_privately": title = "Private payments to " + (e.name || "a name"); sub = "on LEZ, new receiving keys"; sign = ""; break
     case "arrived": title = "Arrived"; sub = "in " + whoShown(e.to) + (e.chain === "logos" ? " on the Logos Blockchain" : " on LEZ") + (!e.amount && e.at_least ? " · at least " + grouped(e.at_least) : ""); sign = "+"; break
     default: title = kind; sub = ""
@@ -691,4 +701,128 @@ export function inscribeCanApprove(state) {
     if (s.risky && !s.understood)
         return false
     return !!s.plan && !s.problem
+}
+
+// ── LEZ 0.4 LNS Registry v8 helpers (no BigInt — Qt QML compatible) ──
+
+/// Exact arbitrary-length decimal division by 40, rounded up (`ceil(n / 40)`),
+/// used for the 2.5% marketplace treasury fee. Returns null for non-digit input.
+export function divCeil40(digits) {
+    var x = String(digits === null || digits === undefined ? "" : digits).trim().replace(/^0+(?=\d)/, "")
+    if (!/^\d+$/.test(x))
+        return null
+    if (x === "0")
+        return "0"
+    var q = ""
+    var rem = 0
+    for (var i = 0; i < x.length; i++) {
+        rem = rem * 10 + (x.charCodeAt(i) - 48)
+        var d = Math.floor(rem / 40)
+        rem = rem % 40
+        if (q !== "" || d > 0)
+            q += String(d)
+    }
+    if (q === "")
+        q = "0"
+    return rem > 0 ? addDigits(q, "1") : q
+}
+
+/// Exact marketplace split for a listing price (minimum 40):
+/// `{price, fee, seller}` where fee = ceil(price / 40) (2.5% treasury)
+/// and seller = price - fee (97.5% seller payout). Returns null if invalid or < 40.
+export function saleSplit(priceDigits) {
+    var p = String(priceDigits === null || priceDigits === undefined ? "" : priceDigits).trim().replace(/^0+(?=\d)/, "")
+    if (!/^\d+$/.test(p) || !atLeast(p, "40"))
+        return null
+    var fee = divCeil40(p)
+    var seller = subDigits(p, fee)
+    if (fee === null || seller === null)
+        return null
+    return { price: p, fee: fee, seller: seller }
+}
+
+/// Plain-English label for a registration/renewal term.
+export function termLabel(term) {
+    switch (String(term || "").trim().toLowerCase()) {
+    case "30d": return "30 days"
+    case "1y": return "1 year"
+    case "5y": return "5 years"
+    case "permanent": return "Permanent"
+    default: return String(term || "")
+    }
+}
+
+/// Selected term's pricing breakdown from `quote_registration`'s reply:
+/// `{mode, base, premium, total, label}`, or null if no quote yet.
+export function quotePrice(quote, term) {
+    if (!quote || typeof quote !== "object")
+        return null
+    var chosen = String(term || quote.term || "1y")
+    if (quote.mode === "deposit") {
+        var dep = quote.deposit !== null && quote.deposit !== undefined ? String(quote.deposit) : "0"
+        return { mode: "deposit", base: dep, premium: "0", total: dep, label: termLabel(chosen) }
+    }
+    var prices = quote.prices && typeof quote.prices === "object" ? quote.prices : {}
+    var base = prices[chosen] !== undefined && prices[chosen] !== null ? String(prices[chosen]) : String(quote.base_price || "0")
+    var premium = String(quote.rerelease_premium || "0")
+    var total = addDigits(base, premium) || base
+    return { mode: String(quote.mode || "fee"), base: base, premium: premium, total: total, label: termLabel(chosen) }
+}
+
+/// Plain-English status line for a name's expiry, 30-day grace period, and 21-day re-release premium.
+export function graceAndPremiumText(record, nowMs) {
+    if (!record || typeof record !== "object")
+        return ""
+    if (record.permanent || record.never)
+        return "Permanent — never expires"
+    var now = Number(nowMs) || 0
+    if (record.in_grace) {
+        var left = record.grace_ends ? Math.max(0, Math.round((Number(record.grace_ends) - now) / 1000)) : 0
+        return left > 0
+            ? "In 30-day grace period (" + durationWords(left) + " left to renew before re-release)."
+            : "In 30-day grace period. Renew now to keep it."
+    }
+    if (record.lapsed)
+        return "Lapsed — after grace, anyone can register it with a 21-day falling re-release premium."
+    if (record.expires) {
+        var rem = Math.max(0, Math.round((Number(record.expires) - now) / 1000))
+        return rem > 0 ? "Active (" + durationWords(rem) + " remaining)" : "Expired"
+    }
+    return ""
+}
+
+/// Whether the name opted out of the public LNS sites directory (`discover=off`).
+export function discoverIsOff(record) {
+    if (!record || typeof record !== "object")
+        return false
+    if (record.discover_off === true)
+        return true
+    return !!(record.texts && typeof record.texts.discover === "string" && record.texts.discover.trim().toLowerCase() === "off")
+}
+
+/// Validation for a subname label (`<label>.<parent>`): 1-32 chars a-z, 0-9, hyphens,
+/// no leading/trailing hyphen, no `--`. Returns "" when valid.
+export function subnameLabelProblem(label) {
+    var s = String(label === null || label === undefined ? "" : label).trim().toLowerCase()
+    if (s === "")
+        return "Enter a subname label, such as blog."
+    if (s.length > 32)
+        return "A subname label is at most 32 characters."
+    if (!/^[a-z0-9-]+$/.test(s))
+        return "Use lowercase letters, digits, or hyphens only."
+    if (s.charAt(0) === "-" || s.charAt(s.length - 1) === "-")
+        return "A subname label can't start or end with a hyphen."
+    if (s.indexOf("--") >= 0)
+        return "A subname label can't contain two hyphens in a row (--)."
+    return ""
+}
+
+/// Validation for a marketplace listing price (whole number >= 40). Returns "" when valid.
+export function listingPriceProblem(text) {
+    var read = amountRead(text)
+    if (read.problem !== "")
+        return read.problem
+    if (!atLeast(read.digits, "40"))
+        return "The minimum listing price is 40."
+    return ""
 }

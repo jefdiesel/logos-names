@@ -305,5 +305,80 @@ import { inscribeTitle, inscribeChoice, inscribeFirstChoice, inscribeFee, inscri
     [["Inscribed a testimonial", "on the Logos Blockchain, from key e3635f20…ce07 · fee 1,086", "", "", "In a block"]]);
 }
 
+// LEZ 0.4 LNS registry v8 helpers: exact decimal-string 2.5% fee split (no BigInt),
+// registration/renewal pricing, grace/re-release wording, subname & listing validation, discover=off.
+import { divCeil40, saleSplit, termLabel, quotePrice, graceAndPremiumText, discoverIsOff, subnameLabelProblem, listingPriceProblem } from "./qml/logic.mjs";
+{
+  const logicSource = readFileSync(new URL("./qml/logic.mjs", import.meta.url), "utf8");
+  check("no BigInt in logic.mjs", /\bBigInt\b/.test(logicSource), false);
+
+  check("divCeil40 boundaries", [divCeil40("0"), divCeil40("1"), divCeil40("39"), divCeil40("40"), divCeil40("41"), divCeil40("1000"), divCeil40("bad")],
+    ["0", "1", "1", "1", "2", "25", null]);
+  check("saleSplit boundaries", [saleSplit("39"), saleSplit("40"), saleSplit("41"), saleSplit("1000")], [
+    null,
+    { price: "40", fee: "1", seller: "39" },
+    { price: "41", fee: "2", seller: "39" },
+    { price: "1000", fee: "25", seller: "975" },
+  ]);
+  const maxSplit = saleSplit(AMOUNT_MAX);
+  check("saleSplit 128-bit AMOUNT_MAX exact", maxSplit, {
+    price: AMOUNT_MAX,
+    fee: "8507059173023461586584365185794205287",
+    seller: "331775307747915001876790242245974006168",
+  });
+  check("saleSplit 128-bit sums back to AMOUNT_MAX", addDigits(maxSplit.fee, maxSplit.seller), AMOUNT_MAX);
+
+  check("termLabel", ["30d", "1y", "5y", "permanent"].map(termLabel), ["30 days", "1 year", "5 years", "Permanent"]);
+
+  const feeQuoteV8 = {
+    mode: "fee",
+    term: "1y",
+    base_price: "500000",
+    rerelease_premium: "250000",
+    prices: { "30d": "100000", "1y": "500000", "5y": "2000000", "permanent": "10000000" },
+  };
+  check("quotePrice fee with premium", quotePrice(feeQuoteV8, "5y"), { mode: "fee", base: "2000000", premium: "250000", total: "2250000", label: "5 years" });
+  check("quotePrice deposit mode", quotePrice({ mode: "deposit", deposit: "1000000" }, "1y"), { mode: "deposit", base: "1000000", premium: "0", total: "1000000", label: "1 year" });
+
+  const now = 1794200000000;
+  check("graceAndPremiumText permanent", graceAndPremiumText({ permanent: true, never: true }, now), "Permanent — never expires");
+  check("graceAndPremiumText in grace", graceAndPremiumText({ in_grace: true, grace_ends: now + 86400 * 1000 * 5 }, now), "In 30-day grace period (5.0 days left to renew before re-release).");
+  check("graceAndPremiumText lapsed", graceAndPremiumText({ lapsed: true, in_grace: false }, now), "Lapsed — after grace, anyone can register it with a 21-day falling re-release premium.");
+  check("graceAndPremiumText active", graceAndPremiumText({ expires: now + 86400 * 1000 * 10 }, now), "Active (10.0 days remaining)");
+
+  check("discoverIsOff", [discoverIsOff({ discover_off: true }), discoverIsOff({ texts: { discover: "OFF" } }), discoverIsOff({ texts: { discover: "on" } }), discoverIsOff(null)], [true, true, false, false]);
+
+  check("subnameLabelProblem good", ["blog", "a", "my-sub-1"].map(subnameLabelProblem), ["", "", ""]);
+  check("subnameLabelProblem bad", ["", "-bad", "bad-", "a--b", "a.b", "a".repeat(33)].map((s) => subnameLabelProblem(s) !== ""), [true, true, true, true, true, true]);
+
+  check("listingPriceProblem", [listingPriceProblem("40"), listingPriceProblem("1,000"), listingPriceProblem("39"), listingPriceProblem("0"), listingPriceProblem("1,5")].map((p) => p === ""), [true, true, false, false, false]);
+  check("listingPriceProblem min message", listingPriceProblem("39"), "The minimum listing price is 40.");
+
+  const v8Now = 1794205600000;
+  check("activityLine v8 kinds", [
+    activityLine({ kind: "renew", chain: "lez", name: "ada", term: "5y", amount: "2000000", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "list", chain: "lez", name: "ada", amount: "10000", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "cancel", chain: "lez", name: "ada", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "buy", chain: "lez", name: "ada", amount: "10000", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "transfer_via_nft", chain: "lez", name: "ada", to: "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "subname_create", chain: "lez", name: "blog.ada", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "subname_revoke", chain: "lez", name: "blog.ada", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "subname_sale", chain: "lez", name: "ada", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "subname_buy", chain: "lez", name: "blog.ada", state: "done", at: 1794200000 }, v8Now).title,
+    activityLine({ kind: "set_discover", chain: "lez", name: "ada", state: "done", at: 1794200000 }, v8Now).title,
+  ], [
+    "Renewed ada",
+    "Listed ada for sale",
+    "Cancelled listing for ada",
+    "Bought ada",
+    "Transferred ada via NFT",
+    "Created subname blog.ada",
+    "Revoked subname blog.ada",
+    "Updated subname sales for ada",
+    "Bought subname blog.ada",
+    "Updated site listing for ada",
+  ]);
+}
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILED");
 process.exit(failures ? 1 : 0);

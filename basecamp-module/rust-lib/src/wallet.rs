@@ -119,12 +119,16 @@ pub fn private_keys(setup: &Setup, choice: &str) -> Result<([u8; 32], Vec<u8>), 
 }
 
 fn mention_json(mention: &Mention) -> Value {
-    json!({
+    let mut obj = json!({
         "account": registry::account_text(&mention.account),
         "program": registry::account_text(&mention.program),
         "seed": mention.seed.as_ref().map(|seed| registry::hex(seed)),
         "signs": mention.signs,
-    })
+    });
+    if let Some(pda_program) = mention.pda_program.as_ref() {
+        obj["pda_program"] = Value::from(registry::account_text(pda_program));
+    }
+    obj
 }
 
 fn change_json(change: &Change) -> Value {
@@ -190,8 +194,9 @@ mod tests {
         let change = Change {
             message: vec![0, 8],
             mentions: vec![
-                Mention { account: [1; 32], program: [7; 32], seed: None, signs: true },
-                Mention { account: [2; 32], program: [7; 32], seed: Some([3; 32]), signs: false },
+                Mention { account: [1; 32], program: [7; 32], seed: None, pda_program: None, signs: true },
+                Mention { account: [2; 32], program: [7; 32], seed: Some([3; 32]), pda_program: None, signs: false },
+                Mention { account: [4; 32], program: [9; 32], seed: Some([5; 32]), pda_program: Some([9; 32]), signs: false },
             ],
             signer: [1; 32],
             needs: 5,
@@ -202,8 +207,10 @@ mod tests {
         assert_eq!(sent["spent"], "5");
         assert_eq!(sent["mentions"][0]["seed"], Value::Null);
         assert_eq!(sent["mentions"][0]["signs"], true);
+        assert!(sent["mentions"][0].get("pda_program").is_none());
         assert_eq!(sent["mentions"][1]["seed"], "03".repeat(32));
         assert_eq!(sent["mentions"][1]["program"], registry::account_text(&[7; 32]));
+        assert_eq!(sent["mentions"][2]["pda_program"], registry::account_text(&[9; 32]));
     }
 
     #[test]

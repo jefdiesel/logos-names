@@ -617,7 +617,8 @@ impl Client {
         let mut name = String::new();
         for attempt in 0..8 {
             let candidate = anon_candidate(attempt)?;
-            if self.record(&derive(&candidate).id).await?.is_none() {
+            let candidate_id = v8::slot_id(&candidate, &derive(&candidate).id);
+            if self.record(&candidate_id).await?.is_none() {
                 name = candidate;
                 break;
             }
@@ -629,7 +630,9 @@ impl Client {
         let from = default_private()?;
         let id = derive(&name).id;
         let tier = length_proof(&id)?.1;
-        let fee = self.registration_cost(tier, from, 1).await?.amount;
+        let price_tier = names_core::price_tier_for_len(name.len());
+        let now = self.now().await;
+        let fee = self.registration_cost(tier, price_tier, from, 1, None, now).await?.amount;
         let have = self.spendable(from).await?;
         if have < fee {
             bail!("your private account holds {have}, less than the {fee} deposit an anonymous name takes; add funds first");

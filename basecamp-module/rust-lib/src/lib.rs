@@ -941,6 +941,57 @@ pub trait NamesModule: Send + 'static {
     /// request stays pending. Names app only.
     fn approve_inscription(&mut self, request_id: String, from_key: String) -> String;
 
+    // ── LEZ 0.4 LNS Registry v8 (paid terms, subnames, NFTs, market, sites) ──
+    // Every parameter here is String so QML calls marshal cleanly.
+
+    /// Quotes registering or renewing `name` for `term` (`30d`, `1y`, `5y`, `permanent`):
+    /// `{name, tier, price_tier, term, mode, deposit, base_price, rerelease_premium,
+    /// total_price, in_grace, grace_ends, premium_ends, claims_until, prices: {30d, 1y, 5y, permanent}}`.
+    fn quote_registration(&mut self, name: String, term: String) -> String;
+
+    /// Public commit-reveal registration (5-minute wait) with an explicit `term` (`30d`, `1y`, `5y`, `permanent`).
+    fn register_with_term(&mut self, name: String, owner: String, private_account: String, term: String) -> String;
+
+    /// Private CLI registration (15-minute wait) with `as_public` (`"true"`/`"false"`) and `term` (`30d`/`1y`/`5y`/`permanent`).
+    fn cli_register_term(&mut self, name: String, as_public: String, term: String) -> String;
+
+    /// Renews a top-level `name` for `term` (`30d`, `1y`, `5y`, `permanent`). Anyone may pay to renew.
+    fn renew_name(&mut self, name: String, term: String) -> String;
+
+    /// Creates `<label>.<parent>` (`revocable`: `"true"` or `"false"`, `owner`: empty or `Public/…`/`Private/…`).
+    fn subname_create(&mut self, parent: String, label: String, owner: String, revocable: String) -> String;
+
+    /// Revokes a revocable subname `<label>.<parent>`.
+    fn subname_revoke(&mut self, parent: String, label: String) -> String;
+
+    /// Turns subname sales on/off on `parent` (`enabled`: `"true"`/`"false"`, `price`, `payout`: `Public/<id>`).
+    fn subname_set_sale(&mut self, parent: String, enabled: String, price: String, payout: String) -> String;
+
+    /// Buys permanent subname `<label>.<parent>` from a parent with subname sales enabled (commit-reveal).
+    fn subname_buy(&mut self, parent: String, label: String) -> String;
+
+    /// Lists top-level `name` for atomic resale (`price >= 40`, `pay_to`: `Public/<id>` or empty,
+    /// `expires_at`: duration like `7d` or empty, `public_name`: `"true"`/`"false"`).
+    fn list_name(&mut self, name: String, price: String, pay_to: String, expires_at: String, public_name: String) -> String;
+
+    /// Cancels an active resale listing on `name`.
+    fn cancel_listing(&mut self, name: String) -> String;
+
+    /// Atomically buys listed `name` (97.5% to seller `pay_to`, 2.5% treasury fee).
+    fn buy_name(&mut self, name: String) -> String;
+
+    /// Transfers `name` to `new_owner` (`Public/…` or `Private/…`) via its tied `lez_nft` v3 NFT.
+    fn transfer_via_nft(&mut self, name: String, new_owner: String) -> String;
+
+    /// Toggles public sites-directory listing (`discover`: `"on"` or `"off"`, optional `title`).
+    fn set_discover(&mut self, name: String, discover: String, title: String) -> String;
+
+    /// Lists verified sites from the on-chain sites directory (`page`: `""` for all pages or `"0"`, `"1"`, …).
+    fn sites_list(&mut self, page: String) -> String;
+
+    /// Lists verified active marketplace listings from all 16 `MarketBucket` PDAs.
+    fn market_listings(&mut self) -> String;
+
     /// Called once the module is wired to the host.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -1496,6 +1547,8 @@ struct Commitment {
     /// Whether this was a public `CommitPublic` (5-minute wait, 1-minute window) rather
     /// than a legacy/private `Commit` (15-minute wait, 10-minute window).
     public: bool,
+    /// Term index chosen for registration (`0`=30d, `1`=1y, `2`=5y, `3`=permanent).
+    term: u8,
     /// The `private_account` choice for the reveal.
     private_account: String,
     /// The reveal's transaction, once sent.
@@ -1512,6 +1565,7 @@ impl Commitment {
             "secret": registry::hex(&self.secret),
             "made": self.made,
             "public": self.public,
+            "term": self.term,
             "private_account": self.private_account,
             "revealed": self.revealed,
             "revealed_at": self.revealed_at,
@@ -1524,6 +1578,7 @@ impl Commitment {
             secret: registry::unhex(value["secret"].as_str()?).ok()?.try_into().ok()?,
             made: value["made"].as_u64()?,
             public: value["public"].as_bool().unwrap_or(false),
+            term: value["term"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(changes::REGISTER_TERM),
             private_account: value["private_account"].as_str().unwrap_or_default().to_owned(),
             revealed: value["revealed"].as_str().map(str::to_owned),
             revealed_at: value["revealed_at"].as_u64(),
@@ -1735,8 +1790,11 @@ impl Names {
             let Some(resolved) = registry.resolve(name, derived)? else {
                 return Ok(Value::Null);
             };
-            let mut value = resolved.to_json();
-            value["deposit"] = Value::from(registry.deposit(&derived.id)?.to_string());
+            let settings = registry.settings().ok().flatten();
+            let mut value = resolved.to_json_with(settings.as_ref(), registry::local_now());
+            let slot = registry::slot_id(name, &derived.id);
+            let deposit = if registry::split_subname(name).is_some() { 0 } else { registry.deposit(&slot)? };
+            value["deposit"] = Value::from(deposit.to_string());
             Ok(value)
         })
     }
@@ -2492,10 +2550,10 @@ impl Names {
         }
     }
 
-    /// One step of registering `name` for `owner`: commit, wait, reveal, or
-    /// report that it is done. See [`NamesModule::register`].
-    fn register_step(&mut self, typed: &str, owner: &str, private_account: &str) -> Result<Value, String> {
-        let name = registry::parse_name(typed)?;
+    /// One step of registering `name` for `owner` with `term`: commit, wait, reveal, or
+    /// report that it is done. See [`NamesModule::register_name`].
+    fn register_step(&mut self, typed: &str, owner: &str, private_account: &str, term: u8) -> Result<Value, String> {
+        let name = registry::parse_top_level_name(typed)?;
         self.names_here()?;
         let registry = self.registry()?;
         let held = self.held()?;
@@ -2507,6 +2565,7 @@ impl Names {
             ));
         }
         let derived = self.derived(&name);
+        let slot = registry::slot_id(&name, &derived.id);
         let mut commitments = pending()?;
         let saved = commitments.get(&registry.program, &name).filter(|saved| saved.owner == owner);
         let status = |stage: &str, tx: Option<&str>, ready_at: Option<u64>| {
@@ -2516,11 +2575,12 @@ impl Names {
                 "tx": tx,
                 "stage": stage,
                 "ready_at": ready_at,
+                "term": registry::term_label(term),
             })
         };
 
         if let Some(record) = registry.resolve(&name, &derived)? {
-            if !record.is_held_by(&derived.id, &owner) {
+            if !record.is_held_by_name(&name, &derived, &owner) {
                 return Err(format!("{name}{} is already registered", registry::NAME_SUFFIX));
             }
             // An earlier reveal has landed.
@@ -2534,7 +2594,7 @@ impl Names {
 
         let chain_now = registry.now()?;
         if let Some(mut saved) = saved.filter(|saved| saved.usable_at(chain_now)) {
-            let promised = registry::commitment(&derived.id, &registry::owner_tag(&derived.id, &owner), &saved.secret);
+            let promised = registry::commitment(&slot, &registry::owner_tag(&slot, &owner), &saved.secret);
             let landed = registry.commitment_made(&promised)?.is_some();
             if !landed && chain_now < saved.made.saturating_add(saved.window_ms()) {
                 // Sent, and still able to land.
@@ -2550,26 +2610,27 @@ impl Names {
                 }
                 let choice = if private_account.trim().is_empty() { saved.private_account.clone() } else { private_account.to_owned() };
                 let keys = if choice.trim().is_empty() { None } else { Some(wallet::private_keys(&self.cli_setup()?, &choice)?) };
-                let change = registry.reveal(&name, &derived, &owner, &saved.secret, keys)?;
+                let change = registry.reveal(&name, &derived, &owner, &saved.secret, saved.term, keys)?;
                 let sent = self.send(&registry, &held, &name, &change)?;
                 saved.revealed = sent["tx"].as_str().map(str::to_owned);
                 saved.revealed_at = Some(chain_now);
                 commitments.put(&registry.program, &name, &saved);
                 commitments.save();
                 self.remember(&registry.program, &name);
-                return Ok(merged(sent, &json!({ "stage": "revealed", "ready_at": saved.ready_at() })));
+                return Ok(merged(sent, &json!({ "stage": "revealed", "ready_at": saved.ready_at(), "term": registry::term_label(saved.term) })));
             }
             // The commitment never landed: make a new one.
         }
 
         let secret: [u8; 32] = registry::fresh_bytes()?;
-        let (change, made) = registry.commit(&name, &derived, &owner, &secret)?;
+        let (change, made) = registry.commit(&name, &derived, &owner, &secret, term)?;
         let sent = self.send(&registry, &held, &name, &change)?;
         let saved = Commitment {
             owner,
             secret,
             made,
             public: true,
+            term,
             private_account: private_account.trim().to_owned(),
             revealed: None,
             revealed_at: None,
@@ -2577,7 +2638,7 @@ impl Names {
         commitments.put(&registry.program, &name, &saved);
         commitments.save();
         self.remember(&registry.program, &name);
-        Ok(merged(sent, &json!({ "stage": "committed", "ready_at": saved.ready_at() })))
+        Ok(merged(sent, &json!({ "stage": "committed", "ready_at": saved.ready_at(), "term": registry::term_label(term) })))
     }
 
     /// Remembers `name` for `program`, for `mine`.
@@ -2625,7 +2686,7 @@ impl Names {
         let record = record?;
         let accounts = cli::wallet_accounts(&self.names_setup().ok()?, start.deadline).ok()?;
         accounts.into_iter().find(|account| {
-            account.split_once('/').and_then(|(_, id)| registry::parse_account(id).ok()).is_some_and(|id| registry::owner_tag(&derived.id, &id) == record.owner)
+            account.split_once('/').and_then(|(_, id)| registry::parse_account(id).ok()).is_some_and(|id| record.is_held_by_name(&name, &derived, &id))
         })
     }
 
@@ -2639,7 +2700,7 @@ impl Names {
         let record = registry::Registry::by(&self.home_sequencer(), program, start.deadline).record(name, &derived).map_err(|why| start_refused(&why))?;
         start.record_read = Some(name.to_owned());
         match record {
-            Some(record) if record.owner == registry::owner_tag(&derived.id, &account) => {
+            Some(record) if record.is_held_by_name(name, &derived, &account) => {
                 Err(format!("{} already holds {name}, so nothing was sent", registry::account_text(&account)))
             }
             // A name nobody registered has nothing to hand over: refused before any job
@@ -2877,10 +2938,12 @@ impl Names {
 
 /// What registering a name of `tier` takes under `settings`, for `deposit`.
 fn deposit_json(name: &str, tier: u8, settings: Option<&Settings>, now: u64) -> Value {
+    let price_tier = registry::price_tier_for_len(name.len());
     let mut value = json!({
         "name": name,
         "display": format!("{name}{}", registry::NAME_SUFFIX),
         "tier": changes::tier_text(tier),
+        "price_tier": price_tier,
         "mode": Settings::mode_text(settings),
         "claims_until": settings.filter(|settings| settings.claims_open(now)).map(|settings| settings.claims_until),
     });
@@ -2893,9 +2956,25 @@ fn deposit_json(name: &str, tier: u8, settings: Option<&Settings>, now: u64) -> 
     };
     value["deposit"] = deposit;
     if let Some(settings) = settings.filter(|settings| !settings.deposit_mode()) {
-        value["fee"] = Value::from(settings.prices[usize::from(changes::REGISTER_TERM)].to_string());
+        value["fee"] = Value::from(settings.price_for(price_tier, changes::REGISTER_TERM).to_string());
+        value["prices"] = json!({
+            "30d": settings.price_for(price_tier, registry::TERM_30D).to_string(),
+            "1y": settings.price_for(price_tier, registry::TERM_1Y).to_string(),
+            "5y": settings.price_for(price_tier, registry::TERM_5Y).to_string(),
+            "permanent": settings.price_for(price_tier, registry::TERM_PERMANENT).to_string(),
+        });
+        value["premium_start"] = Value::from(settings.premium_start.to_string());
     }
     value
+}
+
+fn tier_prices_json(row: &[u128; registry::TERMS]) -> Value {
+    json!({
+        "30d": row[0].to_string(),
+        "1y": row[1].to_string(),
+        "5y": row[2].to_string(),
+        "permanent": row[3].to_string(),
+    })
 }
 
 fn settings_json(settings: &Settings, now: u64) -> Value {
@@ -2907,11 +2986,15 @@ fn settings_json(settings: &Settings, now: u64) -> Value {
         },
         "admin": registry::account_text(&settings.admin),
         "treasury": registry::account_text(&settings.treasury),
-        "prices": {
-            "30d": settings.prices[0].to_string(),
-            "1y": settings.prices[1].to_string(),
-            "5y": settings.prices[2].to_string(),
+        "prices": tier_prices_json(&settings.prices[usize::from(registry::PRICE_TIER_8_PLUS)]),
+        "tiers": {
+            "5": tier_prices_json(&settings.prices[usize::from(registry::PRICE_TIER_5)]),
+            "6-7": tier_prices_json(&settings.prices[usize::from(registry::PRICE_TIER_6_7)]),
+            "8+": tier_prices_json(&settings.prices[usize::from(registry::PRICE_TIER_8_PLUS)]),
         },
+        "premium_start": settings.premium_start.to_string(),
+        "nft_program": (settings.nft_program != [0; 32]).then(|| registry::account_text(&settings.nft_program)),
+        "sale_fee_bps": registry::SALE_FEE_BPS,
         "claims_until": settings.claims_open(now).then_some(settings.claims_until),
     })
 }
@@ -3050,7 +3133,7 @@ impl NamesModule for Names {
             for (((name, added), found), derived) in remembered.iter().cloned().zip(resolved).zip(&derived) {
                 match found {
                     Some(resolved) => {
-                        let holder = held.iter().find(|account| resolved.is_held_by(&derived.id, account));
+                        let holder = held.iter().find(|account| resolved.is_held_by_name(&name, derived, account));
                         if let Some(holder) = holder {
                             names.push(json!({
                                 "name": name,
@@ -3115,7 +3198,7 @@ impl NamesModule for Names {
             let derived = self.derived(&name);
             let held = self.names_held()?.public;
             let found = registry.resolve(&name, &derived)?;
-            if !found.is_some_and(|resolved| held.iter().any(|account| resolved.is_held_by(&derived.id, account))) {
+            if !found.is_some_and(|resolved| held.iter().any(|account| resolved.is_held_by_name(&name, &derived, account))) {
                 return Err(format!("{name}{} is not held by the open wallet", registry::NAME_SUFFIX));
             }
             let mut memory = memory()?;
@@ -3150,7 +3233,7 @@ impl NamesModule for Names {
         }
         // The proof a registration carries comes from the names CLI, which holds the list.
         shortlist::use_cli(self.names_setup().ok());
-        reply(self.register_step(&name, &owner, &private_account))
+        reply(self.register_step(&name, &owner, &private_account, changes::REGISTER_TERM))
     }
 
     fn receive_privately(&mut self, name: String, private_account: String) -> String {
@@ -5105,6 +5188,268 @@ impl NamesModule for Names {
         }
         reply(self.inscription_approved(request_id.trim(), &from_key))
     }
+
+    // ── LEZ 0.4 LNS Registry v8 ─────────────────────────────────────────
+
+    fn quote_registration(&mut self, name: String, term: String) -> String {
+        reply((|| {
+            let name = registry::parse_top_level_name(&name)?;
+            let term_idx = registry::parse_term(&term)?;
+            let registry = self.registry()?;
+            let derived = self.derived(&name);
+            let tier = shortlist::tier_of_name(&name);
+            let price_tier = registry::price_tier_for_len(name.len());
+            let settings = registry.settings()?;
+            let now = registry.now().unwrap_or_else(|_| registry::local_now());
+            let existing = registry.record(&name, &derived)?;
+            let in_grace = existing.as_ref().is_some_and(|r| r.in_grace(now));
+            let grace_ends = existing.as_ref().and_then(registry::Resolved::grace_ends);
+            let (premium, premium_ends) = match (&existing, &settings) {
+                (Some(old), Some(s)) if !s.deposit_mode() => {
+                    let p = old.rerelease_elapsed(now).map_or(0, |el| registry::rerelease_premium(s.premium_start, el));
+                    let ends = old.grace_ends().map(|g| g.saturating_add(registry::PREMIUM_DURATION_MS));
+                    (p, if p > 0 { ends } else { None })
+                }
+                _ => (0, None),
+            };
+            let deposit = match &settings {
+                _ if tier == shortlist::TIER_LOCKED => None,
+                Some(s) if s.deposit_mode() => Some(s.deposits[usize::from(tier == shortlist::TIER_THREE)]),
+                _ => Some(0),
+            };
+            let base_price = match &settings {
+                Some(s) if !s.deposit_mode() => s.price_for(price_tier, term_idx),
+                _ => 0,
+            };
+            let total_price = match &settings {
+                Some(s) if s.deposit_mode() => deposit.unwrap_or(0),
+                Some(_) => base_price.saturating_add(premium),
+                None => 0,
+            };
+            let prices = match &settings {
+                Some(s) if !s.deposit_mode() => tier_prices_json(&s.prices[usize::from(price_tier)]),
+                _ => json!({ "30d": "0", "1y": "0", "5y": "0", "permanent": "0" }),
+            };
+            Ok(json!({
+                "name": name,
+                "display": format!("{name}{}", registry::NAME_SUFFIX),
+                "tier": changes::tier_text(tier),
+                "price_tier": price_tier,
+                "term": registry::term_label(term_idx),
+                "mode": Settings::mode_text(settings.as_ref()),
+                "deposit": deposit.map(|d| d.to_string()),
+                "base_price": base_price.to_string(),
+                "rerelease_premium": premium.to_string(),
+                "total_price": total_price.to_string(),
+                "in_grace": in_grace,
+                "grace_ends": grace_ends,
+                "premium_ends": premium_ends,
+                "claims_until": settings.as_ref().filter(|s| s.claims_open(now)).map(|s| s.claims_until),
+                "prices": prices,
+            }))
+        })())
+    }
+
+    fn register_with_term(&mut self, name: String, owner: String, private_account: String, term: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let term_idx = match registry::parse_term(&term) {
+            Ok(t) => t,
+            Err(error) => return reply(Err(error)),
+        };
+        shortlist::use_cli(self.names_setup().ok());
+        reply(self.register_step(&name, &owner, &private_account, term_idx))
+    }
+
+    fn cli_register_term(&mut self, name: String, as_public: String, term: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let public = matches!(as_public.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "public");
+        let command = match cli::register_args_with_term(&name, public, &term) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.cli_job(&name, "register", |_, _, _| Ok((command, None, Value::Null)))
+    }
+
+    fn renew_name(&mut self, name: String, term: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::renew_args(&name, &term) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.forget_reads(&name);
+        let out = self.cli_job(&name, "renew", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "renew", "chain": "lez", "name": registry::normalize_name(&name), "term": term.trim() }));
+        out
+    }
+
+    fn subname_create(&mut self, parent: String, label: String, owner: String, revocable: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let is_revocable = !matches!(revocable.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "permanent");
+        let command = match cli::subname_create_args(&parent, &label, &owner, is_revocable) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        let full = command.last().cloned().unwrap_or_default();
+        self.forget_reads(&full);
+        let out = self.cli_job(&full, "subname_create", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "subname_create", "chain": "lez", "name": full, "revocable": is_revocable }));
+        self.forget_mine();
+        out
+    }
+
+    fn subname_revoke(&mut self, parent: String, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::subname_revoke_args(&parent, &label) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        let full = command.last().cloned().unwrap_or_default();
+        self.forget_reads(&full);
+        let out = self.cli_job(&full, "subname_revoke", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "subname_revoke", "chain": "lez", "name": full }));
+        self.forget_mine();
+        out
+    }
+
+    fn subname_set_sale(&mut self, parent: String, enabled: String, price: String, payout: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let on = matches!(enabled.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+        let command = match cli::subname_sale_args(&parent, on, &price, &payout) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.forget_reads(&parent);
+        let out = self.cli_job(&parent, "subname_sale", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "subname_sale", "chain": "lez", "name": registry::normalize_name(&parent), "enabled": on }));
+        out
+    }
+
+    fn subname_buy(&mut self, parent: String, label: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::subname_buy_args(&parent, &label) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        let full = command.last().cloned().unwrap_or_default();
+        self.forget_reads(&full);
+        let out = self.cli_job(&full, "subname_buy", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "subname_buy", "chain": "lez", "name": full }));
+        self.forget_mine();
+        out
+    }
+
+    fn list_name(&mut self, name: String, price: String, pay_to: String, expires_at: String, public_name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let show_name = matches!(public_name.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+        let command = match cli::list_args(&name, &price, &pay_to, &expires_at, show_name) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.forget_reads(&name);
+        let out = self.cli_job(&name, "list", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "list", "chain": "lez", "name": registry::normalize_name(&name), "amount": cli::amount_text(&price).ok() }));
+        out
+    }
+
+    fn cancel_listing(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::cancel_args(&name) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.forget_reads(&name);
+        let out = self.cli_job(&name, "cancel", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "cancel", "chain": "lez", "name": registry::normalize_name(&name) }));
+        out
+    }
+
+    fn buy_name(&mut self, name: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::buy_args(&name) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.forget_reads(&name);
+        let out = self.cli_job(&name, "buy", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "buy", "chain": "lez", "name": registry::normalize_name(&name) }));
+        self.forget_mine();
+        out
+    }
+
+    fn transfer_via_nft(&mut self, name: String, new_owner: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let command = match cli::transfer_via_nft_args(&name, &new_owner) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        let to = command[4].clone();
+        let bare = command[3].clone();
+        let mut start = Start::new(&self.home_sequencer());
+        if let Err(refused) = self.may_hold(&to, &mut start) {
+            return reply(Err(refused));
+        }
+        if let Err(refused) = self.not_held_by(&bare, &to, &mut start) {
+            return reply(Err(refused));
+        }
+        self.forget_reads(&name);
+        let out = self.cli_job_by(&name, "transfer_via_nft", &mut start, |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "transfer_via_nft", "chain": "lez", "name": bare, "to": to }));
+        self.forget_mine();
+        out
+    }
+
+    fn set_discover(&mut self, name: String, discover: String, title: String) -> String {
+        if let Err(refused) = only_the_names_app() {
+            return reply(Err(refused));
+        }
+        let off = matches!(discover.trim().to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no");
+        let command = match cli::set_discover_args(&name, off, &title) {
+            Ok(command) => command,
+            Err(error) => return reply(Err(error)),
+        };
+        self.forget_reads(&name);
+        let out = self.cli_job(&name, "set_discover", |_, _, _| Ok((command, None, Value::Null)));
+        self.log_started(&out, json!({ "kind": "set_discover", "chain": "lez", "name": registry::normalize_name(&name), "discover_off": off }));
+        out
+    }
+
+    fn sites_list(&mut self, page: String) -> String {
+        reply((|| {
+            let page = page.trim();
+            let filter = if page.is_empty() {
+                None
+            } else {
+                Some(page.parse::<u16>().map_err(|_| "page must be a whole number (0, 1, ...)".to_owned())?)
+            };
+            self.registry()?.site_directory(filter)
+        })())
+    }
+
+    fn market_listings(&mut self) -> String {
+        reply((|| Ok(Value::from(self.registry()?.market_listings()?)))())
+    }
 }
 
 // ── Wallet Provider SDK: the parts behind the methods ───────────────────
@@ -5376,13 +5721,14 @@ impl Names {
         if message.is_empty() {
             return Err("this request has nothing to send".to_owned());
         }
-        let mut mentions = vec![Mention { account: signer, program, seed: None, signs: true }];
+        let mut mentions = vec![Mention { account: signer, program, seed: None, pda_program: None, signs: true }];
         for reached in provider::stored_reached(request)? {
             let account = if reached.account == provider::SIGNER { signer } else { registry::parse_account(&reached.account)? };
             mentions.push(Mention {
                 account,
                 program: if reached.balance { registry::NATIVE_TOKEN } else { program },
                 seed: reached.seed,
+                pda_program: None,
                 signs: account == signer && reached.seed.is_none(),
             });
         }
@@ -5960,10 +6306,11 @@ mod tests {
     fn a_bad_name_is_refused_before_any_network_call() {
         let mut names = fresh();
         names.program = Some([7; 32]);
-        let answer = parsed(&names.resolve("jef.eth".into()));
+        let answer = parsed(&names.resolve("a.b.c".into()));
         assert_eq!(answer["success"], false);
         assert_eq!(names.normalize("Jef.LEZ".into()), "jef");
-        assert_eq!(names.normalize("jef.eth".into()), "");
+        assert_eq!(names.normalize("Blog.Jef".into()), "blog.jef");
+        assert_eq!(names.normalize("a.b.c".into()), "");
     }
 
     #[test]
@@ -5971,7 +6318,7 @@ mod tests {
         let mut names = fresh();
         names.program = Some([7; 32]);
         for answer in [
-            names.register_name("jef.eth".into(), "x".into(), String::new()),
+            names.register_name("a.b.c".into(), "x".into(), String::new()),
             names.release("-jef".into()),
             names.set_primary("x".into(), "not a name".into()),
             names.receive_privately("j f".into(), "auto".into()),
@@ -6007,12 +6354,14 @@ mod tests {
         let deposits = Settings {
             admin: [1; 32],
             treasury: [2; 32],
-            prices: [10, 20, 30],
+            prices: [[10, 20, 30, 400]; registry::PRICE_TIERS],
             mode: registry::MODE_DEPOSIT,
             deposits: [100, 2_000],
             claims_root: [7; 32],
             claims_until: 50,
             claims_program: [8; 32],
+            premium_start: 0,
+            nft_program: [0; 32],
         };
         let normal = deposit_json("logos", shortlist::TIER_NORMAL, Some(&deposits), 49);
         assert_eq!(normal["claims_until"], 50, "while claims are open");
@@ -6043,6 +6392,7 @@ mod tests {
             secret: [5; 32],
             made: 1_000_000,
             public: true,
+            term: changes::REGISTER_TERM,
             private_account: "auto".into(),
             revealed: Some("ab".into()),
             revealed_at: Some(2_000_000),
@@ -6155,7 +6505,7 @@ mod tests {
         assert!(!dir.join("jobs").exists() || std::fs::read_dir(dir.join("jobs")).unwrap().count() == 0, "nothing ran");
         // A private account is never on the chain to be seen: it goes.
         let derived = registry::derive("xferalpha");
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved::simple([3; 32], registry::NEVER, registry::Profile::default(), false))));
         let started = parsed(&names.cli_transfer("xferalpha".into(), format!("Private/{unseen}")));
         let id = started["value"]["id"].as_str().expect("a job").to_owned();
         assert_eq!(job_end(&mut names, &id)["state"], "done");
@@ -6457,7 +6807,7 @@ mod tests {
         let (mut names, dir) = with_fake_cli("startdeadline", "exit 0");
         let seen = "9Dk3PQD467hXAbsbMzrFYVPu5HFvUqKkU7VdoQD9oirA";
         let derived = registry::derive("xferslow");
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: [3; 32], expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved::simple([3; 32], registry::NEVER, registry::Profile::default(), false))));
         // Each read takes 1.6 s: either alone fits the 3 s a job start has, the two together don't.
         registry::STUB_DELAY.with(|delay| delay.set(std::time::Duration::from_millis(1600)));
         let started = std::time::Instant::now();
@@ -6549,7 +6899,7 @@ mod tests {
         let (mut names, dir) = with_fake_cli("mineoct", &tail);
         let derived = registry::derive("seqoct");
         let owner = registry::owner_tag(&derived.id, &registry::parse_account(holder).unwrap());
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner, expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved::simple(owner, registry::NEVER, registry::Profile::default(), false))));
         let mine = parsed(&names.cli_mine());
         assert_eq!(mine["success"], true, "{mine}");
         // goneold has no record (the stand-in sequencer gives none): it really is gone.
@@ -6565,7 +6915,7 @@ mod tests {
     fn a_name_listed_from_its_record_reads_as_the_cli_writes_it() {
         assert_eq!(cli::readable(0), "1970-01-01 00:00:00Z");
         assert_eq!(cli::readable(1_794_243_900_000), "2026-11-09 17:05:00Z");
-        let record = |expires| registry::Resolved { owner: [3; 32], expires, profile: registry::Profile::default(), claimed: false };
+        let record = |expires| registry::Resolved::simple([3; 32], expires, registry::Profile::default(), false);
         let held = cli::held_entry("jef", &record(1_794_243_900_000), "Private/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_000_000);
         assert_eq!((held["state"].as_str(), held["lapsed"].as_bool(), held["private"].as_bool()), (Some("held until 2026-11-09 17:05:00Z"), Some(false), Some(true)));
         let lapsed = cli::held_entry("jef", &record(1_794_243_900_000), "Public/CCVd76Tk3WvFb63Wbuu4exMeLRTbSuMWHqxuvysapKnk", 1_794_243_900_000);
@@ -7272,7 +7622,7 @@ mod tests {
         let (mut names, dir) = with_wallet("rp-holder", &tail);
         let derived = registry::derive("probealpha");
         let holder = registry::parse_account(PUBLIC).unwrap();
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved::simple(registry::owner_tag(&derived.id, &holder), registry::NEVER, registry::Profile::default(), false))));
         let started = parsed(&names.cli_receive_privately("probealpha".into()));
         assert_eq!(started["success"], true, "{started}");
         let history = activity::all(&config_dir().unwrap());
@@ -9201,5 +9551,64 @@ mod tests {
         assert_eq!(parsed(&names.cli_balance())["value"]["balance"], "250");
         assert!(activity::all(&config).is_empty(), "{:?}", activity::all(&config));
         zone_test_end(dir);
+    }
+
+    #[test]
+    fn v8_cli_jobs_and_validation_work() {
+        let (mut names, dir) = with_fake_cli("v8-jobs", "exit 0");
+        // Registration with term
+        let reg = parsed(&names.cli_register_term("alice".into(), "true".into(), "permanent".into()));
+        assert_eq!(reg["success"], true, "{reg}");
+        let done = job_end(&mut names, reg["value"]["id"].as_str().unwrap());
+        assert!(done["log_tail"].as_str().unwrap().contains("[--public]\n[--term=permanent]\n[--]\n[alice]"), "{done}");
+
+        // Renew
+        let ren = parsed(&names.renew_name("alice".into(), "5y".into()));
+        assert_eq!(ren["success"], true, "{ren}");
+        let done = job_end(&mut names, ren["value"]["id"].as_str().unwrap());
+        assert!(done["log_tail"].as_str().unwrap().contains("[renew]\n[--term=5y]\n[--]\n[alice]"), "{done}");
+
+        // List / cancel / buy validation and jobs
+        assert_eq!(parsed(&names.list_name("alice".into(), "39".into(), String::new(), String::new(), "false".into()))["success"], false);
+        let listed = parsed(&names.list_name("alice".into(), "1000".into(), format!("Public/{PUBLIC}"), "7d".into(), "true".into()));
+        assert_eq!(listed["success"], true, "{listed}");
+        let done = job_end(&mut names, listed["value"]["id"].as_str().unwrap());
+        assert!(done["log_tail"].as_str().unwrap().contains("[list]\n"), "{done}");
+        let cancelled = parsed(&names.cancel_listing("alice".into()));
+        assert_eq!(cancelled["success"], true, "{cancelled}");
+        let done = job_end(&mut names, cancelled["value"]["id"].as_str().unwrap());
+        assert!(done["log_tail"].as_str().unwrap().contains("[cancel]\n[--]\n[alice]"), "{done}");
+        let bought = parsed(&names.buy_name("alice".into()));
+        assert_eq!(bought["success"], true, "{bought}");
+        let done = job_end(&mut names, bought["value"]["id"].as_str().unwrap());
+        assert!(done["log_tail"].as_str().unwrap().contains("[buy]\n[--]\n[alice]"), "{done}");
+
+        // Subnames & discover
+        let sub = parsed(&names.subname_create("alice".into(), "blog".into(), String::new(), "true".into()));
+        assert_eq!(sub["success"], true, "{sub}");
+        let done = job_end(&mut names, sub["value"]["id"].as_str().unwrap());
+        assert!(done["log_tail"].as_str().unwrap().contains("[subname]\n[create]\n[--revocable]\n[--]\n[blog.alice]"), "{done}");
+        let rev = parsed(&names.subname_revoke("alice".into(), "blog".into()));
+        assert_eq!(rev["success"], true, "{rev}");
+        job_end(&mut names, rev["value"]["id"].as_str().unwrap());
+        let sale = parsed(&names.subname_set_sale("alice".into(), "true".into(), "500".into(), format!("Public/{PUBLIC}")));
+        assert_eq!(sale["success"], true, "{sale}");
+        job_end(&mut names, sale["value"]["id"].as_str().unwrap());
+        let buy_sub = parsed(&names.subname_buy("alice".into(), "shop".into()));
+        assert_eq!(buy_sub["success"], true, "{buy_sub}");
+        job_end(&mut names, buy_sub["value"]["id"].as_str().unwrap());
+        let disc = parsed(&names.set_discover("alice".into(), "off".into(), String::new()));
+        assert_eq!(disc["success"], true, "{disc}");
+        let done = job_end(&mut names, disc["value"]["id"].as_str().unwrap());
+        assert!(done["log_tail"].as_str().unwrap().contains("[profile]\n[--no-discover]\n[--]\n[alice]"), "{done}");
+
+        // Empty site directory and market listings from null sequencer
+        let sites = parsed(&names.sites_list(String::new()));
+        assert_eq!(sites["success"], true, "{sites}");
+        assert_eq!(sites["value"]["total_listed"], 0);
+        let market = parsed(&names.market_listings());
+        assert_eq!(market["success"], true, "{market}");
+        assert_eq!(market["value"], json!([]));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
