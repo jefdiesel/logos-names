@@ -809,9 +809,8 @@ mod tests {
         hex(&Sha256::digest(bytes))
     }
 
-    /// Bytes from `names_core`'s v5/v6 borsh vectors (`vectors.json`), extended with the
-    /// exact v8 trailing fields (`price_tier` on `Register`, `SiteDirOp` on `SetRecord`/
-    /// `SetPage`, and `now` on `Transfer`).
+    /// Bytes from the compiled v8 borsh vectors in `vectors.json` (written by
+    /// gateway/app-src/vectors from names_core; same inputs as lez-tx.test.mjs).
     #[test]
     fn instructions_encode_as_core_does() {
         let vectors: Value = serde_json::from_str(include_str!("../../../gateway/app-src/vectors/vectors.json")).expect("JSON");
@@ -820,8 +819,8 @@ mod tests {
         const NOW: u64 = 1_700_000_000_000;
         let member = LengthProof::Membership(Membership { index: 7, tier: TIER_THREE, path: vec![[9; 32]] });
         assert_eq!(
-            hex(&encode_register(&id, &[0xEE, 0xFF], 1, 100_000, Some(&[2; 32]), NOW, &[0x5A; 32], false, &member, 0)),
-            format!("{}00", expected("register"))
+            hex(&encode_register(&id, &[0xEE, 0xFF], 1, 100_000, Some(&[2; 32]), NOW, &[0x5A; 32], false, &member, 2)),
+            expected("register")
         );
         let non_member = LengthProof::NonMembership(NonMembership {
             left: Leaf { id: [1; 32], tier: 3 },
@@ -832,14 +831,14 @@ mod tests {
         });
         assert_eq!(
             hex(&encode_register(&id, &[0xEE], 0, 1_000_000, None, NOW, &[0x5A; 32], true, &non_member, 2)),
-            format!("{}02", expected("registerDeposit"))
+            expected("registerDeposit")
         );
         assert_eq!(hex(&encode_commit(&[0xC0; 32], NOW)), expected("commit"));
         // `CommitPublic` is variant 10 (0x0a) with the same `{ commitment, now }` payload as `Commit` (0x08).
         assert_eq!(hex(&encode_commit_public(&[0xC0; 32], NOW)), expected("commit").replacen("0008", "000a", 1));
-        assert_eq!(hex(&encode_set_record(&id, &[0xEE], &SiteDirOp::Keep)), format!("{}00", expected("setRecord")));
-        assert_eq!(hex(&encode_set_page(&id, &[], &SiteDirOp::Keep)), format!("{}00", expected("setPage")));
-        assert_eq!(hex(&encode_transfer(&id, &[2; 32], NOW)), format!("{}{}", expected("transfer"), hex(&NOW.to_le_bytes())));
+        assert_eq!(hex(&encode_set_record(&id, &[0xEE], &SiteDirOp::Keep)), expected("setRecord"));
+        assert_eq!(hex(&encode_set_page(&id, &[], &SiteDirOp::Keep)), expected("setPage"));
+        assert_eq!(hex(&encode_transfer(&id, &[2; 32], NOW)), expected("transfer"));
         assert_eq!(hex(&encode_release(&id, 1_000_000)), expected("release"));
         assert_eq!(hex(&encode_set_primary("jef")), expected("setPrimary"));
 
