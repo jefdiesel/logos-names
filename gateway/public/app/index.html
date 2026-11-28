@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Names</title>
-<meta name="description" content="Your name on the Logos Execution Zone: set up a wallet, claim a name, and chat — all in your browser.">
+<meta name="description" content="Your name on the Logos Execution Zone: wallet, names, market, subnames, sites directory, and chat — all in your browser.">
 <meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#171717" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#FBFAF7" media="(prefers-color-scheme: light)">
@@ -25,122 +25,280 @@
 </header>
 
 <main>
-
-  <!-- ===================== ONBOARDING FUNNEL ===================== -->
-  <section id="onboard" class="view" hidden>
+  <nav aria-label="Main navigation">
     <ol id="progress" class="progress">
       <li data-step="wallet">Wallet</li>
-      <li data-step="name">Name</li>
+      <li data-step="name">Names</li>
+      <li data-step="market">Market</li>
+      <li data-step="subnames">Subnames</li>
+      <li data-step="sites">Sites</li>
       <li data-step="chat">Chat</li>
     </ol>
+  </nav>
 
-    <!-- STEP 1: wallet + faucet -->
-    <section id="step-wallet" class="step" hidden>
-      <h1>Set up your wallet</h1>
-      <p class="muted">A wallet on this device for the public LEZ testnet, then free tokens to get going.
-        Testnet only — don't put real money here.</p>
+  <!-- ===================== WALLET ===================== -->
+  <section id="step-wallet" class="step view" hidden>
+    <h1>Set up your wallet</h1>
+    <p class="muted">A wallet on this device for the public LEZ testnet, then free tokens to get going.
+      Testnet only — don't put real money here.</p>
 
-      <div id="wallet-lock" class="box" hidden>
-        <h2 id="wallet-lock-title">Set up your wallet</h2>
-        <p id="wallet-lock-note" class="muted"></p>
-        <div id="wallet-choose" hidden>
-          <label for="wallet-connect-key">Connect a key you already have</label>
-          <input id="wallet-connect-key" type="text" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your 64-character wallet key (hex)">
-          <button type="button" id="wallet-connect-go" class="wide">Connect this key</button>
-          <p class="or muted">— or —</p>
-          <button type="button" id="wallet-make" class="ghost wide">Make a new wallet</button>
+    <div id="wallet-lock" class="box" hidden>
+      <h2 id="wallet-lock-title">Set up your wallet</h2>
+      <p id="wallet-lock-note" class="muted"></p>
+      <div id="wallet-choose" hidden>
+        <label for="wallet-connect-key">Connect a key you already have</label>
+        <input id="wallet-connect-key" type="text" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your 64-character wallet key (hex)">
+        <button type="button" id="wallet-connect-go" class="wide">Connect this key</button>
+        <p class="or muted">— or —</p>
+        <button type="button" id="wallet-make" class="ghost wide">Make a new wallet</button>
+      </div>
+      <button type="button" id="wallet-passkey" class="wide" hidden>Unlock with passkey</button>
+      <button type="button" id="wallet-newkey" class="ghost wide" hidden>Make a new wallet</button>
+      <button type="button" id="wallet-skip" class="ghost wide" hidden>Make one without saving</button>
+      <p id="wallet-lock-busy" class="muted" role="status" aria-live="polite" hidden>Working…</p>
+      <p id="wallet-lock-error" class="error" role="alert" hidden></p>
+    </div>
+
+    <div id="wallet-main" hidden>
+      <section class="box">
+        <h2>Your account</h2>
+        <p id="wallet-account" class="mono key"></p>
+        <button type="button" id="wallet-account-copy" class="ghost wide">Copy account</button>
+        <details id="wallet-import-wrap" class="import">
+          <summary>Connect an existing key</summary>
+          <input id="wallet-import-key" type="text" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste a 64-character wallet key (hex)">
+          <button type="button" id="wallet-import-go" class="ghost wide">Connect this key</button>
+          <p id="wallet-import-err" class="me-status bad" hidden></p>
+        </details>
+        <p id="wallet-key-note" class="muted" hidden>This browser won't keep this wallet, so it lasts only until the page closes.</p>
+        <p class="protect muted">
+          <button type="button" id="wallet-protect" class="linklike">Protect this wallet with a passkey</button>
+          <span id="wallet-protect-state"></span>
+          <br><small>Optional. Kept on this device by default; testnet only.</small>
+        </p>
+        <p class="protect muted">
+          <button type="button" id="wallet-backup" class="linklike">Back up this wallet's key</button>
+          <br><small>Save it somewhere safe — it's the only way to recover this wallet if the browser is cleared or a new key is made.</small>
+        </p>
+        <p id="wallet-backup-key" class="mono key" hidden></p>
+        <button type="button" id="wallet-backup-copy" class="ghost wide" hidden>Copy key</button>
+      </section>
+      <section class="box">
+        <h2>Balance</h2>
+        <p class="balance"><span id="wallet-balance" class="mono">…</span> <span class="muted">tokens</span>
+          <button type="button" id="wallet-refresh" class="ghost">Refresh</button></p>
+        <p id="wallet-balance-note" class="error" hidden></p>
+        <button type="button" id="wallet-faucet" class="wide" disabled>Get test tokens</button>
+        <p id="wallet-faucet-status" class="me-status" role="status" aria-live="polite" hidden></p>
+        <p class="muted">Free testnet tokens, once a day — enough to register a name and try features.</p>
+      </section>
+    </div>
+
+    <div class="step-nav">
+      <button type="button" id="wallet-continue" class="wide" hidden>Continue to Names →</button>
+      <button type="button" id="wallet-skip-all" class="linklike">Skip setup, just chat</button>
+    </div>
+  </section>
+
+  <!-- ===================== NAMES (register, renew, list/cancel) ===================== -->
+  <section id="step-name" class="step view" hidden>
+    <h1>Names</h1>
+    <p class="muted">Register a public name, renew one you hold, or list it for sale. Prices come straight from the chain.</p>
+
+    <form id="pick-form" class="lookup inline" autocomplete="off">
+      <label for="pick-name" class="sr">Check a name</label>
+      <input id="pick-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
+             enterkeyhint="search" placeholder="e.g. yourname" maxlength="40">
+      <button type="submit" id="pick-go">Check</button>
+    </form>
+    <p id="pick-result" class="me-status" role="status" aria-live="polite"></p>
+
+    <!-- Register an available name -->
+    <div id="pick-claim" class="box" hidden>
+      <h2>Register <span id="pick-chosen"></span></h2>
+      <p id="pick-tier-note" class="muted"></p>
+      <fieldset id="pick-terms" class="term-grid">
+        <legend>Choose how long</legend>
+        <label class="choice"><input type="radio" name="reg-term" value="0"><span><b>30 days</b><small id="price-term-0">…</small></span></label>
+        <label class="choice"><input type="radio" name="reg-term" value="1" checked><span><b>1 year</b><small id="price-term-1">…</small></span></label>
+        <label class="choice"><input type="radio" name="reg-term" value="2"><span><b>5 years</b><small id="price-term-2">…</small></span></label>
+        <label class="choice"><input type="radio" name="reg-term" value="3"><span><b>Permanent</b><small id="price-term-3">…</small></span></label>
+      </fieldset>
+      <p id="pick-premium-note" class="me-status" hidden></p>
+      <p id="pick-price-summary" class="muted"></p>
+      <button type="button" id="pick-register" class="wide">Register this name</button>
+      <p id="pick-progress" class="me-status" role="status" aria-live="polite" hidden></p>
+      <details id="pick-manual" class="import">
+        <summary>Or register it in Basecamp instead</summary>
+        <p id="pick-command" class="mono command"></p>
+        <button type="button" id="pick-command-copy" class="ghost wide">Copy command</button>
+      </details>
+    </div>
+
+    <!-- Manage an existing name (renew, list/cancel, or jump to buy) -->
+    <div id="manage-box" class="box" hidden>
+      <h2>Manage <span id="manage-name"></span></h2>
+      <p id="manage-meta" class="muted"></p>
+      <p id="manage-listing-banner" class="me-status" hidden></p>
+
+      <div id="manage-buy-wrap" hidden>
+        <button type="button" id="manage-buy-go" class="wide">Buy this name</button>
+      </div>
+
+      <div id="manage-renew-wrap" hidden>
+        <h3>Renew</h3>
+        <div class="row">
+          <select id="renew-term" aria-label="Renewal term">
+            <option value="0">30 days</option>
+            <option value="1" selected>1 year</option>
+            <option value="2">5 years</option>
+            <option value="3">Permanent</option>
+          </select>
+          <button type="button" id="renew-go">Renew</button>
         </div>
-        <button type="button" id="wallet-passkey" class="wide" hidden>Unlock with passkey</button>
-        <button type="button" id="wallet-newkey" class="ghost wide" hidden>Make a new wallet</button>
-        <button type="button" id="wallet-skip" class="ghost wide" hidden>Make one without saving</button>
-        <p id="wallet-lock-busy" class="muted" role="status" aria-live="polite" hidden>Working…</p>
-        <p id="wallet-lock-error" class="error" role="alert" hidden></p>
+        <p id="renew-price-note" class="muted"></p>
+        <p id="renew-status" class="me-status" role="status" aria-live="polite" hidden></p>
       </div>
 
-      <div id="wallet-main" hidden>
-        <section class="box">
-          <h2>Your account</h2>
-          <p id="wallet-account" class="mono key"></p>
-          <button type="button" id="wallet-account-copy" class="ghost wide">Copy account</button>
-          <details id="wallet-import-wrap" class="import">
-            <summary>Connect an existing key</summary>
-            <input id="wallet-import-key" type="text" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste a 64-character wallet key (hex)">
-            <button type="button" id="wallet-import-go" class="ghost wide">Connect this key</button>
-            <p id="wallet-import-err" class="me-status bad" hidden></p>
-          </details>
-          <p id="wallet-key-note" class="muted" hidden>This browser won't keep this wallet, so it lasts only until the page closes.</p>
-          <p class="protect muted">
-            <button type="button" id="wallet-protect" class="linklike">Protect this wallet with a passkey</button>
-            <span id="wallet-protect-state"></span>
-            <br><small>Optional. Kept on this device by default; testnet only.</small>
-          </p>
-          <p class="protect muted">
-            <button type="button" id="wallet-backup" class="linklike">Back up this wallet's key</button>
-            <br><small>Save it somewhere safe — it's the only way to recover this wallet if the browser is cleared or a new key is made.</small>
-          </p>
-          <p id="wallet-backup-key" class="mono key" hidden></p>
-          <button type="button" id="wallet-backup-copy" class="ghost wide" hidden>Copy key</button>
-        </section>
-        <section class="box">
-          <h2>Balance</h2>
-          <p class="balance"><span id="wallet-balance" class="mono">…</span> <span class="muted">tokens</span>
-            <button type="button" id="wallet-refresh" class="ghost">Refresh</button></p>
-          <p id="wallet-balance-note" class="error" hidden></p>
-          <button type="button" id="wallet-faucet" class="wide" disabled>Get test tokens</button>
-          <p id="wallet-faucet-status" class="me-status" role="status" aria-live="polite" hidden></p>
-          <p class="muted">Free testnet tokens, once a day — enough for a name's deposit and some to spend.</p>
-        </section>
+      <div id="manage-list-wrap" hidden>
+        <h3>Sell this name</h3>
+        <label class="field">Sale price (tokens, min 40)
+          <input id="list-price" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 5000000">
+        </label>
+        <label class="field">Expire listing after (days, optional)
+          <input id="list-days" type="text" inputmode="numeric" autocomplete="off" placeholder="Leave blank for no listing expiry">
+        </label>
+        <label class="choice">
+          <input id="list-unlisted" type="checkbox">
+          <span><b>Unlisted (private link / OTC)</b><small>Don't show this name in the public market list. Buyers must type the exact name.</small></span>
+        </label>
+        <p id="list-fee-preview" class="muted"></p>
+        <div class="row">
+          <button type="button" id="list-go">List for sale</button>
+          <button type="button" id="cancel-list-go" class="ghost" hidden>Cancel listing</button>
+        </div>
+        <p id="list-status" class="me-status" role="status" aria-live="polite" hidden></p>
       </div>
+    </div>
 
-      <div class="step-nav">
-        <button type="button" id="wallet-continue" class="wide" hidden>Continue →</button>
-        <button type="button" id="wallet-skip-all" class="linklike">Skip setup, just chat</button>
+    <details id="takeback" class="box import" hidden>
+      <summary>Held a name before the chain reset?</summary>
+      <p class="muted">Take it back for free with the wallet that held it, until <span id="takeback-until"></span>.
+        No fee and no wait, and its profile and page come back as they were. Names held by a private account
+        can't be taken back here.</p>
+      <form id="takeback-form" class="lookup inline" autocomplete="off">
+        <input id="takeback-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="your name">
+        <button type="submit" id="takeback-go">Take it back</button>
+      </form>
+      <p id="takeback-status" class="me-status" role="status" aria-live="polite" hidden></p>
+    </details>
+
+    <div class="step-nav">
+      <button type="button" id="name-back" class="ghost">Back</button>
+      <button type="button" id="name-continue" class="wide">Continue to chat →</button>
+    </div>
+  </section>
+
+  <!-- ===================== MARKET ===================== -->
+  <section id="step-market" class="step view" hidden>
+    <div class="msg-top">
+      <h1>Market</h1>
+      <button type="button" id="market-refresh" class="ghost small">Refresh</button>
+    </div>
+    <p class="muted">Names listed for sale on chain. Every purchase pays 97.5% to the seller and a 2.5% fee to the registry treasury in one transaction.</p>
+
+    <form id="market-lookup-form" class="lookup inline" autocomplete="off">
+      <label for="market-lookup-name" class="sr">Look up a listed name (including unlisted OTC sales)</label>
+      <input id="market-lookup-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
+             placeholder="Look up any name for sale (incl. unlisted)">
+      <button type="submit" id="market-lookup-go">Find</button>
+    </form>
+    <p id="market-status" class="me-status" role="status" aria-live="polite"></p>
+    <div id="market-direct" class="box" hidden></div>
+
+    <ul id="market-list" class="dir-list"></ul>
+    <p id="market-empty" class="muted" hidden>No public listings right now.</p>
+  </section>
+
+  <!-- ===================== SUBNAMES ===================== -->
+  <section id="step-subnames" class="step view" hidden>
+    <h1>Subnames</h1>
+    <p class="muted">One-level subnames like <code>blog.alice</code>. On the web gateway, dots become <code>--</code> (<code>blog--alice.lnsweb.online</code>).</p>
+
+    <section class="box">
+      <h2>Create a subname</h2>
+      <p class="muted">If your wallet holds a top-level name, you can issue subnames under it for gas only.</p>
+      <label class="field">Subname (<code>label.parent</code>)
+        <input id="sub-create-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. blog.yourname" maxlength="62">
+      </label>
+      <label class="field">Owner account (optional — defaults to your wallet)
+        <input id="sub-create-owner" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Base58 account ID">
+      </label>
+      <label class="choice">
+        <input id="sub-create-revocable" type="checkbox" checked>
+        <span><b>Revocable</b><small>Parent can revoke it, and it stops resolving if the parent is transferred or expires. Uncheck for permanent.</small></span>
+      </label>
+      <div class="row">
+        <button type="button" id="sub-create-go">Create subname</button>
+        <button type="button" id="sub-revoke-go" class="ghost">Revoke subname</button>
       </div>
+      <p id="sub-create-status" class="me-status" role="status" aria-live="polite" hidden></p>
     </section>
 
-    <!-- STEP 2: name -->
-    <section id="step-name" class="step" hidden>
-      <h1>Choose your name</h1>
-      <p class="muted">A name like <b>jef</b> that others can message and pay, instead of a 32-byte account.</p>
-      <form id="pick-form" class="lookup inline" autocomplete="off">
-        <label for="pick-name" class="sr">A name to claim</label>
-        <input id="pick-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
-               enterkeyhint="search" placeholder="e.g. yourname" maxlength="40">
-        <button type="submit" id="pick-go">Check</button>
+    <section class="box">
+      <h2>Sell subnames under your name</h2>
+      <p class="muted">Let anyone buy permanent subnames under a top-level name you hold.</p>
+      <label class="field">Your top-level name
+        <input id="sub-sale-parent" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. yourname" maxlength="32">
+      </label>
+      <label class="field">Price per subname (tokens, 0 for free)
+        <input id="sub-sale-price" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g. 100000">
+      </label>
+      <label class="field">Payout account (optional — defaults to your wallet)
+        <input id="sub-sale-payout" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Base58 account ID">
+      </label>
+      <div class="row">
+        <button type="button" id="sub-sale-on">Turn sales on</button>
+        <button type="button" id="sub-sale-off" class="ghost">Turn sales off</button>
+      </div>
+      <p id="sub-sale-status" class="me-status" role="status" aria-live="polite" hidden></p>
+    </section>
+
+    <section class="box">
+      <h2>Buy a subname</h2>
+      <p class="muted">Bought subnames are permanent. Uses a 5-minute commit wait so nobody can grab it first.</p>
+      <form id="sub-buy-form" class="lookup inline" autocomplete="off">
+        <label for="sub-buy-name" class="sr">Subname to buy</label>
+        <input id="sub-buy-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. blog.alice" maxlength="62">
+        <button type="submit" id="sub-buy-check">Check</button>
       </form>
-      <p id="pick-result" class="me-status" role="status" aria-live="polite"></p>
-      <div id="pick-claim" class="box" hidden>
-        <h2>Claim <span id="pick-chosen"></span></h2>
-        <p class="muted">A public name on the chain: a <b>1,000,000</b> refundable deposit plus a fee, paid
-          from your wallet. The chain makes you wait about 15 minutes between committing and claiming, so
-          nobody can grab it first.</p>
-        <button type="button" id="pick-register" class="wide">Claim this name</button>
-        <p id="pick-progress" class="me-status" role="status" aria-live="polite" hidden></p>
-        <details id="pick-manual" class="import">
-          <summary>Or claim it in Basecamp instead</summary>
-          <p id="pick-command" class="mono command"></p>
-          <button type="button" id="pick-command-copy" class="ghost wide">Copy command</button>
-        </details>
-      </div>
-      <details id="takeback" class="box import" hidden>
-        <summary>Held a name before the chain reset?</summary>
-        <p class="muted">Take it back for free with the wallet that held it, until <span id="takeback-until"></span>.
-          No deposit and no wait, and its profile and page come back as they were. Names held by a private account
-          can't be taken back here.</p>
-        <form id="takeback-form" class="lookup inline" autocomplete="off">
-          <input id="takeback-name" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="your name">
-          <button type="submit" id="takeback-go">Take it back</button>
-        </form>
-        <p id="takeback-status" class="me-status" role="status" aria-live="polite" hidden></p>
-      </details>
-      <div class="step-nav">
-        <button type="button" id="name-back" class="ghost">Back</button>
-        <button type="button" id="name-continue" class="wide">Continue to chat →</button>
-      </div>
+      <p id="sub-buy-info" class="me-status" role="status" aria-live="polite"></p>
+      <button type="button" id="sub-buy-go" class="wide" hidden>Buy this subname</button>
+      <p id="sub-buy-status" class="me-status" role="status" aria-live="polite" hidden></p>
     </section>
   </section>
 
-  <!-- ===================== CHAT (the destination) ===================== -->
+  <!-- ===================== BROWSE LNS SITES ===================== -->
+  <section id="step-sites" class="step view" hidden>
+    <div class="msg-top">
+      <h1>Browse LNS sites</h1>
+      <button type="button" id="sites-refresh" class="ghost small">Refresh</button>
+    </div>
+    <p class="muted">Read straight from the registry on chain — no backend server. Every name is verified locally so nobody can spoof another name.</p>
+    <div class="lookup inline">
+      <label for="sites-filter" class="sr">Filter sites</label>
+      <input id="sites-filter" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Filter by name or title…">
+    </div>
+    <p id="sites-status" class="me-status" role="status" aria-live="polite"></p>
+    <ul id="sites-list" class="dir-list"></ul>
+    <div id="sites-pager" class="row" hidden>
+      <button type="button" id="sites-prev" class="ghost">Previous</button>
+      <button type="button" id="sites-next" class="ghost">Next</button>
+    </div>
+    <p id="sites-empty" class="muted" hidden>No listed sites found on this chain yet.</p>
+  </section>
+
+  <!-- ===================== CHAT ===================== -->
   <section id="chat" class="view" hidden>
     <div class="msg-top">
       <h1>Chat</h1>
@@ -171,7 +329,7 @@
       <label id="msg-me-field" class="field">Which name is yours?
         <span class="lookup inline">
           <input id="msg-me" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
-                 enterkeyhint="done" placeholder="e.g. jef" maxlength="40">
+                 enterkeyhint="done" placeholder="e.g. jef" maxlength="62">
           <button type="button" id="msg-me-check">Check</button>
         </span></label>
       <p id="msg-publish-why">People can't message you until you turn this on. It's a small on-chain change, paid from your wallet.</p>
@@ -200,7 +358,7 @@
       <form id="msg-new" class="lookup" autocomplete="off">
         <label for="msg-to" class="sr">Name to message</label>
         <input id="msg-to" type="text" autocapitalize="none" autocorrect="off" spellcheck="false"
-               enterkeyhint="go" placeholder="Message a name, e.g. testpilot" maxlength="40">
+               enterkeyhint="go" placeholder="Message a name, e.g. testpilot" maxlength="62">
         <button type="submit">Open</button>
       </form>
       <ul id="msg-convos" class="convos"></ul>
@@ -277,8 +435,7 @@
         <li><b>Your keys</b> are made in this browser. The messaging key only opens messages; the wallet key
           (testnet) can hold tokens. Clearing this site's data deletes them.</li>
       </ul>
-      <p class="muted">Registering a public name and posting are coming to the browser. Private names, private
-        posts and real money stay in the Names app in Logos Basecamp.</p>
+      <p class="muted">Private names, shielded deeds, private posts, and real money stay in the Names app in Logos Basecamp.</p>
     </section>
   </section>
 

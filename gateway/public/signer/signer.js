@@ -1,5 +1,5 @@
 // Names money-key signer. Served on its OWN origin (a separate subdomain in prod)
-// and embedded by the app as an iframe. It OWNS the wallet's secp256k1 key.
+// and embedded by the app as an iframe. It OWNS the wallet's LEZ account secret (its signing keys derive from it).
 //
 // THREAT MODEL
 // ------------
@@ -22,7 +22,7 @@
 import { NS, isAllowedOrigin, parseRequest, resMsg, evtMsg, validateSignAndSend } from "./protocol.js";
 import * as vault from "./vault.js";
 import {
-  randomPrivateKey, accountIdOfPrivateKey, publicKeyOf, parseAccountId, formatAccountId, toHex,
+  randomAccountSecret, publicAccountId, initialKeyBytes, parseAccountId, formatAccountId, toHex,
   signTransfer, maxFeeFor, getAccountsNonces, getAccountBalance, sendTransaction, waitForTransaction,
   accountExists, NATIVE_TRANSFER_GAS_LIMIT,
 } from "./lez-tx.js";
@@ -108,8 +108,9 @@ async function mCreateAccount() {
   let pk;
   try {
     uiBusy("Waiting for your passkey…");
-    pk = randomPrivateKey();
-    const account = { accountId: formatAccountId(accountIdOfPrivateKey(pk)), publicKey: toHex(publicKeyOf(pk)) };
+    pk = randomAccountSecret();
+    // LEZ v0.4.0: the account's public half is its 33-byte initial key (what a faucet shows).
+    const account = { accountId: formatAccountId(publicAccountId(pk)), publicKey: toHex(initialKeyBytes(pk)) };
     const record = await vault.enrollPasskey(pk, { rpId: location.hostname, userName: "Names wallet" });
     record.account = account;
     if (!writeRecord(record)) throw { code: "store_failed", message: "couldn't save the key on this browser" };
@@ -153,7 +154,7 @@ async function mSignAndSend(rawParams) {
     uiBusy("Confirm with your passkey…");
     pk = await vault.unlockPasskey(rec); // re-prompt the passkey for THIS payment
     uiBusy("Preparing…");
-    const fromBytes = accountIdOfPrivateKey(pk);
+    const fromBytes = publicAccountId(pk);
     const [nonce] = await getAccountsNonces(rpc, [fromBytes]);
     let balance;
     try { balance = await getAccountBalance(rpc, fromBytes); } catch { balance = null; }
@@ -161,7 +162,7 @@ async function mSignAndSend(rawParams) {
       throw { code: "insufficient_funds", message: `not enough: need ${(amt + maxFee).toString()}, have ${balance.toString()}` };
     }
     uiBusy("Signing & sending…");
-    const { wire, hash } = signTransfer({ privateKey: pk, to: toBytes, nonce, amount: amt, gasLimit: gas, tip: 0n, maxFee });
+    const { wire, hash } = signTransfer({ secret: pk, to: toBytes, nonce, amount: amt, gasLimit: gas, tip: 0n, maxFee });
     const sentHash = await sendTransaction(rpc, wire);
     let block = null;
     try { block = await waitForTransaction(rpc, sentHash, { timeoutMs: 45000 }); } catch {} // best-effort; hash already returned

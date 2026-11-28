@@ -28,15 +28,15 @@ const option = (name, fallback) => {
   return at >= 0 ? rest[at + 1] : fallback;
 };
 const flag = (name) => rest.includes(`--${name}`);
-const readKey = (path) => lez.checkPrivateKey(lez.fromHex(readFileSync(path, "utf8").trim()));
+const readKey = (path) => lez.checkAccountSecret(lez.fromHex(readFileSync(path, "utf8").trim()));
 const show = (accountId) => `Public/${lez.formatAccountId(accountId)}`;
 
 async function send() {
   const rpcUrl = option("rpc", DEFAULT_RPC);
   const amount = BigInt(option("amount", "1000"));
   const gasLimit = BigInt(option("gas-limit", String(lez.NATIVE_TRANSFER_GAS_LIMIT)));
-  const privateKey = readKey(keyfile);
-  const from = lez.accountIdOfPrivateKey(privateKey);
+  const secret = readKey(keyfile);
+  const from = lez.publicAccountId(secret);
   const to = lez.parseAccountId(option("to", DEFAULT_TO));
   if (lez.equalBytes(from, to)) throw new Error("sender and recipient are the same account");
 
@@ -48,7 +48,7 @@ async function send() {
   console.log(`to        ${show(to)}  balance ${toBefore}`);
 
   const maxFee = lez.maxFeeFor(gasLimit);
-  const signed = lez.signTransfer({ privateKey, to, nonce, amount, gasLimit, tip: 0n, maxFee });
+  const signed = lez.signTransfer({ secret, to, nonce, amount, gasLimit, tip: 0n, maxFee });
   const reserve = lez.feeReserve({ gasLimit, dataBytes: signed.wire.length, quote });
   console.log(`tx        ${signed.hash}  (${signed.wire.length} bytes; gas_limit ${gasLimit}, max_fee ${maxFee}, reserve ≈ ${reserve})`);
   if (reserve > maxFee) throw new Error(`max_fee ${maxFee} is below the reserve ${reserve}; raise --gas-limit`);
@@ -90,12 +90,12 @@ async function send() {
 
 try {
   if (command === "new") {
-    const key = lez.randomPrivateKey();
+    const key = lez.randomAccountSecret();
     writeFileSync(keyfile, `${lez.toHex(key)}\n`, { mode: 0o600, flag: "wx" });
-    console.log(show(lez.accountIdOfPrivateKey(key)));
+    console.log(show(lez.publicAccountId(key)));
   } else if (command === "account") {
     const key = readKey(keyfile);
-    console.log(`${show(lez.accountIdOfPrivateKey(key))}  (x-only public key ${lez.toHex(lez.publicKeyOf(key))})`);
+    console.log(`${show(lez.publicAccountId(key))}  (initial SigningKeyState ${lez.toHex(lez.initialKeyBytes(key))})`);
   } else if (command === "send") {
     await send();
   } else {

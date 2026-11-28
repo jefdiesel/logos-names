@@ -1,6 +1,8 @@
 //! Forwarder (copied from lez-program-registry's engine tests): sends exactly the sync
 //! messages its root message lists, with the PDA seeds it is told to attach. As an
 //! "attacker" it relays testimonial messages inside a transaction someone else signed.
+use std::collections::BTreeSet;
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use lee_core::{
     account::{AccountId, Actor},
@@ -18,10 +20,12 @@ pub struct Send {
 fn handle(_input: &ReceiveInput, sends: Vec<Send>) -> Response {
     let mut r = Response::keep_state();
     for s in sends {
+        // No grants: a relayed message carries none, so only the attacker's own reach applies.
         r = r.send(SyncMessage {
             to: Actor::new(AccountId::new(s.to_account), AccountId::new(s.to_program)),
             message: s.data,
             pda_seeds: s.pda_seeds.into_iter().map(PdaSeed::new).collect(),
+            grants: BTreeSet::new(),
         });
     }
     r

@@ -9,19 +9,18 @@
 //
 // Checked against the real Rust types and engine by vectors/ (see vectors/README.md).
 //
-// Sources this follows (LEZ v0.4.0-rc1):
-//   lee/state_machine/src/signature/{mod,private_key,public_key}.rs   BIP-340, tweak, account ID
+// Sources this follows (LEZ v0.4.0):
+//   lee/state_machine/src/signature/{mod,private_key,public_key,scheme,schnorr,signing_keys}.rs
+//   lee/state_machine/core/src/{account.rs,execution_state.rs,native_token.rs,program/mod.rs,signing_key.rs}
 //   lee/state_machine/src/public_transaction/{message,witness_set,transaction}.rs
-//   lee/state_machine/src/transaction_message.rs   TransactionMessage, PublicAccountEvidence
-//   lee/state_machine/core/src/execution_state.rs   PublicExecutionContext
-//   lee/state_machine/core/src/{account.rs,native_token.rs}   Nonce, Actor, Message::Transfer
+//   lee/state_machine/src/transaction_message.rs   TransactionMessage, PublicAccountEvidence, hash_with_keys
 //   lee/state_machine/src/fees.rs, lez/programs/fee/core/src/assess.rs   FeeDeclaration, reserve
-//   lee/key_protocol/src/key_management/key_tree/keys_public.rs   seed -> public account keys
+//   lee/key_protocol/src/key_management/key_tree/keys_public.rs   seed -> PublicAccountSecret
 //   lez/common/src/{transaction.rs,borsh_base64.rs}   LeeTransaction on the wire
 //   lez/sequencer/service/rpc/src/lib.rs   the JSON-RPC methods
-//   lez/wallet/src/lib.rs   send_pub_tx_with_pre_check, max_fee_for
+//   lez/wallet/src/lib.rs   send_public, max_fee_for
 
-import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
+import { schnorr } from "@noble/curves/secp256k1.js";
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256, sha512 } from "@noble/hashes/sha2.js";
 
@@ -37,18 +36,45 @@ function pad32(text) {
   return bytes;
 }
 
-/** `b"/LEE/v0.3/Message/Public/\x00…"` (message.rs PREFIX). */
+/** `b"/LEE/v0.3/Message/Public/\x00…"` (message.rs:16 PREFIX). */
 export const MESSAGE_PREFIX = pad32("/LEE/v0.3/Message/Public/");
-/** `b"/LEE/v0.3/AccountId/Public/\x00…"` (public_key.rs PUBLIC_ACCOUNT_ID_PREFIX). */
+/** `b"/LEE/v0.3/KeyedMessage/Public/\x00\x00"` (message.rs:17 KEYED_PREFIX). */
+export const KEYED_MESSAGE_PREFIX = pad32("/LEE/v0.3/KeyedMessage/Public/");
+/** `b"/LEE/v0.3/AccountId/Public/\x00…"` (account.rs:259-260 PUBLIC_ACCOUNT_ID_PREFIX). */
 export const ACCOUNT_ID_PREFIX = pad32("/LEE/v0.3/AccountId/Public/");
+/** `b"/LEE/v0.3/AccountId/Public/Schn/"` (account.rs:261 PREFIX_SCHNORR). */
+export const ACCOUNT_ID_SCHNORR_PREFIX = pad32("/LEE/v0.3/AccountId/Public/Schn/");
+/** `b"/LEE/v0.3/KeySeed/\x00…"` (signing_keys.rs:15-16 DS_KEY_SEED). */
+export const KEY_SEED_PREFIX = pad32("/LEE/v0.3/KeySeed/");
+/** `b"/LEE/v0.3/KeyGen/Schnorr/\x00…"` (schnorr.rs:9 DS_KEYGEN). */
+export const SCHNORR_KEYGEN_PREFIX = pad32("/LEE/v0.3/KeyGen/Schnorr/");
+/** `b"/LEE/v0.3/KeyCommitment/Schnorr/"` (schnorr.rs:8 DS_KEY). */
+export const SCHNORR_KEY_COMMIT_PREFIX = pad32("/LEE/v0.3/KeyCommitment/Schnorr/");
+/** `b"/LEE/v0.2/AccountId/PDA/\x00…"` (program/mod.rs:201-202 PROGRAM_DERIVED_ACCOUNT_ID_PREFIX). */
+export const PDA_PREFIX = pad32("/LEE/v0.2/AccountId/PDA/");
+/** `b"/LEE/SystemUpgrader/v1/Name\x00…"` (program/mod.rs:127-128 SYSTEM_PROGRAM_SEED_PREFIX). */
+export const SYSTEM_PROGRAM_SEED_PREFIX = pad32("/LEE/SystemUpgrader/v1/Name");
+/** `SYSTEM_UPGRADER_ACCOUNT_ID`: `[0xFD; 32]` (program/mod.rs:32). */
+export const SYSTEM_UPGRADER_ACCOUNT_ID = new Uint8Array(32).fill(0xfd);
+
 const MASTER_PUBLIC_KEY = utf8.encode("/LEE-Keys/v1/Master/Public");
+const CHILD_PUBLIC_PREFIX = utf8.encode("/LEE-Keys/v1/Child/Public");
 
 /** `NATIVE_TOKEN_PROGRAM_ID`: 32 zero bytes; an account's balance is its actor state under this. */
 export const NATIVE_TOKEN_PROGRAM_ID = new Uint8Array(32);
 /** `LeeTransaction` borsh variant tags. */
 export const LEE_TX_PUBLIC = 0;
 
-/** The wallet's assumed worst base fee and data size (lez/wallet/src/lib.rs). */
+/** `KeyType` borsh discriminants (`signing_key.rs:17-19`). */
+export const KEY_TYPE_SCHNORR = 0;
+export const KeyType = Object.freeze({ Schnorr: KEY_TYPE_SCHNORR });
+
+/** `Authority` borsh discriminants (`execution_state.rs:46-49`). */
+export const AUTHORITY_NONE = 0;
+export const AUTHORITY_SIGNER = 1;
+export const Authority = Object.freeze({ None: AUTHORITY_NONE, Signer: AUTHORITY_SIGNER });
+
+/** The wallet's assumed worst base fee and data size (lez/wallet/src/lib.rs:92-98). */
 const ASSUMED_BASE_FEE = 64n;
 const ASSUMED_DATA_BYTES = 100_000n;
 /** The gas limit the names CLI gives a public native transfer: the native token meters no cycles. */
@@ -129,10 +155,33 @@ export function fromBase64(text) {
   return Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
 }
 
-// ---------- keys and account IDs ----------
+/**
+ * `AccountId::from_system_program_name` (`program/mod.rs:48-56, 77-89, 125-140, 199-214`):
+ * `PDA([0xFD; 32], sha256("/LEE/SystemUpgrader/v1/Name\0…" ‖ name_padded_32))`.
+ */
+export function systemProgramId(name) {
+  const raw = typeof name === "string" ? utf8.encode(name) : name;
+  if (!(raw instanceof Uint8Array) || raw.length === 0 || raw.length > 32) {
+    throw new Error("a system program name is 1 to 32 bytes");
+  }
+  const padded = new Uint8Array(32);
+  padded.set(raw);
+  const seed = sha256(concat(SYSTEM_PROGRAM_SEED_PREFIX, padded));
+  return sha256(concat(PDA_PREFIX, SYSTEM_UPGRADER_ACCOUNT_ID, seed));
+}
+
+// ---------- keys and account IDs (v0.4.0 per-nonce rotation) ----------
 
 const bytesToNumber = (bytes) => BigInt(`0x${toHex(bytes) || "0"}`);
-const numberToBytes32 = (n) => fromHex(n.toString(16).padStart(64, "0"));
+
+/** `PublicAccountSecret::new`: any 32-byte root secret for a public account (`signing_keys.rs:23-62`). */
+export function checkAccountSecret(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 32) throw new Error("a public account secret is 32 bytes");
+  return bytes;
+}
+
+/** `PublicAccountSecret::new_os_random`: 32 random bytes (`signing_keys.rs:54-56`). */
+export const randomAccountSecret = () => crypto.getRandomValues(new Uint8Array(32));
 
 /** `PrivateKey::try_new`: a valid secp256k1 secret key (1..n-1, big-endian). */
 export function checkPrivateKey(bytes) {
@@ -141,9 +190,6 @@ export function checkPrivateKey(bytes) {
   if (n === 0n || n >= N) throw new Error("invalid private key");
   return bytes;
 }
-
-/** `PrivateKey::new_os_random`: a fresh signing key. */
-export const randomPrivateKey = () => schnorr.utils.randomSecretKey();
 
 /** `PublicKey::new_from_private_key`: the x-only (BIP-340) public key, 32 bytes. */
 export const publicKeyOf = (privateKey) => schnorr.getPublicKey(checkPrivateKey(privateKey));
@@ -159,52 +205,102 @@ export function isValidPublicKey(bytes) {
   }
 }
 
-/** `AccountId::from(&PublicKey)`: sha256(ACCOUNT_ID_PREFIX ‖ x-only key). */
-export function accountIdOf(publicKey) {
-  if (publicKey.length !== 32) throw new Error("a public key is 32 bytes (x-only)");
-  return sha256(concat(ACCOUNT_ID_PREFIX, publicKey));
-}
-
-/** The public account a signing key controls. */
-export const accountIdOfPrivateKey = (privateKey) => accountIdOf(publicKeyOf(privateKey));
-
-/** Like k256 `Scalar::from_repr`: a big-endian scalar, refused when it isn't below n. */
-function scalar(bytes) {
-  const n = bytesToNumber(bytes);
-  if (n >= N) throw new Error("scalar out of range");
-  return n;
+/** `key_seed` (`signing_keys.rs:149-156`): sha256(DS_KEY_SEED ‖ secret ‖ key_type u8 ‖ nonce u128 LE). */
+export function keySeed(secret, nonce, keyType = KEY_TYPE_SCHNORR) {
+  checkAccountSecret(secret);
+  if (keyType !== KEY_TYPE_SCHNORR) throw new Error(`unsupported key type: ${keyType}`);
+  return sha256(concat(KEY_SEED_PREFIX, secret, Uint8Array.of(keyType), new Writer().u128(nonce).done()));
 }
 
 /**
- * `PrivateKey::tweak`: sk + sha256(compressed public key of sk) mod n. The wallet
- * signs with, and names the account after, this tweaked key (`ssk`).
+ * `Schnorr::keygen` (`schnorr.rs:23-33, 83-92`): tries `ctr = 0..=255` with
+ * `sha256(DS_KEYGEN ‖ seed ‖ ctr)` until a valid secp256k1 scalar is found.
  */
-export function tweak(sk) {
-  checkPrivateKey(sk);
-  const hashed = sha256(secp256k1.getPublicKey(sk, true));
-  return checkPrivateKey(numberToBytes32((bytesToNumber(sk) + scalar(hashed)) % N));
+export function schnorrKeygen(seed) {
+  if (!(seed instanceof Uint8Array) || seed.length !== 32) throw new Error("seed must be 32 bytes");
+  for (let ctr = 0; ctr <= 255; ctr += 1) {
+    const candidate = sha256(concat(SCHNORR_KEYGEN_PREFIX, seed, Uint8Array.of(ctr)));
+    const n = bytesToNumber(candidate);
+    if (n > 0n && n < N) {
+      return { secretKey: candidate, publicKey: schnorr.getPublicKey(candidate) };
+    }
+  }
+  throw new Error("no valid secp256k1 scalar found in 256 candidates");
 }
 
-function keyNode(sk, cc, cci) {
-  const ssk = tweak(sk);
-  const pk = publicKeyOf(ssk);
-  return { sk, ssk, pk, cc, cci, accountId: accountIdOf(pk) };
+/** `signing_key::<Schnorr>` (`signing_keys.rs:160-168`): the account's per-nonce keypair. */
+export function signingKey(secret, nonce, keyType = KEY_TYPE_SCHNORR) {
+  if (keyType !== KEY_TYPE_SCHNORR) throw new Error(`unsupported key type: ${keyType}`);
+  return schnorrKeygen(keySeed(secret, nonce, keyType));
 }
 
-/** `ChildKeysPublic::root`: HMAC-SHA512(key "/LEE-Keys/v1/Master/Public", seed). */
+/** `Schnorr::commit` (`schnorr.rs:53-58`): sha256(DS_KEY ‖ x-only pk). */
+export function schnorrKeyCommit(publicKey) {
+  if (!(publicKey instanceof Uint8Array) || publicKey.length !== 32) throw new Error("a public key is 32 bytes (x-only)");
+  return sha256(concat(SCHNORR_KEY_COMMIT_PREFIX, publicKey));
+}
+
+/** `SigningKeyState { key_type, key_commitment }` (`signing_key.rs:36-39`). */
+export function signingKeyState(keyCommitment, keyType = KEY_TYPE_SCHNORR) {
+  if (keyType !== KEY_TYPE_SCHNORR) throw new Error(`unsupported key type: ${keyType}`);
+  if (!(keyCommitment instanceof Uint8Array) || keyCommitment.length !== 32) throw new Error("a key commitment is 32 bytes");
+  return { keyType, keyCommitment };
+}
+
+/** borsh(`SigningKeyState`): 1-byte `KeyType` tag ‖ 32-byte `KeyCommitment` (33 bytes, `signing_key.rs:36-48`). */
+export function encodeSigningKeyState(state) {
+  if (state instanceof Uint8Array) {
+    if (state.length !== 33) throw new Error(`a SigningKeyState is 33 bytes, got ${state.length}`);
+    if (state[0] !== KEY_TYPE_SCHNORR) throw new Error(`unsupported key type: ${state[0]}`);
+    return state;
+  }
+  if (!state || typeof state !== "object") {
+    throw new Error("expected a SigningKeyState (33 bytes or { keyType, keyCommitment })");
+  }
+  const { keyType, keyCommitment } = state;
+  if (keyType !== KEY_TYPE_SCHNORR) throw new Error(`unsupported key type: ${keyType}`);
+  return new Writer().u8(keyType).fixed(keyCommitment, 32).done();
+}
+
+/** `key_state(secret, key_type, nonce)` (`signing_keys.rs:184-186`). */
+export function keyState(secret, nonce, keyType = KEY_TYPE_SCHNORR) {
+  const { publicKey } = signingKey(secret, nonce, keyType);
+  return signingKeyState(schnorrKeyCommit(publicKey), keyType);
+}
+
+/** `initial_key(secret)` (`signing_keys.rs:172-174`): the account's nonce-0 `SigningKeyState`. */
+export const initialKey = (secret) => keyState(secret, 0n, KEY_TYPE_SCHNORR);
+
+/** 33-byte borsh encoding of `initial_key(secret)` (66 hex chars, as `SigningKeyState::Display`). */
+export const initialKeyBytes = (secret) => encodeSigningKeyState(initialKey(secret));
+
+/**
+ * `AccountId::for_initial_key` (`account.rs:258-278`):
+ * `sha256(ACCOUNT_ID_PREFIX ‖ sha256(ACCOUNT_ID_SCHNORR_PREFIX ‖ key_commitment))`.
+ */
+export function accountIdForInitialKey(state) {
+  const encoded = encodeSigningKeyState(state);
+  const keyHash = sha256(concat(ACCOUNT_ID_SCHNORR_PREFIX, encoded.subarray(1)));
+  return sha256(concat(ACCOUNT_ID_PREFIX, keyHash));
+}
+
+/** `public_account_id(secret)` (`signing_keys.rs:178-180`): the public account `secret` controls. */
+export const publicAccountId = (secret) => accountIdForInitialKey(initialKey(secret));
+
+/** `ChildKeysPublic::root` (`keys_public.rs:17-25`): HMAC-SHA512(key "/LEE-Keys/v1/Master/Public", seed)[..32]. */
 export function publicRoot(seed) {
   if (seed.length !== 64) throw new Error("seed must be 64 bytes");
-  const hash = hmac(sha512, MASTER_PUBLIC_KEY, seed);
-  return keyNode(checkPrivateKey(hash.slice(0, 32)), hash.slice(32), null);
+  const secret = hmac(sha512, MASTER_PUBLIC_KEY, seed).slice(0, 32);
+  return { secret, cci: null, accountId: publicAccountId(secret) };
 }
 
-/** `ChildKeysPublic::nth_child`: HMAC-SHA512(cc, 0 ‖ sk ‖ cci BE), sk' = left + sk mod n. */
+/** `ChildKeysPublic::nth_child` (`keys_public.rs:28-39`): HMAC-SHA512(key parent.secret, "/LEE-Keys/v1/Child/Public" ‖ cci BE)[..32]. */
 export function publicChild(parent, cci) {
   const index = new Uint8Array(4);
   new DataView(index.buffer).setUint32(0, cci, false);
-  const hash = hmac(sha512, parent.cc, concat(Uint8Array.of(0), parent.sk, index));
-  const sk = checkPrivateKey(numberToBytes32((scalar(hash.subarray(0, 32)) + scalar(parent.sk)) % N));
-  return keyNode(sk, hash.slice(32), cci);
+  const parentSecret = checkAccountSecret(parent instanceof Uint8Array ? parent : parent.secret);
+  const secret = hmac(sha512, parentSecret, concat(CHILD_PUBLIC_PREFIX, index)).slice(0, 32);
+  return { secret, cci, accountId: publicAccountId(secret) };
 }
 
 // ---------- BIP-340 ----------
@@ -293,13 +389,20 @@ export const feeDeclaration = (payer, gasLimit, tip, maxFee) => ({
   maxFee: BigInt(maxFee),
 });
 
-/** `Actor::new(account_id, program_account_id)`: one account's state under one program. */
-export const actor = (accountId, programAccountId) => ({ accountId, programAccountId });
-/** `Actor::native_balance(account_id)`. */
-export const nativeBalance = (accountId) => actor(accountId, NATIVE_TOKEN_PROGRAM_ID);
+/** `Actor::new(account_id, program_account_id)` with optional `Authority` (default `Authority.None`). */
+export const actor = (accountId, programAccountId, authority = AUTHORITY_NONE) => ({
+  accountId,
+  programAccountId,
+  authority,
+});
+/** An actor carrying `Authority.Signer` (1). */
+export const signerActor = (accountId, programAccountId) => actor(accountId, programAccountId, AUTHORITY_SIGNER);
+/** `Actor::native_balance(account_id)` with optional `Authority` (default `Authority.None`). */
+export const nativeBalance = (accountId, authority = AUTHORITY_NONE) =>
+  actor(accountId, NATIVE_TOKEN_PROGRAM_ID, authority);
 
-/** `PublicAccountEvidence::Key(public_key)`: the x-only key behind a plain account. */
-export const keyEvidence = (publicKey) => ({ publicKey });
+/** `PublicAccountEvidence::Key(SigningKeyState)`: the 33-byte initial signing key state behind a plain account. */
+export const keyEvidence = (keyStateOrBytes) => ({ keyState: encodeSigningKeyState(keyStateOrBytes) });
 /** `PublicAccountEvidence::Pda { program, seed }`: where a program-derived account comes from. */
 export const pdaEvidence = (program, seed) => ({ program, seed });
 
@@ -313,10 +416,28 @@ function compareBytes(a, b) {
 const compareActors = (a, b) =>
   compareBytes(a.accountId, b.accountId) || compareBytes(a.programAccountId, b.programAccountId);
 
-/** Sorted and without repeats, as borsh writes a BTreeSet. It refuses any other order on reading. */
-function sortedUnique(items, compare) {
-  const sorted = [...items].sort(compare);
-  return sorted.filter((item, i) => i === 0 || compare(sorted[i - 1], item) !== 0);
+/** Sorted and deduplicated as borsh writes `BTreeMap<Actor, Authority>`; `Authority.Signer` wins on merge. */
+function mergeActors(items) {
+  const sorted = items
+    .map((item) => ({
+      accountId: item.accountId,
+      programAccountId: item.programAccountId,
+      authority: item.authority ?? AUTHORITY_NONE,
+    }))
+    .sort(compareActors);
+  const out = [];
+  for (const item of sorted) {
+    if (item.authority !== AUTHORITY_NONE && item.authority !== AUTHORITY_SIGNER) {
+      throw new Error(`invalid authority: ${item.authority}`);
+    }
+    const prev = out[out.length - 1];
+    if (prev && compareActors(prev, item) === 0) {
+      if (item.authority === AUTHORITY_SIGNER) prev.authority = AUTHORITY_SIGNER;
+    } else {
+      out.push(item);
+    }
+  }
+  return out;
 }
 
 function writeActor(w, { accountId, programAccountId }) {
@@ -324,40 +445,46 @@ function writeActor(w, { accountId, programAccountId }) {
 }
 
 function writeEvidence(w, evidence) {
-  if (evidence.publicKey) w.u8(0).fixed(evidence.publicKey, 32);
+  if (evidence.keyState) w.u8(0).fixed(encodeSigningKeyState(evidence.keyState), 33);
   else w.u8(1).fixed(evidence.program, 32).fixed(evidence.seed, 32);
 }
 
 /**
- * borsh(`public_transaction::Message`), in field order:
- *   public_context.actors               Vec of account_id [32] ‖ program_account_id [32], sorted
- *   public_context.authorized_accounts  Vec of account_id [32], sorted: exactly the signers
+ * borsh(`public_transaction::Message`) in LEZ v0.4.0 (`message.rs:19-45, 141-160`,
+ * `transaction_message.rs:15-51`, `execution_state.rs:45-60`), in exact field order:
+ *   public_context.actors               u32 len + sorted (account_id [32] ‖ program_account_id [32] ‖ authority u8)
+ *   public_context.authorized_accounts  u32 len + sorted account_id [32]: exactly the signers
  *   public_context.promotions           u32 0: a public transaction promotes nothing
+ *   public_context.private_signers      u32 0: a public transaction declares no private signers
  *   execution.root.to                   account_id [32] ‖ program_account_id [32]
  *   execution.root.message              Vec<u8>
- *   execution.fee                       0, or 1 ‖ payer [32] ‖ gas_limit u64 ‖ tip u64 ‖ max_fee u128
- *   nonces                              Vec of account_id [32] ‖ nonce u128, sorted by account
- *   admission_evidence                  Vec of 0 ‖ public key [32], or 1 ‖ program [32] ‖ seed [32]
+ *   nonces                              u32 len + sorted (account_id [32] ‖ nonce u128 LE)
+ *   fee                                 0, or 1 ‖ payer [32] ‖ gas_limit u64 ‖ tip u64 ‖ max_fee u128
+ *   admission_evidence                  u32 len + (0 ‖ key_type u8 ‖ commitment [32]) or (1 ‖ program [32] ‖ seed [32])
  *
  * `to` is the actor the transaction starts at, `data` the message to it. `actors` is everything
  * the transaction reaches; `to` joins it. `nonces` is `[{ accountId, nonce }]`, one per signer.
  */
-export function encodeMessage({ to, data, actors, nonces, fee = null, evidence = [] }) {
-  const declared = sortedUnique([to, ...actors], compareActors);
+export function encodeMessage({ to, data, actors = [], nonces, fee = null, evidence = [] }) {
+  const declared = mergeActors([to, ...actors]);
   const signers = [...nonces].sort((a, b) => compareBytes(a.accountId, b.accountId));
   if (signers.some(({ accountId }, i) => i > 0 && compareBytes(signers[i - 1].accountId, accountId) === 0)) {
     throw new Error("an account can only have one nonce"); // nonce_map refuses this too
   }
   const w = new Writer().u32(declared.length);
-  for (const declaredActor of declared) writeActor(w, declaredActor);
+  for (const declaredActor of declared) {
+    writeActor(w, declaredActor);
+    w.u8(declaredActor.authority);
+  }
   w.u32(signers.length);
   for (const { accountId } of signers) w.fixed(accountId, 32);
-  w.u32(0);
+  w.u32(0); // promotions
+  w.u32(0); // private_signers
   writeActor(w, to);
   w.vec(data);
-  w.option(fee, (out, { payer, gasLimit, tip, maxFee }) => out.fixed(payer, 32).u64(gasLimit).u64(tip).u128(maxFee));
   w.u32(signers.length);
   for (const { accountId, nonce } of signers) w.fixed(accountId, 32).u128(nonce);
+  w.option(fee, (out, { payer, gasLimit, tip, maxFee }) => out.fixed(payer, 32).u64(gasLimit).u64(tip).u128(maxFee));
   w.u32(evidence.length);
   for (const item of evidence) writeEvidence(w, item);
   return w.done();
@@ -369,16 +496,101 @@ export function messageHash(message) {
   return sha256(concat(MESSAGE_PREFIX, bytes));
 }
 
-/** `WitnessSet::for_message`: one (signature, public key) per key, in order. */
-export function witnessSetFor(message, privateKeys, aux = null) {
-  const hash = messageHash(message);
-  return privateKeys.map((key) => ({ signature: signHash(hash, key, aux), publicKey: publicKeyOf(key) }));
+/**
+ * `hash_with_keys` (`transaction_message.rs:155-167`):
+ * `sha256(KEYED_MESSAGE_PREFIX ‖ message_hash ‖ next_0(33) ‖ ... ‖ next_k(33))`.
+ */
+export function hashWithKeys(msgHash32, nextKeys) {
+  if (!(msgHash32 instanceof Uint8Array) || msgHash32.length !== 32) throw new Error("expected a 32-byte message hash");
+  return sha256(concat(KEYED_MESSAGE_PREFIX, msgHash32, ...nextKeys.map(encodeSigningKeyState)));
 }
 
-/** borsh(`WitnessSet`): u32 count, then signature [64] ‖ x-only public key [32] each. */
+/** `Message::message_with_keys` (`transaction_message.rs:100-102`): the 32-byte value each signer signs. */
+export function messageWithKeys(message, nextKeys) {
+  return hashWithKeys(messageHash(message), nextKeys);
+}
+
+function buildWitnessSet(message, messageBytes, secrets, aux = null) {
+  const nonceByAccount = new Map();
+  for (const { accountId, nonce } of message.nonces) {
+    const hex = toHex(accountId);
+    if (nonceByAccount.has(hex)) throw new Error("an account can only have one nonce");
+    nonceByAccount.set(hex, BigInt(nonce));
+  }
+  const signers = secrets
+    .map((secret) => {
+      checkAccountSecret(secret);
+      const accountId = publicAccountId(secret);
+      return { secret, accountId, hex: toHex(accountId) };
+    })
+    .sort((a, b) => compareBytes(a.accountId, b.accountId));
+  const expected = [...nonceByAccount.keys()].sort();
+  const actual = signers.map((s) => s.hex);
+  if (actual.length !== expected.length || actual.some((hex, i) => hex !== expected[i])) {
+    throw new Error("the signing keys are not the accounts with nonces");
+  }
+
+  const prepared = signers.map(({ secret, accountId, hex }) => {
+    const nonce = nonceByAccount.get(hex);
+    const { secretKey, publicKey } = signingKey(secret, nonce, KEY_TYPE_SCHNORR);
+    const current = signingKeyState(schnorrKeyCommit(publicKey), KEY_TYPE_SCHNORR);
+    const next = keyState(secret, nonce + 1n, KEY_TYPE_SCHNORR);
+    return { nonce, secretKey, publicKey, current, next };
+  });
+
+  const msgHash = messageHash(messageBytes);
+  const keyedHash = hashWithKeys(msgHash, prepared.map((p) => p.next));
+  const witnesses = prepared.map(({ nonce, secretKey, publicKey, current, next }) => {
+    const signature = signHash(keyedHash, secretKey, aux);
+    const schnorrAuth = concat(signature, publicKey);
+    const authData = nonce === 0n ? concat(encodeSigningKeyState(current), schnorrAuth) : schnorrAuth;
+    return { authData, next };
+  });
+  return { msgHash, keyedHash, witnesses };
+}
+
+/**
+ * `WitnessSet::sign` (`witness_set.rs:19-58`, `signing_keys.rs:105-145`):
+ * one `{ authData, next }` entry per signer in ascending `AccountId` (`nonces`) order.
+ * At nonce 0 `authData` is 129 bytes (`initial_key(33) ‖ sig(64) ‖ pk_0(32)`); at nonce > 0
+ * it is 96 bytes (`sig(64) ‖ pk_n(32)`). `next` is the 33-byte `SigningKeyState` at `nonce + 1`.
+ */
+export function witnessSetFor(message, secrets, aux = null) {
+  return buildWitnessSet(message, encodeMessage(message), secrets, aux).witnesses;
+}
+
+/**
+ * Verifies one witness entry against `storedKeyState` (or `null` at nonce 0, where the initial
+ * key prefixes `authData` and must derive `accountId`), mirroring `scheme.rs:91-142`.
+ */
+export function verifyWitnessEntry(storedKeyState, accountId, keyedHash, authData) {
+  let current;
+  let rest;
+  if (storedKeyState !== null && storedKeyState !== undefined) {
+    current = encodeSigningKeyState(storedKeyState);
+    rest = authData;
+  } else {
+    if (authData.length < 33) return false;
+    const prefix = authData.subarray(0, 33);
+    if (prefix[0] !== KEY_TYPE_SCHNORR) return false;
+    if (!equalBytes(accountIdForInitialKey(prefix), accountId)) return false;
+    current = prefix;
+    rest = authData.subarray(33);
+  }
+  if (rest.length !== 96) return false;
+  const signature = rest.subarray(0, 64);
+  const publicKey = rest.subarray(64, 96);
+  if (!isValidPublicKey(publicKey)) return false;
+  if (!equalBytes(schnorrKeyCommit(publicKey), current.subarray(1))) return false;
+  return verifyHash(signature, keyedHash, publicKey);
+}
+
+/** borsh(`WitnessSet`): u32 count, then `(Vec<u8> auth_data ‖ SigningKeyState next[33])` each (`witness_set.rs:6-15`). */
 export function encodeWitnessSet(witnesses) {
   const w = new Writer().u32(witnesses.length);
-  for (const { signature, publicKey } of witnesses) w.fixed(signature, 64).fixed(publicKey, 32);
+  for (const { authData, next } of witnesses) {
+    w.vec(authData).fixed(encodeSigningKeyState(next), 33);
+  }
   return w.done();
 }
 
@@ -393,22 +605,20 @@ export const publicTransactionHash = (txBytes) => sha256(txBytes);
 export const encodeLeeTransaction = (txBytes) => concat(Uint8Array.of(LEE_TX_PUBLIC), txBytes);
 
 /**
- * Signs `message` with `privateKeys`, which must be exactly the accounts in `message.nonces`
- * (`check_signers`), and assembles it.
- * Returns the message hash, the transaction bytes, the tagged wire bytes, their base64
- * (the `sendTransaction` parameter) and the hash the sequencer reports (hex).
+ * Signs `message` with `secrets` (`PublicAccountSecret`s), which must be exactly the accounts in
+ * `message.nonces` (`check_signers`), and assembles the transaction.
+ * Returns the message bytes, message hash, keyed message hash, witnesses, transaction bytes,
+ * tagged wire bytes, their base64 (the `sendTransaction` parameter) and the hex transaction hash.
  */
-export function signPublicTransaction(message, privateKeys, aux = null) {
-  const signing = privateKeys.map((key) => toHex(accountIdOfPrivateKey(key))).sort();
-  const expected = message.nonces.map(({ accountId }) => toHex(accountId)).sort();
-  if (signing.join() !== expected.join()) throw new Error("the signing keys are not the accounts with nonces");
+export function signPublicTransaction(message, secrets, aux = null) {
   const messageBytes = encodeMessage(message);
-  const witnesses = witnessSetFor(messageBytes, privateKeys, aux);
+  const { msgHash, keyedHash, witnesses } = buildWitnessSet(message, messageBytes, secrets, aux);
   const txBytes = encodePublicTransaction(messageBytes, witnesses);
   const wire = encodeLeeTransaction(txBytes);
   return {
     messageBytes,
-    messageHash: messageHash(messageBytes),
+    messageHash: msgHash,
+    messageWithKeys: keyedHash,
     witnesses,
     txBytes,
     wire,
@@ -422,25 +632,26 @@ export const transferInstruction = (to, amount) => new Writer().u8(0).fixed(to, 
 
 /**
  * The message the wallet's `NativeTokenTransfer::transfer` builds: sent to the sender's balance
- * actor, both balances declared, the sender's nonce, the sender paying the fee. The recipient's
- * credit runs in the same transaction because its balance is declared. An account that isn't on
- * the chain yet is admitted only with `evidence`: `[keyEvidence(its public key)]`.
+ * actor (with `Authority.Signer`), both balances declared, the sender's nonce, the sender paying
+ * the fee. An account that isn't on the chain yet is admitted only with `evidence`:
+ * `[keyEvidence(initialKey(recipientSecret))]`.
  */
 export function transferMessage({ from, to, nonce, amount, gasLimit = NATIVE_TRANSFER_GAS_LIMIT, tip = 0n, maxFee = null, evidence = [] }) {
   return {
-    to: nativeBalance(from),
+    to: nativeBalance(from, AUTHORITY_SIGNER),
     data: transferInstruction(to, amount),
-    actors: [nativeBalance(to)],
+    actors: [nativeBalance(from, AUTHORITY_SIGNER), nativeBalance(to, AUTHORITY_NONE)],
     nonces: [{ accountId: from, nonce: BigInt(nonce) }],
     fee: feeDeclaration(from, gasLimit, tip, maxFee ?? maxFeeFor(gasLimit)),
     evidence,
   };
 }
 
-/** A signed public transfer from the account of `privateKey`. */
-export function signTransfer({ privateKey, to, nonce, amount, gasLimit, tip, maxFee, evidence, aux = null }) {
-  const from = accountIdOfPrivateKey(privateKey);
-  return signPublicTransaction(transferMessage({ from, to, nonce, amount, gasLimit, tip, maxFee, evidence }), [privateKey], aux);
+/** A signed public transfer from the account of `secret` (or `privateKey` alias). */
+export function signTransfer({ secret, privateKey, to, nonce, amount, gasLimit, tip, maxFee, evidence, aux = null }) {
+  const accountSecret = secret ?? privateKey;
+  const from = publicAccountId(accountSecret);
+  return signPublicTransaction(transferMessage({ from, to, nonce, amount, gasLimit, tip, maxFee, evidence }), [accountSecret], aux);
 }
 
 /**
@@ -529,6 +740,9 @@ export const sendTransaction = (url, signed) =>
 
 /** `getTransaction`: null, or [base64 transaction, block ID] once it is in a block. */
 export const getTransaction = (url, hashHex) => rpc(url, "getTransaction", [hashHex]);
+
+/** `getTransactionReceipt` (added in LEZ v0.4.0): null, or the transaction's receipt. */
+export const getTransactionReceipt = (url, hashHex) => rpc(url, "getTransactionReceipt", [hashHex]);
 
 /**
  * Polls `getTransaction` until `hashHex` is in a block; resolves to the block ID. A block holds

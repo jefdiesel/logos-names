@@ -3,19 +3,19 @@
 // reaches a server of ours, and it is checked against the root in the registry's settings
 // before anything is signed.
 
-import { decodeNameRecord, decodeSettings, deriveName, readActorState } from "./names.js";
+import { decodeNameRecord, decodeSettings, deriveName, priceTierForLen, readActorState } from "./names.js";
 import {
-  accountIdOfPrivateKey, base58Decode, equalBytes, formatAccountId, fromHex, getAccountsNonces, sendTransaction,
+  publicAccountId, base58Decode, equalBytes, formatAccountId, fromHex, getAccountsNonces, sendTransaction,
   signPublicTransaction, toHex, waitForTransaction,
 } from "./lez-tx.js";
 import {
-  accountBytes, claimLeaf, claimMessage, claimProof, claimRoot, ownerTag, pageAddress, recordAddress, setPageMessage, settingsAddress,
+  SITE_DIR_KEEP, accountBytes, claimLeaf, claimMessage, claimProof, claimRoot, ownerTag, pageAddress, recordAddress, setPageMessage, settingsAddress, tieredId,
 } from "./lns-tx.js";
 import { chainNow, defaultRpc } from "./register.js";
 
 export const SNAPSHOT_URL = "/claims/lez-0.3.json";
 
-// Well above what the real guest used on the LEZ 0.4 engine: claim 65k, a small page 44k.
+// Well above what the real guest used on the LEZ v0.4.0 engine: claim 69k, a small page 48k.
 // A page's gas grows with its size, and the whole limit is only held, not spent.
 const CLAIM_GAS = 150000n;
 const PAGE_GAS = 2000000n;
@@ -96,23 +96,36 @@ export async function takeBack({ privateKey, program, name, snapshotUrl = SNAPSH
     throw new Error("The list of names here isn't the one this registry's claims were made from.");
   }
   const { id } = await deriveName(name);
+  const priceTier = priceTierForLen(name.length);
+  const slotId = tieredId(id, priceTier);
   const found = claimFor(snapshot, id);
   if (!found) throw new Error(`${name} isn't in the list of names from the earlier chain.`);
-  const signer = accountIdOfPrivateKey(privateKey);
+  const signer = publicAccountId(privateKey);
   if (!equalBytes(ownerTag(id, signer), found.record.owner)) throw new Error(`This wallet didn't hold ${name} on the earlier chain.`);
-  const recordAccount = formatAccountId(recordAddress(prog, id));
+  const recordAccount = formatAccountId(recordAddress(prog, slotId));
   const held = await readActorState(rpc, program, recordAccount);
-  if (held.length > 0 && decodeNameRecord(held).claimed) throw new Error(`${name} was already claimed.`);
+  const prevRec = held.length > 0 ? decodeNameRecord(held) : null;
+  if (prevRec && prevRec.claimed) throw new Error(`${name} was already claimed.`);
+  const nftProgram = settings.nftProgram && toHex(accountBytes(settings.nftProgram)) !== "00".repeat(32)
+    ? accountBytes(settings.nftProgram)
+    : null;
 
   onStep("claim");
-  const [nonce] = await getAccountsNonces(rpc, [signer]);
+  const [[nonce], claimNow] = await Promise.all([getAccountsNonces(rpc, [signer]), chainNow(rpc)]);
   const signed = signPublicTransaction(
-    claimMessage({ program: prog, signer, nonce, gasLimit: CLAIM_GAS, id, sealed: found.record.sealed, now, proof: found.proof }),
+    claimMessage({
+      program: prog, signer, nonce, gasLimit: CLAIM_GAS, id, priceTier, sealed: found.record.sealed,
+      now: claimNow, proof: found.proof, nftProgram,
+      prevNftTokenId: prevRec?.nftTokenId ? fromHex(prevRec.nftTokenId) : null,
+      prevSitePage: prevRec?.siteListed ?? null,
+      prevInMarket: Boolean(prevRec?.listing?.inMarket),
+    }),
     [privateKey],
   );
   await send(rpc, signed);
   const after = await readActorState(rpc, program, recordAccount);
-  if (after.length === 0 || !decodeNameRecord(after).claimed || decodeNameRecord(after).ownerTag !== toHex(found.record.owner)) {
+  const expectedTag = toHex(ownerTag(slotId, signer));
+  if (after.length === 0 || !decodeNameRecord(after).claimed || decodeNameRecord(after).ownerTag !== expectedTag) {
     throw failed("The claim", signed.hash);
   }
   // The claim emptied the page; the old one goes back in a transaction of its own.
@@ -120,7 +133,7 @@ export async function takeBack({ privateKey, program, name, snapshotUrl = SNAPSH
     onStep("page");
     const [next] = await getAccountsNonces(rpc, [signer]);
     await send(rpc, signPublicTransaction(
-      setPageMessage({ program: prog, signer, nonce: next, gasLimit: PAGE_GAS, id, sealed: found.page }),
+      setPageMessage({ program: prog, signer, nonce: next, gasLimit: PAGE_GAS, id: slotId, sealed: found.page, siteDir: SITE_DIR_KEEP }),
       [privateKey],
     ));
   }

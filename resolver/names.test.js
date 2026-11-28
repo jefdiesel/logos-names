@@ -7,27 +7,37 @@ import {
   GRACE_MS,
   base58Decode,
   base58Encode,
+  decodeMarketBucket,
   decodeNameRecord,
   decodePage,
   decodePageContent,
   decodePrimaryName,
   decodeProfile,
   decodeSettings,
+  decodeSiteBucket,
+  decodeSiteDirHeader,
+  decodeSubnameRecord,
   deriveName,
   forwardOf,
   encodePageContent,
   encodeProfile,
+  isValidLabel,
   isValidName,
   normalizeName,
   ownerTag,
   openSealed,
   pageAddress,
+  priceTierForLen,
   readActorState,
   recordAddress,
   resolveName,
   resolvePage,
   reverseLookup,
   seal,
+  splitSubname,
+  subnamePageAddress,
+  subnameRecordAddress,
+  tieredId,
 } from "./names.js";
 
 const RPC_URL = "http://sequencer.test";
@@ -70,8 +80,9 @@ const SEALED_PAGE =
   "92f033cb16a471d0";
 
 const jef = await deriveName("jef");
-/** What jef's record keeps for its holder `OWNER`. */
-const OWNER_TAG = await ownerTag(jef.id, OWNER);
+const JEF_SLOT_ID = await tieredId(jef.id, priceTierForLen("jef".length));
+/** What jef's record keeps for its holder `OWNER` (bound to its v7/v8 `slotId`). */
+const OWNER_TAG = await ownerTag(JEF_SLOT_ID, OWNER);
 
 test("a name derives its identifier and key", async () => {
   assert.equal(toHex(jef.id), JEF_ID);
@@ -82,7 +93,8 @@ test("a name derives its identifier and key", async () => {
     assert.equal(toHex(derived.key), key, name);
   }
   await assert.rejects(deriveName("Not Valid"), /invalid name/);
-  await assert.rejects(deriveName("jef.lez"), /invalid name/);
+  await assert.rejects(deriveName("a--b"), /invalid name/);
+  await assert.rejects(deriveName("a.b.c"), /invalid name/);
 });
 
 // RFC 9106 section 5.3 (Argon2id, version 0x13, with a secret and associated
@@ -116,17 +128,31 @@ test("base58 round-trips, including leading zero bytes", () => {
   assert.equal(base58Decode("1".repeat(32)).length, 32);
 });
 
-test("names are restricted to a safe charset", () => {
-  for (const good of ["a", "jef", "jef-2", "a".repeat(32)]) assert.ok(isValidName(good), good);
-  for (const bad of ["", "Jef", "jef.eth", "-jef", "jef-", "j f", "a".repeat(33), 42]) {
+test("names are restricted to a safe charset (v7/v8: no --, one-level subnames <= 62)", () => {
+  for (const good of ["a", "jef", "jef-2", "a".repeat(32)]) {
+    assert.ok(isValidLabel(good), good);
+    assert.ok(isValidName(good), good);
+  }
+  for (const sub of ["blog.alice", "a.b", `${"a".repeat(30)}.${"b".repeat(31)}`]) {
+    assert.ok(!isValidLabel(sub), `not a top-level label: ${sub}`);
+    assert.ok(isValidName(sub), `valid subname: ${sub}`);
+  }
+  assert.deepEqual(splitSubname("blog.alice"), { label: "blog", parent: "alice" });
+  assert.equal(splitSubname("alice"), null);
+  assert.equal(splitSubname("a.b.c"), null);
+  assert.equal(splitSubname(`${"a".repeat(31)}.${"b".repeat(31)}`), null, "63 > 62");
+  for (const bad of ["", "Jef", "a--b", "blog--alice", "a--b.alice", "blog.a--b", "a.b.c", "-jef", "jef-", "j f", "a".repeat(33), `${"a".repeat(31)}.${"b".repeat(31)}`, 42]) {
     assert.ok(!isValidName(bad), String(bad));
   }
 });
 
 test("typed names are normalised to the bare name", () => {
-  for (const typed of ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  ", "@jef", "lns:jef", "LNS:@Jef.lez"]) assert.equal(normalizeName(typed), "jef");
+  for (const typed of ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  ", "@jef", "lns:jef", "lns://jef", "LNS:@Jef.lez"]) {
+    assert.equal(normalizeName(typed), "jef");
+  }
+  assert.equal(normalizeName("lns://Blog.Alice"), "blog.alice");
   assert.equal(normalizeName("jef.lez.lez"), "jef.lez");
-  assert.ok(!isValidName(normalizeName("jef.eth")));
+  assert.ok(!isValidLabel(normalizeName("jef.eth")));
   assert.ok(!isValidName(normalizeName(".lez")));
   // Only ASCII is lowered: the Kelvin sign lowers to `k` in Unicode, and must not here.
   assert.ok(!isValidName(normalizeName("Kate")));
@@ -338,8 +364,8 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-const JEF_RECORD = await recordAddress(PROGRAM, jef.id);
-const JEF_PAGE = await pageAddress(PROGRAM, jef.id);
+const JEF_RECORD = await recordAddress(PROGRAM, JEF_SLOT_ID);
+const JEF_PAGE = await pageAddress(PROGRAM, JEF_SLOT_ID);
 const RESOLVED = {
   name: "jef",
   expires: EXPIRES,
@@ -519,8 +545,166 @@ test("a forward names another valid name, one hop (SPEC.md §7)", () => {
   assert.equal(forwardOf(record({ forward: "names" })), "names");
   assert.equal(forwardOf(record({ forward: " @Names " })), "names", "normalised");
   assert.equal(forwardOf(record({ forward: "nameswallet" })), null, "not to itself");
-  for (const bad of ["", "-bad", "a b", "x".repeat(33)]) assert.equal(forwardOf(record({ forward: bad })), null, bad);
+  for (const bad of ["", "-bad", "a b", "a--b", "x".repeat(33)]) assert.equal(forwardOf(record({ forward: bad })), null, bad);
   assert.equal(forwardOf(record({})), null);
   assert.equal(forwardOf(null), null);
+});
+
+// ---------- v7 / v8 codecs and subname resolution ----------
+
+function u64Le(n) {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, BigInt(n), true);
+  return out;
+}
+function u128Le(n) {
+  let v = BigInt(n);
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
+}
+const u16Le = (n) => Uint8Array.of(n & 0xff, (n >>> 8) & 0xff);
+const u32Le = (n) => Uint8Array.of(n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff);
+const vec = (bytes) => Uint8Array.from([...u32Le(bytes.length), ...bytes]);
+const str = (text) => vec(new TextEncoder().encode(text));
+
+test("v7 and v8 NameRecord, SubnameRecord, Settings, MarketBucket, SiteDirHeader, SiteBucket decode", () => {
+  // Pinned v7 NameRecord vector from notes/SUBNAMES.md §2.4
+  const v7RecBytes = Uint8Array.from([
+    7, ...new Array(32).fill(1), ...new Array(8).fill(0xff), ...vec([0xee]),
+    0, 0, ...new Array(32).fill(0x99),
+    1, ...u128Le(100_000n), ...new Array(32).fill(2),
+  ]);
+  const v7Rec = decodeNameRecord(v7RecBytes);
+  assert.equal(v7Rec.version, 7);
+  assert.equal(v7Rec.priceTier, 0);
+  assert.equal(v7Rec.generation, "99".repeat(32));
+  assert.deepEqual(v7Rec.subnameSale, { price: 100_000n, payout: ACCOUNT });
+
+  // v8 NameRecord with listing, nft, and siteListed
+  const v8RecBytes = Uint8Array.from([
+    8, ...new Array(32).fill(1), ...u64Le(EXPIRES), ...vec([0xee]),
+    0, 2, ...new Array(32).fill(0xaa),
+    0, // subname_sale = None
+    ...new Array(32).fill(0xbb), // nft_token_id
+    1, // nft_shielded = true
+    1, ...u128Le(500_000n), ...new Array(32).fill(2), 1, ...u64Le(EXPIRES - 1000), ...u64Le(3), 1, // listing
+    ...u64Le(4), // listing_nonce
+    1, ...u16Le(2), // site_listed = Some(2)
+  ]);
+  const v8Rec = decodeNameRecord(v8RecBytes);
+  assert.equal(v8Rec.version, 8);
+  assert.equal(v8Rec.priceTier, 2);
+  assert.equal(v8Rec.nftTokenId, "bb".repeat(32));
+  assert.equal(v8Rec.nftShielded, true);
+  assert.deepEqual(v8Rec.listing, {
+    price: 500_000n,
+    payTo: ACCOUNT,
+    expiresAt: EXPIRES - 1000,
+    nonce: 3,
+    inMarket: true,
+  });
+  assert.equal(v8Rec.listingNonce, 4);
+  assert.equal(v8Rec.siteListed, 2);
+
+  // Pinned SubnameRecord vectors from notes/SUBNAMES.md §2.4
+  const permSub = decodeSubnameRecord(Uint8Array.from([8, ...new Array(32).fill(2), 0, ...vec([0xee])]));
+  assert.deepEqual(permSub.kind, { type: "permanent" });
+  assert.deepEqual(permSub.sealed, Uint8Array.of(0xee));
+  const revSub = decodeSubnameRecord(Uint8Array.from([8, ...new Array(32).fill(2), 1, ...new Array(32).fill(0x99), ...vec([])]));
+  assert.deepEqual(revSub.kind, { type: "revocable", parentGeneration: "99".repeat(32) });
+
+  // v8 Settings (3x4 prices + premiumStart + nftProgram)
+  const prices = [];
+  for (let i = 1; i <= 12; i += 1) prices.push(...u128Le(BigInt(i)));
+  const v8Settings = decodeSettings(Uint8Array.from([
+    8, ...new Array(32).fill(1), ...new Array(32).fill(2),
+    ...prices,
+    0, // mode = fee
+    ...u128Le(10n), ...u128Le(20n),
+    ...new Array(32).fill(0xab), ...u64Le(12345), ...new Array(32).fill(7),
+    ...u128Le(4_000_000_000n),
+    ...new Array(32).fill(8),
+  ]));
+  assert.equal(v8Settings.version, 8);
+  assert.deepEqual(v8Settings.prices, [
+    [1n, 2n, 3n, 4n],
+    [5n, 6n, 7n, 8n],
+    [9n, 10n, 11n, 12n],
+  ]);
+  assert.equal(v8Settings.premiumStart, 4_000_000_000n);
+  assert.equal(v8Settings.nftProgram, base58Encode(new Uint8Array(32).fill(8)));
+
+  // MarketBucket
+  const market = decodeMarketBucket(Uint8Array.from([
+    8, ...u32Le(1),
+    ...new Array(32).fill(0x11), ...u128Le(1_000_000n), ...new Array(32).fill(2),
+    0, ...u64Le(EXPIRES), 0, ...u64Le(5), ...new Array(32).fill(0x22),
+    1, ...str("alice"),
+  ]));
+  assert.equal(market.entries.length, 1);
+  assert.equal(market.entries[0].price, 1_000_000n);
+  assert.equal(market.entries[0].displayName, "alice");
+  assert.equal(market.entries[0].nonce, 5);
+
+  // SiteDirHeader & SiteBucket
+  const header = decodeSiteDirHeader(Uint8Array.from([
+    8, ...Array.from({ length: 16 }, (_, i) => [...u16Le(i)]).flat(), ...u32Le(42),
+  ]));
+  assert.equal(header.totalListed, 42);
+  assert.equal(header.activePage[5], 5);
+
+  const siteBucket = decodeSiteBucket(Uint8Array.from([
+    8, ...u32Le(1),
+    ...new Array(32).fill(0x33), ...str("alice"), ...str("Alice Blog"), ...u64Le(1000), ...u64Le(EXPIRES),
+  ]));
+  assert.deepEqual(siteBucket.entries[0], {
+    id: "33".repeat(32),
+    name: "alice",
+    title: "Alice Blog",
+    updatedAt: 1000,
+    nameExpires: EXPIRES,
+  });
+});
+
+test("subnames resolve for permanent and revocable records, and dead revocable subnames return null", async () => {
+  const sub = await deriveName("blog.jef");
+  const subRecordAddr = await subnameRecordAddress(PROGRAM, JEF_SLOT_ID, sub.id);
+  const subPageAddr = await subnamePageAddress(PROGRAM, JEF_SLOT_ID, sub.id);
+  const subProfile = { name: "blog.jef", account: ACCOUNT, npk: null, vpk: null, texts: { cid: "bafy123" } };
+  const sealedSub = await seal(sub.key, encodeProfile(subProfile), "record", NONCE);
+  const sealedSubPage = await seal(sub.key, encodePageContent(PAGE), "page", NONCE);
+  const gen = new Array(32).fill(0x77);
+  const parentRec = Uint8Array.from([
+    8, ...Buffer.from(OWNER_TAG, "hex"), ...u64Le(EXPIRES), ...vec([]),
+    0, 0, ...gen, 0, ...new Array(32).fill(0x88), 0, 0, ...u64Le(0), 0,
+  ]);
+  const permSubRec = Uint8Array.from([8, ...new Array(32).fill(2), 0, ...vec(sealedSub)]);
+  const revSubRec = Uint8Array.from([8, ...new Array(32).fill(2), 1, ...gen, ...vec(sealedSub)]);
+  const staleRevSubRec = Uint8Array.from([8, ...new Array(32).fill(2), 1, ...new Array(32).fill(0x66), ...vec(sealedSub)]);
+
+  // Permanent subname resolves even without parent record
+  stubSequencer({ [subRecordAddr]: permSubRec, [subPageAddr]: borsh(8, sealedSubPage) });
+  const permResolved = await resolveName(RPC_URL, PROGRAM, "blog.jef", EXPIRES - 1);
+  assert.deepEqual(permResolved, { name: "blog.jef", expires: null, lapsed: false, account: ACCOUNT, npk: null, vpk: null, texts: { cid: "bafy123" } });
+  assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "blog.jef", EXPIRES - 1), PAGE);
+
+  // Revocable subname resolves when parent matches generation and is alive
+  stubSequencer({ [JEF_RECORD]: parentRec, [subRecordAddr]: revSubRec, [subPageAddr]: borsh(8, sealedSubPage) });
+  const revResolved = await resolveName(RPC_URL, PROGRAM, "blog.jef", EXPIRES - 1);
+  assert.equal(revResolved.expires, EXPIRES);
+  assert.equal(revResolved.lapsed, false);
+  assert.deepEqual(await resolvePage(RPC_URL, PROGRAM, "blog.jef", EXPIRES - 1), PAGE);
+
+  // Revocable subname returns null if parent generation rotated (transfer) or parent past grace or missing
+  stubSequencer({ [JEF_RECORD]: parentRec, [subRecordAddr]: staleRevSubRec });
+  assert.equal(await resolveName(RPC_URL, PROGRAM, "blog.jef", EXPIRES - 1), null);
+  stubSequencer({ [JEF_RECORD]: parentRec, [subRecordAddr]: revSubRec });
+  assert.equal(await resolveName(RPC_URL, PROGRAM, "blog.jef", EXPIRES + GRACE_MS), null);
+  stubSequencer({ [subRecordAddr]: revSubRec });
+  assert.equal(await resolveName(RPC_URL, PROGRAM, "blog.jef", EXPIRES - 1), null);
 });
 

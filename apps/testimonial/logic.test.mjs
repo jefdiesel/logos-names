@@ -42,9 +42,14 @@ check("accountBytes refuses a short ID", throws(() => L.accountBytes("abc")), tr
 const vectors = JSON.parse(readFileSync(new URL("./test/vectors.json", import.meta.url), "utf8"));
 check("clock program ID", L.CLOCK_PROGRAM, vectors.clock.program);
 check("clock account ID", L.CLOCK_ACCOUNT, vectors.clock.account);
+// LEZ v0.4.0: AccountId::from_system_program_name(b"clock") is the PDA of the system
+// upgrader ([0xFD; 32]) at sha256("/LEE/SystemUpgrader/v1/Name" padded ‖ "clock" padded).
 check("clock IDs derive as in Rust", [
-  L.base58(L.sha256(L.utf8("/LEE-BuiltinProgram/v1/AccountId").concat(L.utf8("clock")))),
-  L.base58(L.utf8("/LEZ/ClockProgramAccount/0000001")),
+  L.base58(L.sha256(L.seedStr("/LEE/v0.2/AccountId/PDA/").concat(
+    new Array(32).fill(0xfd),
+    L.sha256(L.seedStr("/LEE/SystemUpgrader/v1/Name").concat(L.seedStr("clock"))),
+  ))),
+  L.base58(L.utf8("/LEZ/ClockProgramAccount/0000000")),
 ], [vectors.clock.program, vectors.clock.account]);
 for (const [i, v] of vectors.cases.entries()) {
   const call = L.postCall(v.program, v.submission, v.username, v.text, v.now, "Public/" + v.author);
