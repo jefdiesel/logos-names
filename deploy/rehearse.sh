@@ -190,7 +190,7 @@ if reached site; then
   N "$WU3" resolve "$PUBNAME" > "$R/resolve-site.json" 2>&1 || true
   N "$WU3" sites > "$R/sites.txt" 2>&1 || true
   grep -q "$PUBNAME" "$R/sites.txt" && ok "site listed in the sites directory" || bad "sites directory (see $R/sites.txt)"
-  N "$WU3" subname create "$PUBNAME" blog --owner "Public/$U3" 2>&1 | quiet | tail -2 || true
+  N "$WU3" subname create "blog.$PUBNAME" --owner "Public/$U3" --permanent 2>&1 | quiet | tail -2 || true
   N "$WU3" resolve "blog.$PUBNAME" > "$R/resolve-sub.json" 2>&1 && ok "subname blog.$PUBNAME resolves" || bad "subname (see $R/resolve-sub.json)"
 fi
 
