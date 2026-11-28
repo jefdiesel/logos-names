@@ -1,0 +1,83 @@
+# Reproducible (Docker) guest builds of the LNS registry and lez_nft v3, twice on two fresh
+# runners, then a compare job: both builds must give the same image ids and ELF sha256.
+# Runs on a push to a repro/** branch that carries the lez_nft v3 tree in vendor/lez-nft-v3
+# (moved out of the registry tree before the build, so the registry's Docker context is exactly
+# the release tree). Output: deploy/expected-image-ids.txt content and both ELFs as artifacts.
+name: LNS reproducible guest images
+
+on:
+  push:
+    branches: ['repro/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Docker guest build ${{ matrix.build }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [a, b]
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Runner
+        run: |
+          echo "CPUs $(nproc), memory $(awk '/MemTotal/ {print int($2 / 1048576)}' /proc/meminfo) GB"
+          docker version --format 'docker {{.Server.Version}}'
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+      - name: Move the lez_nft tree out of the registry tree
+        run: |
+          test -f vendor/lez-nft-v3/methods/guest/Cargo.toml
+          mv vendor/lez-nft-v3 "$RUNNER_TEMP/lez-nft"
+          rmdir vendor 2>/dev/null || true
+          git status --short | head -20
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+          rustc --version
+      - name: RISC Zero Rust toolchain (rzup 0.5.0, rust 1.97.0)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cargo install rzup --version 0.5.0 --locked
+          rzup install rust 1.97.0
+          rzup show
+      - name: Build both guests in Docker
+        run: |
+          start=$(date +%s)
+          bash deploy/repro-build.sh --nft-src "$RUNNER_TEMP/lez-nft" --out "$RUNNER_TEMP/out" --jobs "$(nproc)"
+          echo "build took $(( $(date +%s) - start )) s"
+          cat "$RUNNER_TEMP/out/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lns-guests-${{ matrix.build }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+
+  compare:
+    name: Build a equals build b
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/builds
+      - name: Same image ids and ELF sha256
+        run: |
+          cd "$RUNNER_TEMP/builds"
+          grep -v '^#' lns-guests-a/expected-image-ids.txt > a.txt
+          grep -v '^#' lns-guests-b/expected-image-ids.txt > b.txt
+          diff -u a.txt b.txt
+          diff -u lns-guests-a/SHA256SUMS lns-guests-b/SHA256SUMS
+          cmp lns-guests-a/logos_names.bin lns-guests-b/logos_names.bin
+          cmp lns-guests-a/lez_nft_guest.bin lns-guests-b/lez_nft_guest.bin
+          cat lns-guests-a/expected-image-ids.txt
