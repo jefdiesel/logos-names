@@ -1276,7 +1276,9 @@ impl Client {
                         pending.promotions.listed_only = true;
                         delivery = pending;
                     } else {
-                        mentions.push(mention.receiving());
+                        // rc1's `AccountMention::receiving`, gone in v0.4.0: a private
+                        // account that only receives takes part without spending authority.
+                        mentions.push(if mention.identity.is_private() { mention.without_authorization() } else { mention });
                     }
                 }
             }

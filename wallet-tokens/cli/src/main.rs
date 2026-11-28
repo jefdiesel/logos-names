@@ -170,6 +170,12 @@ fn open_wallet(overrides: WalletConfigOverrides) -> Result<WalletCore<SequencerC
     WalletCore::new_update_chain(fetch_config_path()?, storage_path, Some(overrides), &password)
 }
 
+/// rc1's `AccountMention::receiving`, gone in LEZ v0.4.0: a private account that only
+/// receives takes part without spending authority; a public one is left as it is.
+fn receiving(mention: wallet::AccountMention) -> wallet::AccountMention {
+    if mention.identity.is_private() { mention.without_authorization() } else { mention }
+}
+
 /// Runs the LEZ wallet's command line, as its `wallet` binary does (lez/wallet/src/main.rs),
 /// with the sequencer pinned. A new wallet's recovery phrase is not printed: this is a
 /// throwaway test wallet.
@@ -270,7 +276,7 @@ async fn run(wallet: &mut WalletCore<SequencerClient>, command: Command) -> Resu
             // Root: the new definition's actor, signed by its key. The supply's credit is async;
             // declaring the recipient's actor runs it in the same transaction.
             let mut accounts = vec![AccountIdentity::Public(definition).select_program_actor_state(program)];
-            accounts.push(identity(wallet, to).select_program_actor_state(program).receiving());
+            accounts.push(receiving(identity(wallet, to).select_program_actor_state(program)));
             let hash = wallet
                 .send_pub_tx_paid_by(accounts, 0, borsh::to_vec(&message)?, Some(payer))
                 .await?;
@@ -285,7 +291,7 @@ async fn run(wallet: &mut WalletCore<SequencerClient>, command: Command) -> Resu
                 accounts.push(AccountIdentity::PublicNoSign(definition).select_program_actor_state(program));
             }
             if to != authority {
-                accounts.push(identity(wallet, to).select_program_actor_state(program).receiving());
+                accounts.push(receiving(identity(wallet, to).select_program_actor_state(program)));
             }
             send(wallet, program, accounts, &message, AsyncDelivery::default()).await
         }
@@ -324,7 +330,7 @@ async fn run(wallet: &mut WalletCore<SequencerClient>, command: Command) -> Resu
                 delivery.promotions.listed_only = true;
                 (None, delivery)
             } else {
-                (Some(mention.receiving()), AsyncDelivery::default())
+                (Some(receiving(mention)), AsyncDelivery::default())
             };
             let mut accounts = vec![sender.select_program_actor_state(program)];
             accounts.extend(declared);

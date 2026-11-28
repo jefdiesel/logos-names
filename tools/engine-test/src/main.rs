@@ -4,16 +4,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lee::{
-    PrivateKey, PublicAccountEvidence, PublicKey, PublicTransaction, V03State,
+    Authority, GenesisBuilder, PublicAccountEvidence, PublicTransaction, V03State,
     program::Program,
     public_transaction::{Message as TxMessage, WitnessSet},
+    signature::{INITIAL_KEY_TYPE, PublicAccountSecret, Signer, public_account_id},
 };
 use lee_core::{
-    account::{AccountId, Actor, Nonce},
+    account::{Account, AccountId, Actor, Nonce},
     program::PdaSeed,
 };
 use names_core::{
-    Instruction, Message, NameId, NameRecord, Settings, LengthProof, MIN_COMMIT_AGE_MS,
+    Instruction, Message, NameId, NameRecord, Settings, LengthProof, MIN_COMMIT_AGE_MS, PUBLIC_MIN_COMMIT_AGE_MS, PUBLIC_TIME_WINDOW_MS,
     MODE_DEPOSIT, claim_leaf, claim_proof, claim_root, commitment, commitment_address, deposit_address,
     name_seeds, commitment_seed, owner_tag, page_address, record_address, settings_address, settings_seed,
 };
@@ -22,15 +23,15 @@ const T0: u64 = 1_800_000_000_000;
 const DEPOSIT: u128 = 1_000_000;
 
 struct Who {
-    key: PrivateKey,
+    secret: PublicAccountSecret,
     id: AccountId,
     nonce: u128,
 }
 
 fn who(byte: u8) -> Who {
-    let key = PrivateKey::try_new([byte; 32]).expect("a valid key");
-    let id = AccountId::from(&PublicKey::new_from_private_key(&key));
-    Who { key, id, nonce: 0 }
+    let secret = PublicAccountSecret::new([byte; 32]);
+    let id = public_account_id(&secret);
+    Who { secret, id, nonce: 0 }
 }
 
 struct Run {
@@ -58,11 +59,19 @@ impl Run {
         let evidence = self
             .evidence(&self.seeds)
             .into_iter()
-            .filter(|evidence| wanted.contains(&evidence.account_id()))
+            .filter(|evidence| evidence.account_id().is_some_and(|id| wanted.contains(&id)))
             .collect();
         let bytes = borsh::to_vec(message).expect("a message");
+        // The signer authorizes every actor on its own account (its program actor and, for a
+        // paid call, its native balance); the rest are plain.
+        let signer = from.id;
+        let public = public.into_iter().map(|actor| {
+            let authority = if actor.account_id == signer { Authority::Signer } else { Authority::None };
+            (actor, authority)
+        });
         let tx = TxMessage::new(self.actor(from.id), bytes, public, nonces, None, evidence);
-        let witness = WitnessSet::for_message(&tx, &[&from.key]);
+        let key = Signer::new(&from.secret, Nonce(from.nonce), INITIAL_KEY_TYPE, INITIAL_KEY_TYPE);
+        let witness = WitnessSet::sign(&tx, &[key]);
         let tx = PublicTransaction::new(tx, witness);
         self.block += 1;
         self.state
@@ -145,9 +154,13 @@ fn main() {
     let carol = who(4);
     let program = deployer.id;
 
-    let state = V03State::new()
-        .with_public_account_balances([(alice.id, 10 * DEPOSIT), (bob.id, 10 * DEPOSIT), (admin.id, DEPOSIT)])
-        .with_named_programs([(program, Program::new(elf.into()).expect("the guest loads"))]);
+    let state = GenesisBuilder::new()
+        .with_public_accounts(
+            [(alice.id, 10 * DEPOSIT), (bob.id, 10 * DEPOSIT), (admin.id, DEPOSIT)]
+                .map(|(id, balance)| (id, Account::funded(balance))),
+        )
+        .with_programs_at([(program, Program::new(elf.into()).expect("the guest loads"), false)])
+        .build();
     let mut seeds = vec![settings_seed()];
     let mut run = Run { state, program, block: 0, seeds: Vec::new() };
 
@@ -168,6 +181,12 @@ fn main() {
         seeds.extend(name_seeds(id));
     }
     seeds.push(commitment_seed(&promised));
+    // A public registration (CommitPublic, then Register after the 5-minute wait).
+    let quick: NameId = [0xDD; 32];
+    let quick_secret = [6; 32];
+    let quick_promise = commitment(&quick, &owner_tag(&quick, &bob.id), &quick_secret);
+    seeds.extend(name_seeds(&quick));
+    seeds.push(commitment_seed(&quick_promise));
     run.seeds = seeds;
 
     let configure = Instruction::Configure {
@@ -300,5 +319,38 @@ fn main() {
         actors,
         later,
     );
+
+    // A public registration: CommitPublic, valid only within PUBLIC_TIME_WINDOW_MS of its
+    // `now`, then a reveal after PUBLIC_MIN_COMMIT_AGE_MS (5 minutes), not before.
+    let start = later + MIN_COMMIT_AGE_MS;
+    let commit_public = |now| Instruction::CommitPublic { commitment: quick_promise, now };
+    let commit_actors = vec![run.actor(commitment_address(&program, &quick_promise))];
+    run.refuse(
+        "a public commit outside its one-minute window is refused",
+        "OutOfValidityWindow",
+        &mut bob,
+        Message::Instruction(commit_public(start)),
+        commit_actors.clone(),
+        start + PUBLIC_TIME_WINDOW_MS,
+    );
+    run.send("bob commits to a name in public", &mut bob, commit_public(start), commit_actors, start);
+    let length = short_list().prove(&quick).expect("a proof");
+    let early = start + PUBLIC_MIN_COMMIT_AGE_MS - 1;
+    let actors = run.registering(&quick, bob.id, &quick_secret);
+    run.refuse(
+        "a public reveal before the 5-minute wait is refused",
+        "the commitment is too recent",
+        &mut bob,
+        Message::Instruction(register(quick, quick_secret, early, length.clone())),
+        actors.clone(),
+        early,
+    );
+    let ready = start + PUBLIC_MIN_COMMIT_AGE_MS;
+    let before = run.balance(bob.id);
+    run.send("bob registers it after the 5-minute public wait", &mut bob, register(quick, quick_secret, ready, length), actors, ready);
+    assert_eq!(run.record(&quick).expect("registered").owner, owner_tag(&quick, &bob.id));
+    assert_eq!(run.balance(bob.id), before - DEPOSIT);
+    println!("ok   the public wait is 5 minutes");
+
     println!("\nall scenarios passed");
 }

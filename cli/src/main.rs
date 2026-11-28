@@ -2129,10 +2129,11 @@ impl Client {
         println!("applied in block {block}");
         match before {
             Some(before) => {
-                if let Some(line) = block_fee
-                    .map(|paid| format!("fee paid: {paid}"))
-                    .or_else(|| fees::paid_line_of(before, self.held_by(&paying).await, spent))
-                {
+                let line = match block_fee {
+                    Some(paid) => Some(format!("fee paid: {paid}")),
+                    None => fees::paid_line_of(before, self.held_by(&paying).await, spent),
+                };
+                if let Some(line) = line {
                     println!("{line}");
                 }
             }
