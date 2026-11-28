@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["core", "seal", "accountlog", "methods", "methods/guest", "cli", "tools/shortlist", "tools/engine-test", "board/core", "board/methods", "board/methods/guest", "testimonial/core", "testimonial/methods", "testimonial/methods/guest", "testimonial/engine-test", "testimonial/engine-test/forwarder", "testimonial/engine-test/forwarder/guest", "testimonial/client"]
+# The engine test runs the registry with lez_nft v3 from a sibling checkout (../lez-nft),
+# so it is its own workspace and the rest builds without that checkout.
+exclude = ["tools/engine-test"]
+members = ["core", "seal", "accountlog", "methods", "methods/guest", "cli", "tools/shortlist", "board/core", "board/methods", "board/methods/guest", "testimonial/core", "testimonial/methods", "testimonial/methods/guest", "testimonial/engine-test", "testimonial/engine-test/forwarder", "testimonial/engine-test/forwarder/guest", "testimonial/client"]
 
 [workspace.package]
 version = "0.1.0"

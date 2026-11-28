@@ -5670,17 +5670,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "names_engine_test"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "lee",
- "lee_core",
- "names_core",
- "names_methods",
-]
-
-[[package]]
 name = "names_methods"
 version = "0.1.0"
 dependencies = [
