@@ -48,6 +48,7 @@ const SITE_BUCKET_DOMAIN = utf8("logos-names/v8/sites/");
 const NFT_TOKEN_ID_DOMAIN = utf8("logos-names/v8/nft-token/");
 const NFT_TOKEN_SEED_DOMAIN = utf8("lez-nft/v3/token/");
 const NFT_DEED_SEED_DOMAIN = utf8("lez-nft/v3/deed/");
+const NFT_CONFIG_SEED_DOMAIN = utf8("lez-nft/v3/config");
 
 // ---------- v7 / v8 pricing, marketplace and re-release constants ----------
 
@@ -76,6 +77,7 @@ export const DEFAULT_PRICES = [
   [100_000n, 1_000_000n, 4_000_000n, 20_000_000n],
 ];
 export const DEFAULT_PREMIUM_START = 4_000_000_000n;
+const U128_MAX = (1n << 128n) - 1n;
 
 /** Length-based pricing tier for a top-level name: 0 (<=5), 1 (6-7), 2 (8+). */
 export function priceTierForLen(len) {
@@ -96,8 +98,9 @@ export function saleSplit(price) {
 }
 
 /**
- * 21-day falling re-release premium after a name lapses past its 30-day grace period.
- * Halves every 24h with linear intra-day interpolation, reaching 0 continuously at day 21.
+ * 21-day falling re-release premium after a name lapses past its 30-day grace period:
+ * `rerelease_premium` in core/src/market.rs. Day d starts at `start >> d` and falls in a straight
+ * line to `start >> (d + 1)` (to 0 on the last day), so it halves daily and reaches 0 at day 21.
  */
 export function rereleasePremium(premiumStart, elapsedMs) {
   const start = BigInt(premiumStart);
@@ -107,7 +110,11 @@ export function rereleasePremium(premiumStart, elapsedMs) {
   const rem = elapsed % DAY_MS;
   const hi = start >> day;
   const lo = day + 1n === PREMIUM_DAYS ? 0n : start >> (day + 1n);
-  return hi - ((hi - lo) * rem) / DAY_MS;
+  const span = hi - lo;
+  // core/src/market.rs: `span.checked_mul(rem)`, and on u128 overflow `(span / DAY_MS) * rem`.
+  const product = span * rem;
+  const drop = product > U128_MAX ? (span / DAY_MS) * rem : product / DAY_MS;
+  return hi - drop;
 }
 
 // ---------- seeds and addresses (all bytes) ----------
@@ -151,6 +158,9 @@ export const marketBucketAddress = (program, bucket) => pda(program, marketBucke
 export const siteDirHeaderAddress = (program) => pda(program, siteDirHeaderSeed());
 export const siteBucketAddress = (program, bucket, page) => pda(program, siteBucketSeed(bucket, page));
 export const nftTokenAddress = (nftProgram, tokenId) => pda(nftProgram, nftTokenSeed(tokenId));
+/** lez_nft's `config_seed()` / `config_address(program)`: lez_nft checks on every linked Mint that the registry is authorised there. */
+export const nftConfigSeed = () => sha256(NFT_CONFIG_SEED_DOMAIN);
+export const nftConfigAddress = (nftProgram) => pda(nftProgram, nftConfigSeed());
 
 export const ownerTag = (id, account) => sha256(concat(OWNER_TAG_DOMAIN, id, account));
 export const commitmentHash = (id, holder, secret) => sha256(concat(COMMITMENT_DOMAIN, id, holder, secret));
@@ -537,7 +547,7 @@ export function registerMessage({
       actor(settingsAddress(program), program),
       actor(commitmentAddress(program, promised), program),
       ...(fee > 0n ? [nativeBalance(signer, AUTHORITY_SIGNER), nativeBalance(paid)] : []),
-      ...(nftProgram && newTokenId ? [actor(nftTokenAddress(nftProgram, newTokenId), nftProgram)] : []),
+      ...(nftProgram && newTokenId ? [actor(nftTokenAddress(nftProgram, newTokenId), nftProgram), actor(nftConfigAddress(nftProgram), nftProgram)] : []),
       ...(nftProgram && prevNftTokenId ? [actor(nftTokenAddress(nftProgram, prevNftTokenId), nftProgram)] : []),
       ...site.actors,
       ...market.actors,
@@ -669,7 +679,7 @@ export function claimMessage({
     actors: [
       ...nameActors(program, slotId),
       actor(settingsAddress(program), program),
-      ...(nftProgram && newTokenId ? [actor(nftTokenAddress(nftProgram, newTokenId), nftProgram)] : []),
+      ...(nftProgram && newTokenId ? [actor(nftTokenAddress(nftProgram, newTokenId), nftProgram), actor(nftConfigAddress(nftProgram), nftProgram)] : []),
       ...(nftProgram && prevNftTokenId ? [actor(nftTokenAddress(nftProgram, prevNftTokenId), nftProgram)] : []),
       ...site.actors,
       ...market.actors,

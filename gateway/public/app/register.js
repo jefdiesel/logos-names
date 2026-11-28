@@ -86,7 +86,7 @@ export { SHORTLIST_ROOT, TERM_30D, TERM_1Y, TERM_5Y, TERM_PERMANENT, priceTierFo
 
 // Gas limits: browser cannot run r0vm, so these sit above measured LEZ v0.4.0 usage
 // (kept tight because a reverted public transaction charges its entire gas limit).
-const REGISTER_GAS = 350000n;
+const REGISTER_GAS = 450000n; // v0.4.0 engine: 261,954 fresh, 315,004 re-registering a lapsed name (old NFT burned)
 const COMMIT_GAS = 60000n;
 const RENEW_GAS = 200000n;
 const SET_RECORD_GAS = 100000n;

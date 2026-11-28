@@ -12,6 +12,10 @@ publish = false
 [dependencies]
 names_core = { path = "../../../core" }
 names_methods = { path = "../../../methods" }
+# lez_nft v3 (branch v3-lez04) checked out next to this repo: <parent>/<this repo> and <parent>/lez-nft,
+# as tools/engine-test needs it.
+lez_nft_core = { path = "../../../../lez-nft/core" }
+lez_nft_methods = { path = "../../../../lez-nft/methods" }
 lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
 lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0" }
 borsh = "1.5.7"

@@ -1370,6 +1370,7 @@ const ASSOCIATED_DATA = {
 const NONCE_LENGTH = 12;
 const PROFILE_BLOCK = 256;
 const LABEL_PATTERN = /^(?!-)[a-z0-9-]{1,32}(?<!-)$/;
+/** Maximum byte length of a `label.parent` subname (so `label--parent` fits 63-byte DNS labels). */
 const MAX_SUBNAME_LEN = 62;
 /** How long an expired name still resolves, in milliseconds: 30 days. */
 const GRACE_MS = 2592e6;
@@ -1385,9 +1386,24 @@ const SITE_BUCKETS = 16;
 const MARKET_BUCKET_MAX = 64;
 const SITE_BUCKET_MAX = 32;
 const DEFAULT_PRICES = [
-	[2000000n, 20000000n, 80000000n, 400000000n],
-	[500000n, 5000000n, 20000000n, 100000000n],
-	[100000n, 1000000n, 4000000n, 20000000n]
+	[
+		2000000n,
+		20000000n,
+		80000000n,
+		400000000n
+	],
+	[
+		500000n,
+		5000000n,
+		20000000n,
+		100000000n
+	],
+	[
+		100000n,
+		1000000n,
+		4000000n,
+		20000000n
+	]
 ];
 function pad32(text) {
 	const bytes = /* @__PURE__ */ new Uint8Array(32);
@@ -1463,24 +1479,30 @@ function normalizeName(input) {
 	if (bare.startsWith("@")) bare = bare.slice(1);
 	return bare.endsWith(".lez") ? bare.slice(0, -4) : bare;
 }
+/** A single LNS label: 1–32 chars of `[a-z0-9-]`, no leading/trailing `-`, and no `--`. */
 function isValidLabel(label) {
 	return typeof label === "string" && LABEL_PATTERN.test(label) && !label.includes("--");
 }
+/** Splits a one-level subname `label.parent`, returning `{ label, parent }` or `null`. */
 function splitSubname(name) {
-	if (typeof name !== "string" || name.length > MAX_SUBNAME_LEN) return null;
+	if (typeof name !== "string" || name.length > 62) return null;
 	const dot = name.indexOf(".");
 	if (dot < 0 || name.indexOf(".", dot + 1) >= 0) return null;
 	const label = name.slice(0, dot);
 	const parent = name.slice(dot + 1);
-	return isValidLabel(label) && isValidLabel(parent) ? { label, parent } : null;
+	return isValidLabel(label) && isValidLabel(parent) ? {
+		label,
+		parent
+	} : null;
 }
 function isValidName(name) {
 	return isValidLabel(name) || splitSubname(name) !== null;
 }
+/** Length-based pricing tier for a top-level name: 0 (<=5), 1 (6–7), 2 (8+). */
 function priceTierForLen(len) {
-	if (len <= 5) return PRICE_TIER_5;
-	if (len <= 7) return PRICE_TIER_6_7;
-	return PRICE_TIER_8_PLUS;
+	if (len <= 5) return 0;
+	if (len <= 7) return 1;
+	return 2;
 }
 /**
 * The identifier and key of `name`. The chain knows the name only by `id`;
@@ -1496,6 +1518,7 @@ async function deriveName(name) {
 		key: await sha256(concat(utf8.encode(KEY_DOMAIN), master))
 	};
 }
+/** On-chain v7/v8 slot identifier for a top-level name, bound to its `priceTier`. */
 async function tieredId(baseId, priceTier) {
 	if (!(baseId instanceof Uint8Array) || baseId.length !== 32) throw new Error("name ID must be 32 bytes");
 	return sha256(concat(utf8.encode(TIER_DOMAIN), Uint8Array.of(priceTier & 255), baseId));
@@ -1505,8 +1528,7 @@ async function pdaAddress(program, seed) {
 }
 async function derivedAddress(program, domain, id) {
 	if (!(id instanceof Uint8Array) || id.length !== 32) throw new Error("name ID must be 32 bytes");
-	const seed = await sha256(concat(utf8.encode(domain), id));
-	return pdaAddress(program, seed);
+	return pdaAddress(program, await sha256(concat(utf8.encode(domain), id)));
 }
 /** Account holding the record of the name `id` under the registry `program`. */
 function recordAddress(program, id) {
@@ -1516,25 +1538,31 @@ function recordAddress(program, id) {
 function pageAddress(program, id) {
 	return derivedAddress(program, PAGE_SEED_DOMAIN, id);
 }
+/** Account holding the registry's settings under `program`. */
 async function settingsAddress(program) {
 	return pdaAddress(program, await sha256(utf8.encode(SETTINGS_SEED_DOMAIN)));
 }
+/** Account holding a subname's record under `program`. */
 async function subnameRecordAddress(program, parentSlotId, subId) {
 	if (!(parentSlotId instanceof Uint8Array) || parentSlotId.length !== 32) throw new Error("parent ID must be 32 bytes");
 	if (!(subId instanceof Uint8Array) || subId.length !== 32) throw new Error("subname ID must be 32 bytes");
 	return pdaAddress(program, await sha256(concat(utf8.encode(SUBNAME_SEED_DOMAIN), parentSlotId, subId)));
 }
+/** Account holding a subname's page under `program`. */
 async function subnamePageAddress(program, parentSlotId, subId) {
 	if (!(parentSlotId instanceof Uint8Array) || parentSlotId.length !== 32) throw new Error("parent ID must be 32 bytes");
 	if (!(subId instanceof Uint8Array) || subId.length !== 32) throw new Error("subname ID must be 32 bytes");
 	return pdaAddress(program, await sha256(concat(utf8.encode(SUBPAGE_SEED_DOMAIN), parentSlotId, subId)));
 }
+/** Account holding marketplace bucket `bucket` (0..15). */
 async function marketBucketAddress(program, bucket) {
 	return pdaAddress(program, await sha256(concat(utf8.encode(MARKET_BUCKET_DOMAIN), Uint8Array.of(bucket & 255))));
 }
+/** Account holding the site directory header (`SiteDirHeader`). */
 async function siteDirHeaderAddress(program) {
 	return pdaAddress(program, await sha256(utf8.encode(SITE_DIR_HEADER_DOMAIN)));
 }
+/** Account holding site directory bucket `bucket` (0..15) page `page` (u16). */
 async function siteBucketAddress(program, bucket, page) {
 	return pdaAddress(program, await sha256(concat(utf8.encode(SITE_BUCKET_DOMAIN), Uint8Array.of(bucket & 255, page & 255, page >>> 8 & 255))));
 }
@@ -1650,6 +1678,12 @@ function decodeListing(reader) {
 		inMarket: reader.bool()
 	};
 }
+/**
+* Decodes a top-level `NameRecord` (versions 3–8).
+* - v6 adds `claimed`.
+* - v7 adds `priceTier`, `generation`, `subnameSale`.
+* - v8 adds `nftTokenId`, `nftShielded`, `listing`, `listingNonce`, `siteListed`.
+*/
 function decodeNameRecord(bytes) {
 	const reader = new Reader(bytes);
 	const version = reader.u8();
@@ -1677,6 +1711,7 @@ function decodeNameRecord(bytes) {
 		siteListed: reader.option(() => reader.u16())
 	};
 }
+/** Decodes a v7/v8 `SubnameRecord`. */
 function decodeSubnameRecord(bytes) {
 	const reader = new Reader(bytes);
 	const version = reader.u8();
@@ -1696,15 +1731,32 @@ function decodeSubnameRecord(bytes) {
 		sealed: reader.byteVec()
 	};
 }
+/**
+* Decodes the registry's settings (versions 5–8).
+* - v5–v6: `prices` is `[u128; 3]`.
+* - v7–v8: `prices` is `[[u128; 4]; 3]` (`[priceTier][term]`).
+* - v8 adds `premiumStart` and `nftProgram`.
+*/
 function decodeSettings(bytes) {
 	const reader = new Reader(bytes);
 	const version = reader.u8();
-	const admin = base58Encode(reader.take(32));
-	const treasury = base58Encode(reader.take(32));
-	const prices = version >= 7 ? Array.from({ length: 3 }, () => [reader.u128(), reader.u128(), reader.u128(), reader.u128()]) : [reader.u128(), reader.u128(), reader.u128()];
-	const mode = reader.u8();
-	const deposits = [reader.u128(), reader.u128()];
-	const settings = { version, admin, treasury, prices, mode, deposits };
+	const settings = {
+		version,
+		admin: base58Encode(reader.take(32)),
+		treasury: base58Encode(reader.take(32)),
+		prices: version >= 7 ? Array.from({ length: 3 }, () => [
+			reader.u128(),
+			reader.u128(),
+			reader.u128(),
+			reader.u128()
+		]) : [
+			reader.u128(),
+			reader.u128(),
+			reader.u128()
+		],
+		mode: reader.u8(),
+		deposits: [reader.u128(), reader.u128()]
+	};
 	if (version < 6) return {
 		...settings,
 		claimsRoot: null,
@@ -1724,48 +1776,54 @@ function decodeSettings(bytes) {
 		nftProgram: base58Encode(reader.take(32))
 	};
 }
+/** Decodes a v8 `MarketBucket` (`version || Vec<MarketEntry>`). */
 function decodeMarketBucket(bytes) {
 	const reader = new Reader(bytes);
 	const version = reader.u8();
 	const count = reader.u32();
 	const entries = [];
-	for (let i = 0; i < count; i += 1) {
-		entries.push({
-			id: toHex(reader.take(32)),
-			price: reader.u128(),
-			payTo: base58Encode(reader.take(32)),
-			expiresAt: reader.option(() => reader.u64()),
-			nameExpires: reader.u64(),
-			priceTier: reader.u8(),
-			nonce: reader.u64(),
-			nftTokenId: toHex(reader.take(32)),
-			displayName: reader.option(() => reader.string())
-		});
-	}
-	return { version, entries };
+	for (let i = 0; i < count; i += 1) entries.push({
+		id: toHex(reader.take(32)),
+		price: reader.u128(),
+		payTo: base58Encode(reader.take(32)),
+		expiresAt: reader.option(() => reader.u64()),
+		nameExpires: reader.u64(),
+		priceTier: reader.u8(),
+		nonce: reader.u64(),
+		nftTokenId: toHex(reader.take(32)),
+		displayName: reader.option(() => reader.string())
+	});
+	return {
+		version,
+		entries
+	};
 }
+/** Decodes a v8 `SiteDirHeader` (`version || [u16; 16] || u32`). */
 function decodeSiteDirHeader(bytes) {
 	const reader = new Reader(bytes);
-	const version = reader.u8();
-	const activePage = Array.from({ length: SITE_BUCKETS }, () => reader.u16());
-	const totalListed = reader.u32();
-	return { version, activePage, totalListed };
+	return {
+		version: reader.u8(),
+		activePage: Array.from({ length: 16 }, () => reader.u16()),
+		totalListed: reader.u32()
+	};
 }
+/** Decodes a v8 `SiteBucket` (`version || Vec<SiteEntry>`). */
 function decodeSiteBucket(bytes) {
 	const reader = new Reader(bytes);
 	const version = reader.u8();
 	const count = reader.u32();
 	const entries = [];
-	for (let i = 0; i < count; i += 1) {
-		entries.push({
-			id: toHex(reader.take(32)),
-			name: reader.string(),
-			title: reader.string(),
-			updatedAt: reader.u64(),
-			nameExpires: reader.u64()
-		});
-	}
-	return { version, entries };
+	for (let i = 0; i < count; i += 1) entries.push({
+		id: toHex(reader.take(32)),
+		name: reader.string(),
+		title: reader.string(),
+		updatedAt: reader.u64(),
+		nameExpires: reader.u64()
+	});
+	return {
+		version,
+		entries
+	};
 }
 function decodePage(bytes) {
 	const reader = new Reader(bytes);
@@ -1855,21 +1913,32 @@ async function openAs(key, sealed, kind, decode) {
 		return null;
 	}
 }
+/** The record of the name slot `slotId`, or null when it is not registered or is past grace at `now`. */
 async function readRecord(rpcUrl, program, slotId, now) {
 	const bytes = await readActorState(rpcUrl, program, await recordAddress(program, slotId));
 	if (bytes.length === 0) return null;
 	const record = decodeNameRecord(bytes);
 	return now >= record.expires + 2592e6 ? null : record;
 }
+/**
+* Reads a top-level name's raw on-chain `NameRecord` (including past-grace records so callers
+* can inspect re-release premium, listing state, NFT token ID, and site directory page).
+*/
 async function readRawNameRecord(rpcUrl, program, name) {
 	if (!isValidLabel(name)) throw new Error(`not a top-level name: ${name}`);
 	const { id: baseId, key } = await deriveName(name);
 	const priceTier = priceTierForLen(name.length);
 	const slotId = await tieredId(baseId, priceTier);
 	const bytes = await readActorState(rpcUrl, program, await recordAddress(program, slotId));
-	const record = bytes.length === 0 ? null : decodeNameRecord(bytes);
-	return { baseId, slotId, key, priceTier, record };
+	return {
+		baseId,
+		slotId,
+		key,
+		priceTier,
+		record: bytes.length === 0 ? null : decodeNameRecord(bytes)
+	};
 }
+/** Reads an active subname record, checking parent liveness + generation for revocable subnames. */
 async function readActiveSubname(rpcUrl, program, name, split, now) {
 	const { id: parentBaseId } = await deriveName(split.parent);
 	const parentSlotId = await tieredId(parentBaseId, priceTierForLen(split.parent.length));
@@ -1883,16 +1952,30 @@ async function readActiveSubname(rpcUrl, program, name, split, now) {
 		if (parentRecord === null || parentRecord.generation !== sub.kind.parentGeneration) return null;
 		expires = parentRecord.expires >= Number.MAX_SAFE_INTEGER ? null : parentRecord.expires;
 	}
-	return { parentSlotId, subId, key, sub, expires };
+	return {
+		parentSlotId,
+		subId,
+		key,
+		sub,
+		expires
+	};
 }
+/**
+* What `name` resolves to at the time `now`, or null when it is not registered
+* or is past its grace period. Supports both top-level names (using v7/v8 `tieredId`)
+* and one-level subnames (`label.parent`). `expires` is in milliseconds since the Unix
+* epoch (or null for permanent/deposit names); `lapsed` is true for a name that has
+* expired and is in its grace period, which still resolves.
+*/
 async function resolveName(rpcUrl, program, name, now = Date.now()) {
 	if (!isValidName(name)) throw new Error(`invalid name: ${name}`);
 	const split = splitSubname(name);
-	let key, sealed, expires;
+	let key;
+	let sealed;
+	let expires;
 	if (split === null) {
 		const { id: baseId, key: k } = await deriveName(name);
-		const slotId = await tieredId(baseId, priceTierForLen(name.length));
-		const record = await readRecord(rpcUrl, program, slotId, now);
+		const record = await readRecord(rpcUrl, program, await tieredId(baseId, priceTierForLen(name.length)), now);
 		if (record === null) return null;
 		key = k;
 		sealed = record.sealed;
@@ -1926,13 +2009,25 @@ async function resolveName(rpcUrl, program, name, now = Date.now()) {
 		texts
 	};
 }
+/** The text entry that points a name to another (SPEC.md §7, Forwarding). */
 const FORWARD_KEY = "forward";
+/**
+* Where a resolved record forwards to: its `forward` entry, normalised, if that
+* is a valid name other than the record's own; otherwise null.
+*/
 function forwardOf(record) {
 	const value = record && record.texts ? record.texts[FORWARD_KEY] : void 0;
 	if (typeof value !== "string") return null;
 	const target = normalizeName(value);
 	return isValidName(target) && target !== record.name ? target : null;
 }
+/**
+* Resolves `name` for using it (paying, messaging, showing it): when it forwards,
+* the record of the name it points to, one hop, with `forwardedFrom` set to the
+* name asked for, which a payer must be shown. Null when `name` isn't
+* registered; throws when it points to a name that isn't. Changing a name never
+* follows a forward: use `resolveName` for that.
+*/
 async function resolveUsing(rpcUrl, program, name, now = Date.now()) {
 	const record = await resolveName(rpcUrl, program, name, now);
 	const target = forwardOf(record);
@@ -1944,6 +2039,11 @@ async function resolveUsing(rpcUrl, program, name, now = Date.now()) {
 		forwardedFrom: name
 	};
 }
+/**
+* What a name shows people: whether it can be paid privately, and the public
+* account only if its holder published one. The private receiving keys are
+* never shown; a payer's wallet uses them from `resolveName`.
+*/
 function publicView(record) {
 	const { name, expires, lapsed, account, npk, vpk, texts } = record;
 	return {
@@ -1955,6 +2055,11 @@ function publicView(record) {
 		texts
 	};
 }
+/**
+* The page for `name` at the time `now`, or null when the name is not
+* registered or is past its grace period, has no page, or the page does not
+* open with the name's key.
+*/
 async function resolvePage(rpcUrl, program, name, now = Date.now()) {
 	if (!isValidName(name)) throw new Error(`invalid name: ${name}`);
 	const split = splitSubname(name);
@@ -1972,6 +2077,11 @@ async function resolvePage(rpcUrl, program, name, now = Date.now()) {
 	if (bytes.length === 0) return null;
 	return openAs(active.key, decodePage(bytes).sealed, "page", decodePageContent);
 }
+/**
+* The name `accountId` is shown as at the time `now`, or null. A reverse record
+* is only a claim, so it counts only when the forward record points back at the
+* same account.
+*/
 async function reverseLookup(rpcUrl, program, accountId, now = Date.now()) {
 	const bytes = await readActorState(rpcUrl, program, accountId);
 	if (bytes.length === 0) return null;
