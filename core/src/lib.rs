@@ -554,7 +554,7 @@ pub enum Effect {
     RequireTreasury { treasury: AccountId },
     /// On settings: verify `from` is `(nft_token_address(settings.nft_program, token_id), settings.nft_program)`.
     RequireNftTokenSender { from: Actor, token_id: [u8; 32] },
-    /// On settings: forward `NftAuthorityOp` to `settings.nft_program` (no-op if unconfigured).
+    /// On settings: forward `NftAuthorityOp` to `settings.nft_program` (refused if unconfigured).
     SyncNft { op: NftAuthorityOp },
     /// On settings: verify claims window allows shielding, then forward `NftAuthorityOp::Shield`.
     ShieldNft {
@@ -1015,7 +1015,10 @@ pub fn subname_commitment(
     sha256(&bytes)
 }
 
-fn register_generation(
+/// The `generation` a registration writes; with [`nft_token_id`] it gives the token a
+/// `Register` mints, whose PDA the transaction must declare.
+#[must_use]
+pub fn register_generation(
     slot_id: &NameId,
     owner: &OwnerTag,
     now: u64,
@@ -1030,7 +1033,9 @@ fn register_generation(
     sha256(&bytes)
 }
 
-fn claim_generation(slot_id: &NameId, owner: &OwnerTag, now: u64) -> [u8; 32] {
+/// The `generation` a [`Instruction::Claim`] writes (see [`register_generation`]).
+#[must_use]
+pub fn claim_generation(slot_id: &NameId, owner: &OwnerTag, now: u64) -> [u8; 32] {
     let mut bytes = Vec::with_capacity(GEN_CLAIM_DOMAIN.len() + 72);
     bytes.extend_from_slice(GEN_CLAIM_DOMAIN);
     bytes.extend_from_slice(slot_id);
@@ -2552,7 +2557,9 @@ pub fn apply(program: &AccountId, effect: Effect, pre_data: &[u8]) -> Response {
                         base.checked_add(premium).expect("total fee overflow")
                     }
                 }
-                None => 0,
+                // Every name gets its NFT, so nothing registers before `Configure` binds
+                // the NFT program.
+                None => panic!("the registry has no settings"),
             };
             if deposit {
                 assert!(fee == owed, "the deposit is not this name's deposit");
@@ -2654,11 +2661,10 @@ pub fn apply(program: &AccountId, effect: Effect, pre_data: &[u8]) -> Response {
             );
             Response::keep_state()
         }
-        Effect::SyncNft { op } => match load_settings(pre_data) {
-            Some(settings) => Response::keep_state()
-                .send(nft::authority_sync_message(&settings.nft_program, op)),
-            None => Response::keep_state(),
-        },
+        Effect::SyncNft { op } => {
+            let settings = load_settings(pre_data).expect("the registry has no settings");
+            Response::keep_state().send(nft::authority_sync_message(&settings.nft_program, op))
+        }
         Effect::ShieldNft {
             token_id,
             deed_account,

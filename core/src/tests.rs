@@ -768,6 +768,14 @@ impl Chain {
         );
     }
 
+    /// A registry configured with every price at zero (what the tests that are not about
+    /// fees run on; a registry with no settings registers nothing).
+    fn free() -> Self {
+        let mut chain = Self::default();
+        chain.configure(PROGRAM, ALICE, [[0; TERMS]; PRICE_TIERS]);
+        chain
+    }
+
     fn configure(
         &mut self,
         signer: AccountId,
@@ -933,7 +941,7 @@ fn anyone_can_ask_who_holds_a_name_and_only_the_holder_passes() {
 
 #[test]
 fn a_name_is_registered_with_its_first_profile() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"sealed profile");
     let s = slot(&JEF);
     let owner = owner_tag(&s, &ALICE);
@@ -961,7 +969,7 @@ fn a_name_is_registered_with_its_first_profile() {
 #[test]
 #[should_panic(expected = "name is already registered")]
 fn a_registered_name_cannot_be_registered_again() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     chain.register(&JEF, BOB, b"");
 }
@@ -984,7 +992,7 @@ fn registering_needs_the_owners_signature() {
 
 #[test]
 fn the_owner_replaces_the_profile() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"first");
     chain.run(
         on_record(&JEF, ALICE),
@@ -1002,7 +1010,7 @@ fn the_owner_replaces_the_profile() {
 #[test]
 #[should_panic(expected = "signer does not own this name")]
 fn someone_else_cannot_replace_the_profile() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"first");
     chain.run(
         on_record(&JEF, BOB),
@@ -1037,7 +1045,7 @@ fn an_oversized_profile_is_refused() {
 
 #[test]
 fn the_owner_writes_and_removes_the_page() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     chain.run(
         on_record_and_page(&JEF, ALICE),
@@ -1068,7 +1076,7 @@ fn the_owner_writes_and_removes_the_page() {
 #[test]
 #[should_panic(expected = "signer does not own this name")]
 fn someone_else_cannot_write_the_page() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     chain.run(
         on_record_and_page(&JEF, BOB),
@@ -1083,7 +1091,7 @@ fn someone_else_cannot_write_the_page() {
 #[test]
 #[should_panic(expected = "sealed page exceeds")]
 fn an_oversized_page_is_refused() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     chain.run(
         on_record_and_page(&JEF, ALICE),
@@ -1097,7 +1105,7 @@ fn an_oversized_page_is_refused() {
 
 #[test]
 fn a_transfer_hands_over_the_name_and_empties_what_was_sealed() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"alice's profile");
     let s = slot(&JEF);
     let initial = chain.record(&JEF).expect("registered");
@@ -1155,7 +1163,7 @@ fn a_transfer_hands_over_the_name_and_empties_what_was_sealed() {
 #[test]
 #[should_panic(expected = "signer does not own this name")]
 fn someone_else_cannot_transfer_the_name() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     let s = slot(&JEF);
     chain.run(
@@ -1171,7 +1179,7 @@ fn someone_else_cannot_transfer_the_name() {
 #[test]
 #[should_panic(expected = "signer does not own this name")]
 fn the_last_owner_cannot_change_a_transferred_name() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     let s = slot(&JEF);
     chain.run(
@@ -1194,7 +1202,7 @@ fn the_last_owner_cannot_change_a_transferred_name() {
 
 #[test]
 fn a_released_name_leaves_nothing_and_can_be_registered_again() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"alice's profile");
     let s = slot(&JEF);
     chain.run(
@@ -1224,7 +1232,7 @@ fn a_released_name_leaves_nothing_and_can_be_registered_again() {
 #[test]
 #[should_panic(expected = "signer does not own this name")]
 fn someone_else_cannot_release_the_name() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     chain.run(
         on_record_and_page(&JEF, BOB),
@@ -1250,7 +1258,7 @@ fn an_unregistered_name_cannot_be_released() {
 
 #[test]
 fn one_names_changes_never_touch_another() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"jef");
     chain.register(&ADA, BOB, b"ada");
     chain.run(
@@ -1261,9 +1269,10 @@ fn one_names_changes_never_touch_another() {
         },
     );
     assert_eq!(chain.record(&ADA).expect("registered").sealed, b"ada");
+    // ADA's record and the settings.
     assert_eq!(
         chain.actors.values().filter(|data| !data.is_empty()).count(),
-        1
+        2
     );
 }
 
@@ -2183,7 +2192,7 @@ fn no_effect_or_event_names_a_holder() {
 
 #[test]
 fn a_name_past_its_grace_period_can_be_registered_by_anyone() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"alice's profile");
     let s = slot(&JEF);
     chain.run(
@@ -2225,7 +2234,7 @@ fn a_name_past_its_grace_period_can_be_registered_by_anyone() {
 #[test]
 #[should_panic(expected = "name is already registered")]
 fn a_name_in_its_grace_period_cannot_be_registered() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     chain.run(
         on_registration(&JEF, BOB),
@@ -2235,7 +2244,7 @@ fn a_name_in_its_grace_period_cannot_be_registered() {
 
 #[test]
 fn a_renewal_extends_from_the_later_of_the_expiry_and_now() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"profile");
     chain.renew(&JEF, ALICE, NOW + 1);
     let record = chain.record(&JEF).expect("registered");
@@ -2254,7 +2263,7 @@ fn a_renewal_extends_from_the_later_of_the_expiry_and_now() {
 #[test]
 #[should_panic(expected = "name has lapsed")]
 fn a_name_past_its_grace_period_cannot_be_renewed() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     chain.renew(&JEF, ALICE, NOW + YEAR + GRACE_MS);
 }
@@ -2275,8 +2284,8 @@ fn an_unknown_term_is_refused() {
 }
 
 #[test]
-#[should_panic(expected = "the fee is not the price of this term")]
-fn an_unconfigured_registry_takes_no_fee() {
+#[should_panic(expected = "the registry has no settings")]
+fn an_unconfigured_registry_takes_no_registrations() {
     Chain::default().run(
         paying(on_registration(&JEF, ALICE), BOB),
         register_at(JEF, Vec::new(), 1, 5, NOW),
@@ -2622,7 +2631,7 @@ fn nft_program_cannot_be_zero() {
 
 #[test]
 fn a_name_is_claimed_by_commit_then_reveal() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
     chain.reveal(&JEF, ALICE, NOW);
     assert_eq!(
@@ -2675,7 +2684,7 @@ fn a_live_commitment_cannot_be_reset() {
 
 #[test]
 fn a_public_name_is_claimed_after_the_public_wait() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.commit_public(&JEF, ALICE, NOW - PUBLIC_MIN_COMMIT_AGE_MS);
     chain.reveal(&JEF, ALICE, NOW);
     assert_eq!(
@@ -2756,7 +2765,7 @@ fn a_private_commit_cannot_use_the_public_wait() {
 
 #[test]
 fn a_public_attacker_racing_a_pending_private_reveal_still_waits_four_real_minutes() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
     let bob_made = NOW - PUBLIC_TIME_WINDOW_MS + 1;
     chain.commit_public(&JEF, BOB, bob_made);
@@ -3845,7 +3854,7 @@ fn site_directory_upsert_update_opt_out_renew_and_lifecycle_cleanup() {
 
 #[test]
 fn site_directory_paginates_at_32_entries_blocks_page_griefing_and_prunes_past_grace() {
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     let target_bucket = 5u8;
 
     // Collect 33 distinct base IDs whose slot_id lands in `target_bucket`.
@@ -4010,7 +4019,7 @@ fn site_title_and_name_validation_rejects_control_chars_and_subnames() {
     assert!(validate_site_title("bad\x7ftitle").is_err());
 
     // Top-level only: dotted subname is refused in SiteDirOp::Upsert
-    let mut chain = Chain::default();
+    let mut chain = Chain::free();
     chain.register(&JEF, ALICE, b"");
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         chain.run(
