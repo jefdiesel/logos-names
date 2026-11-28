@@ -493,9 +493,18 @@ export function createShardProver({
   return { loadManifest, loadShard, prove, clearCache };
 }
 
-const defaultProver = createShardProver();
+const provers = new Map();
 
-/** Builds a verified NonMembership `LengthProof` for `id32` by fetching only its one shard. */
-export function lengthProofFromShards(id32) {
-  return defaultProver.prove(id32);
+/**
+ * Builds a verified NonMembership `LengthProof` for `id32` by fetching only its one shard.
+ * `options` are `createShardProver`'s; one cached prover is kept per shard location.
+ */
+export function lengthProofFromShards(id32, { baseUrl = DEFAULT_SHARDS_BASE_URL, ...options } = {}) {
+  const key = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  if (!provers.has(key) || Object.keys(options).length > 0) {
+    const prover = createShardProver({ baseUrl: key, ...options });
+    if (Object.keys(options).length > 0) return prover.prove(id32);
+    provers.set(key, prover);
+  }
+  return provers.get(key).prove(id32);
 }
