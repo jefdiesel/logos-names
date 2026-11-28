@@ -870,7 +870,7 @@ mod tests {
     /// Everything here against `testdata/v8-core-vectors.json`, which is written by
     /// compiled `names_core` (b63ec93 + the deed constant) and `lez_nft_core`
     /// (3562907): instructions, account layouts, derivations, the sale split and
-    /// the premium curve. Regenerate it with the cross-check program, never by hand.
+    /// the premium curve. Regenerate it with testdata/core-vectors (cargo run), never by hand.
     #[test]
     fn v8_core_vectors() {
         use crate::registry::{
