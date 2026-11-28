@@ -17,7 +17,8 @@ Every instruction, message, account layout and PDA seed is byte-for-byte as in
    to compute the token a Register or Claim mints:
    `token_id = nft_token_id(slot_id, register_generation(slot_id, owner_tag(slot_id, signer), now, secret))`.
    `now` must be the exact `now` the Register carries.
-3. **Actors.** These come from the real engine run, not from the encodings.
+3. **Actors.** Every row except Renew and the Shield family was run on the real
+   engine in `tools/engine-test`; those two are read from the code.
 
    | Transaction | Public actors to declare (besides the signer's own) | PDA evidence |
    |---|---|---|
@@ -28,6 +29,9 @@ Every instruction, message, account layout and PDA seed is byte-for-byte as in
    | Transfer | record, page, settings, token (plus the market bucket, site bucket and site header when they are listed) | — |
    | SetPage / SetRecord with `Upsert` or `Remove` | record (and page for SetPage), `site_bucket_address(bucket, page)`, `site_dir_header_address` | the site bucket and header seeds the first time |
    | CreateSubname / RevokeSubname | parent record, subname record, subname page | the subname seeds |
+| Release | record, page, settings, token (to burn it); with a deposit refund also the name's deposit account and the signer's native balance | — |
+| Renew (from code) | record, settings, token (`SetExpiry`), signer's and treasury's native balances; the market bucket or site bucket when a listing or site entry is refreshed | — |
+| ShieldDeed / UnshieldDeed / RefreshShieldedDeed (from code) | record, settings, token, plus the private deed PDA as a private account (needs a private, proven transaction) | — |
 
    The NFT config actor is the only new one. lez_nft checks on every linked Mint
    that the registry is an authorised program in its Config.
