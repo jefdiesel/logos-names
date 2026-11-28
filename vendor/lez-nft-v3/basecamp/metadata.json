@@ -1,0 +1,26 @@
+{
+  "name": "lez_nft_ui",
+  "display_name": "NFTs",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "category": "wallet",
+  "description": "Launch NFT collections, mint privately, and keep a portfolio on the Logos Execution Zone",
+  "view": "Main.qml",
+  "icon": "src/icons/icon.png",
+  "dependencies": [
+    "lez_nft"
+  ],
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

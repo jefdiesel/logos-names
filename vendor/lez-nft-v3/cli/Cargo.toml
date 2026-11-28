@@ -1,0 +1,31 @@
+[package]
+name = "lez_nft_cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lez-nft"
+path = "src/main.rs"
+
+[dependencies]
+lez_nft_core.workspace = true
+lee_core = { workspace = true, features = ["host"] }
+lee.workspace = true
+common.workspace = true
+wallet.workspace = true
+sequencer_service_rpc = { workspace = true, features = ["client"] }
+borsh.workspace = true
+
+aes-gcm = "0.10.3"
+anyhow = "1.0.98"
+bs58 = "0.5"
+clap = { version = "4.5.42", features = ["derive", "env"] }
+futures = "0.3"
+getrandom = "0.3"
+hex = "0.4.3"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
