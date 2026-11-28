@@ -1356,15 +1356,39 @@ const ID_DOMAIN = "logos-names/v5/id";
 const KEY_DOMAIN = "logos-names/v5/key";
 const NAME_SEED_DOMAIN = "logos-names/v5/name/";
 const PAGE_SEED_DOMAIN = "logos-names/v5/page/";
+const SETTINGS_SEED_DOMAIN = "logos-names/v5/config";
+const TIER_DOMAIN = "logos-names/v7/tier/";
+const SUBNAME_SEED_DOMAIN = "logos-names/v7/subname/";
+const SUBPAGE_SEED_DOMAIN = "logos-names/v7/subpage/";
+const MARKET_BUCKET_DOMAIN = "logos-names/v8/market/";
+const SITE_DIR_HEADER_DOMAIN = "logos-names/v8/sites-meta";
+const SITE_BUCKET_DOMAIN = "logos-names/v8/sites/";
 const ASSOCIATED_DATA = {
 	record: "logos-names/v5/record",
 	page: "logos-names/v5/page"
 };
 const NONCE_LENGTH = 12;
 const PROFILE_BLOCK = 256;
-const NAME_PATTERN = /^(?!-)[a-z0-9-]{1,32}(?<!-)$/;
+const LABEL_PATTERN = /^(?!-)[a-z0-9-]{1,32}(?<!-)$/;
+const MAX_SUBNAME_LEN = 62;
 /** How long an expired name still resolves, in milliseconds: 30 days. */
 const GRACE_MS = 2592e6;
+const PRICE_TIER_5 = 0;
+const PRICE_TIER_6_7 = 1;
+const PRICE_TIER_8_PLUS = 2;
+const TERM_30D = 0;
+const TERM_1Y = 1;
+const TERM_5Y = 2;
+const TERM_PERMANENT = 3;
+const MARKET_BUCKETS = 16;
+const SITE_BUCKETS = 16;
+const MARKET_BUCKET_MAX = 64;
+const SITE_BUCKET_MAX = 32;
+const DEFAULT_PRICES = [
+	[2000000n, 20000000n, 80000000n, 400000000n],
+	[500000n, 5000000n, 20000000n, 100000000n],
+	[100000n, 1000000n, 4000000n, 20000000n]
+];
 function pad32(text) {
 	const bytes = /* @__PURE__ */ new Uint8Array(32);
 	bytes.set(utf8.encode(text));
@@ -1435,12 +1459,28 @@ const LEGACY_SUFFIX = ".lez";
 */
 function normalizeName(input) {
 	const lowered = String(input).trim().replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-	let bare = lowered.startsWith("lns:") ? lowered.slice(4) : lowered;
+	let bare = lowered.startsWith("lns://") ? lowered.slice(6) : lowered.startsWith("lns:") ? lowered.slice(4) : lowered;
 	if (bare.startsWith("@")) bare = bare.slice(1);
 	return bare.endsWith(".lez") ? bare.slice(0, -4) : bare;
 }
+function isValidLabel(label) {
+	return typeof label === "string" && LABEL_PATTERN.test(label) && !label.includes("--");
+}
+function splitSubname(name) {
+	if (typeof name !== "string" || name.length > MAX_SUBNAME_LEN) return null;
+	const dot = name.indexOf(".");
+	if (dot < 0 || name.indexOf(".", dot + 1) >= 0) return null;
+	const label = name.slice(0, dot);
+	const parent = name.slice(dot + 1);
+	return isValidLabel(label) && isValidLabel(parent) ? { label, parent } : null;
+}
 function isValidName(name) {
-	return typeof name === "string" && NAME_PATTERN.test(name);
+	return isValidLabel(name) || splitSubname(name) !== null;
+}
+function priceTierForLen(len) {
+	if (len <= 5) return PRICE_TIER_5;
+	if (len <= 7) return PRICE_TIER_6_7;
+	return PRICE_TIER_8_PLUS;
 }
 /**
 * The identifier and key of `name`. The chain knows the name only by `id`;
@@ -1456,10 +1496,17 @@ async function deriveName(name) {
 		key: await sha256(concat(utf8.encode(KEY_DOMAIN), master))
 	};
 }
+async function tieredId(baseId, priceTier) {
+	if (!(baseId instanceof Uint8Array) || baseId.length !== 32) throw new Error("name ID must be 32 bytes");
+	return sha256(concat(utf8.encode(TIER_DOMAIN), Uint8Array.of(priceTier & 255), baseId));
+}
+async function pdaAddress(program, seed) {
+	return base58Encode(await sha256(concat(PDA_PREFIX, accountIdBytes(program), seed)));
+}
 async function derivedAddress(program, domain, id) {
 	if (!(id instanceof Uint8Array) || id.length !== 32) throw new Error("name ID must be 32 bytes");
 	const seed = await sha256(concat(utf8.encode(domain), id));
-	return base58Encode(await sha256(concat(PDA_PREFIX, accountIdBytes(program), seed)));
+	return pdaAddress(program, seed);
 }
 /** Account holding the record of the name `id` under the registry `program`. */
 function recordAddress(program, id) {
@@ -1468,6 +1515,28 @@ function recordAddress(program, id) {
 /** Account holding the page of the name `id` under the registry `program`. */
 function pageAddress(program, id) {
 	return derivedAddress(program, PAGE_SEED_DOMAIN, id);
+}
+async function settingsAddress(program) {
+	return pdaAddress(program, await sha256(utf8.encode(SETTINGS_SEED_DOMAIN)));
+}
+async function subnameRecordAddress(program, parentSlotId, subId) {
+	if (!(parentSlotId instanceof Uint8Array) || parentSlotId.length !== 32) throw new Error("parent ID must be 32 bytes");
+	if (!(subId instanceof Uint8Array) || subId.length !== 32) throw new Error("subname ID must be 32 bytes");
+	return pdaAddress(program, await sha256(concat(utf8.encode(SUBNAME_SEED_DOMAIN), parentSlotId, subId)));
+}
+async function subnamePageAddress(program, parentSlotId, subId) {
+	if (!(parentSlotId instanceof Uint8Array) || parentSlotId.length !== 32) throw new Error("parent ID must be 32 bytes");
+	if (!(subId instanceof Uint8Array) || subId.length !== 32) throw new Error("subname ID must be 32 bytes");
+	return pdaAddress(program, await sha256(concat(utf8.encode(SUBPAGE_SEED_DOMAIN), parentSlotId, subId)));
+}
+async function marketBucketAddress(program, bucket) {
+	return pdaAddress(program, await sha256(concat(utf8.encode(MARKET_BUCKET_DOMAIN), Uint8Array.of(bucket & 255))));
+}
+async function siteDirHeaderAddress(program) {
+	return pdaAddress(program, await sha256(utf8.encode(SITE_DIR_HEADER_DOMAIN)));
+}
+async function siteBucketAddress(program, bucket, page) {
+	return pdaAddress(program, await sha256(concat(utf8.encode(SITE_BUCKET_DOMAIN), Uint8Array.of(bucket & 255, page & 255, page >>> 8 & 255))));
 }
 function sealingKey(key, usage) {
 	return crypto.subtle.importKey("raw", key, "AES-GCM", false, [usage]);
@@ -1519,6 +1588,10 @@ var Reader = class {
 	u8() {
 		return this.take(1)[0];
 	}
+	u16() {
+		const [a, b] = this.take(2);
+		return a | b << 8;
+	}
 	u32() {
 		const [a, b, c, d] = this.take(4);
 		return (a | b << 8 | c << 16 | d << 24) >>> 0;
@@ -1562,48 +1635,137 @@ function fixed32(bytes, what) {
 async function ownerTag(id, accountId) {
 	return toHex(await sha256(concat(utf8.encode("logos-names/v5/owner"), id, base58Decode(accountId))));
 }
-/**
-* Decodes a record. Version 6 (LEZ 0.4) adds `claimed`: the name was carried over
-* from an earlier chain. Older records end at `sealed`, and were never claimed.
-*/
+function decodeSubnameSale(reader) {
+	return {
+		price: reader.u128(),
+		payout: base58Encode(reader.take(32))
+	};
+}
+function decodeListing(reader) {
+	return {
+		price: reader.u128(),
+		payTo: base58Encode(reader.take(32)),
+		expiresAt: reader.option(() => reader.u64()),
+		nonce: reader.u64(),
+		inMarket: reader.bool()
+	};
+}
 function decodeNameRecord(bytes) {
 	const reader = new Reader(bytes);
 	const version = reader.u8();
-	return {
+	const base = {
 		version,
 		ownerTag: toHex(reader.take(32)),
 		expires: reader.u64(),
 		sealed: reader.byteVec(),
 		claimed: version >= 6 ? reader.bool() : false
 	};
+	if (version < 7) return base;
+	const v7 = {
+		...base,
+		priceTier: reader.u8(),
+		generation: toHex(reader.take(32)),
+		subnameSale: reader.option(() => decodeSubnameSale(reader))
+	};
+	if (version < 8) return v7;
+	return {
+		...v7,
+		nftTokenId: toHex(reader.take(32)),
+		nftShielded: reader.bool(),
+		listing: reader.option(() => decodeListing(reader)),
+		listingNonce: reader.u64(),
+		siteListed: reader.option(() => reader.u16())
+	};
 }
-/** Decodes the registry's settings. Before version 6 they end at `deposits`, with no claims. */
+function decodeSubnameRecord(bytes) {
+	const reader = new Reader(bytes);
+	const version = reader.u8();
+	const ownerTagHex = toHex(reader.take(32));
+	const kindTag = reader.u8();
+	let kind;
+	if (kindTag === 0) kind = { type: "permanent" };
+	else if (kindTag === 1) kind = {
+		type: "revocable",
+		parentGeneration: toHex(reader.take(32))
+	};
+	else throw new Error(`unknown subname kind: ${kindTag}`);
+	return {
+		version,
+		ownerTag: ownerTagHex,
+		kind,
+		sealed: reader.byteVec()
+	};
+}
 function decodeSettings(bytes) {
 	const reader = new Reader(bytes);
 	const version = reader.u8();
-	const settings = {
-		version,
-		admin: base58Encode(reader.take(32)),
-		treasury: base58Encode(reader.take(32)),
-		prices: [
-			reader.u128(),
-			reader.u128(),
-			reader.u128()
-		],
-		mode: reader.u8(),
-		deposits: [reader.u128(), reader.u128()]
-	};
-	return version < 6 ? {
+	const admin = base58Encode(reader.take(32));
+	const treasury = base58Encode(reader.take(32));
+	const prices = version >= 7 ? Array.from({ length: 3 }, () => [reader.u128(), reader.u128(), reader.u128(), reader.u128()]) : [reader.u128(), reader.u128(), reader.u128()];
+	const mode = reader.u8();
+	const deposits = [reader.u128(), reader.u128()];
+	const settings = { version, admin, treasury, prices, mode, deposits };
+	if (version < 6) return {
 		...settings,
 		claimsRoot: null,
 		claimsUntil: 0,
 		claimsProgram: null
-	} : {
+	};
+	const v6 = {
 		...settings,
 		claimsRoot: toHex(reader.take(32)),
 		claimsUntil: reader.u64(),
 		claimsProgram: base58Encode(reader.take(32))
 	};
+	if (version < 8) return v6;
+	return {
+		...v6,
+		premiumStart: reader.u128(),
+		nftProgram: base58Encode(reader.take(32))
+	};
+}
+function decodeMarketBucket(bytes) {
+	const reader = new Reader(bytes);
+	const version = reader.u8();
+	const count = reader.u32();
+	const entries = [];
+	for (let i = 0; i < count; i += 1) {
+		entries.push({
+			id: toHex(reader.take(32)),
+			price: reader.u128(),
+			payTo: base58Encode(reader.take(32)),
+			expiresAt: reader.option(() => reader.u64()),
+			nameExpires: reader.u64(),
+			priceTier: reader.u8(),
+			nonce: reader.u64(),
+			nftTokenId: toHex(reader.take(32)),
+			displayName: reader.option(() => reader.string())
+		});
+	}
+	return { version, entries };
+}
+function decodeSiteDirHeader(bytes) {
+	const reader = new Reader(bytes);
+	const version = reader.u8();
+	const activePage = Array.from({ length: SITE_BUCKETS }, () => reader.u16());
+	const totalListed = reader.u32();
+	return { version, activePage, totalListed };
+}
+function decodeSiteBucket(bytes) {
+	const reader = new Reader(bytes);
+	const version = reader.u8();
+	const count = reader.u32();
+	const entries = [];
+	for (let i = 0; i < count; i += 1) {
+		entries.push({
+			id: toHex(reader.take(32)),
+			name: reader.string(),
+			title: reader.string(),
+			updatedAt: reader.u64(),
+			nameExpires: reader.u64()
+		});
+	}
+	return { version, entries };
 }
 function decodePage(bytes) {
 	const reader = new Reader(bytes);
@@ -1693,27 +1855,55 @@ async function openAs(key, sealed, kind, decode) {
 		return null;
 	}
 }
-/** The record of the name `id`, or null when it is not registered or is past grace at `now`. */
-async function readRecord(rpcUrl, program, id, now) {
-	const bytes = await readActorState(rpcUrl, program, await recordAddress(program, id));
+async function readRecord(rpcUrl, program, slotId, now) {
+	const bytes = await readActorState(rpcUrl, program, await recordAddress(program, slotId));
 	if (bytes.length === 0) return null;
 	const record = decodeNameRecord(bytes);
 	return now >= record.expires + 2592e6 ? null : record;
 }
-/**
-* What `name` resolves to at the time `now`, or null when it is not registered
-* or is past its grace period. `expires` is in milliseconds since the Unix
-* epoch; `lapsed` is true for a name that has expired and is in its grace
-* period, which still resolves. A record whose sealed profile is empty, does
-* not open with the name's key or names another name is a registered name with
-* nothing set.
-*/
+async function readRawNameRecord(rpcUrl, program, name) {
+	if (!isValidLabel(name)) throw new Error(`not a top-level name: ${name}`);
+	const { id: baseId, key } = await deriveName(name);
+	const priceTier = priceTierForLen(name.length);
+	const slotId = await tieredId(baseId, priceTier);
+	const bytes = await readActorState(rpcUrl, program, await recordAddress(program, slotId));
+	const record = bytes.length === 0 ? null : decodeNameRecord(bytes);
+	return { baseId, slotId, key, priceTier, record };
+}
+async function readActiveSubname(rpcUrl, program, name, split, now) {
+	const { id: parentBaseId } = await deriveName(split.parent);
+	const parentSlotId = await tieredId(parentBaseId, priceTierForLen(split.parent.length));
+	const { id: subId, key } = await deriveName(name);
+	const bytes = await readActorState(rpcUrl, program, await subnameRecordAddress(program, parentSlotId, subId));
+	if (bytes.length === 0) return null;
+	const sub = decodeSubnameRecord(bytes);
+	let expires = null;
+	if (sub.kind.type === "revocable") {
+		const parentRecord = await readRecord(rpcUrl, program, parentSlotId, now);
+		if (parentRecord === null || parentRecord.generation !== sub.kind.parentGeneration) return null;
+		expires = parentRecord.expires >= Number.MAX_SAFE_INTEGER ? null : parentRecord.expires;
+	}
+	return { parentSlotId, subId, key, sub, expires };
+}
 async function resolveName(rpcUrl, program, name, now = Date.now()) {
-	const { id, key } = await deriveName(name);
-	const record = await readRecord(rpcUrl, program, id, now);
-	if (record === null) return null;
-	const { sealed } = record;
-	const expires = record.expires >= Number.MAX_SAFE_INTEGER ? null : record.expires;
+	if (!isValidName(name)) throw new Error(`invalid name: ${name}`);
+	const split = splitSubname(name);
+	let key, sealed, expires;
+	if (split === null) {
+		const { id: baseId, key: k } = await deriveName(name);
+		const slotId = await tieredId(baseId, priceTierForLen(name.length));
+		const record = await readRecord(rpcUrl, program, slotId, now);
+		if (record === null) return null;
+		key = k;
+		sealed = record.sealed;
+		expires = record.expires >= Number.MAX_SAFE_INTEGER ? null : record.expires;
+	} else {
+		const active = await readActiveSubname(rpcUrl, program, name, split, now);
+		if (active === null) return null;
+		key = active.key;
+		sealed = active.sub.sealed;
+		expires = active.expires;
+	}
 	const held = {
 		name,
 		expires,
@@ -1736,11 +1926,24 @@ async function resolveName(rpcUrl, program, name, now = Date.now()) {
 		texts
 	};
 }
-/**
-* What a name shows people: whether it can be paid privately, and the public
-* account only if its holder published one. The private receiving keys are
-* never shown; a payer's wallet uses them from `resolveName`.
-*/
+const FORWARD_KEY = "forward";
+function forwardOf(record) {
+	const value = record && record.texts ? record.texts[FORWARD_KEY] : void 0;
+	if (typeof value !== "string") return null;
+	const target = normalizeName(value);
+	return isValidName(target) && target !== record.name ? target : null;
+}
+async function resolveUsing(rpcUrl, program, name, now = Date.now()) {
+	const record = await resolveName(rpcUrl, program, name, now);
+	const target = forwardOf(record);
+	if (target === null) return record;
+	const forwarded = await resolveName(rpcUrl, program, target, now);
+	if (forwarded === null) throw new Error(`${name} points to ${target}, which isn't registered`);
+	return {
+		...forwarded,
+		forwardedFrom: name
+	};
+}
 function publicView(record) {
 	const { name, expires, lapsed, account, npk, vpk, texts } = record;
 	return {
@@ -1752,34 +1955,43 @@ function publicView(record) {
 		texts
 	};
 }
-/**
-* The page for `name` at the time `now`, or null when the name is not
-* registered or is past its grace period, has no page, or the page does not
-* open with the name's key.
-*/
 async function resolvePage(rpcUrl, program, name, now = Date.now()) {
-	const { id, key } = await deriveName(name);
-	if (await readRecord(rpcUrl, program, id, now) === null) return null;
-	const bytes = await readActorState(rpcUrl, program, await pageAddress(program, id));
+	if (!isValidName(name)) throw new Error(`invalid name: ${name}`);
+	const split = splitSubname(name);
+	if (split === null) {
+		const { id: baseId, key } = await deriveName(name);
+		const slotId = await tieredId(baseId, priceTierForLen(name.length));
+		if (await readRecord(rpcUrl, program, slotId, now) === null) return null;
+		const bytes = await readActorState(rpcUrl, program, await pageAddress(program, slotId));
+		if (bytes.length === 0) return null;
+		return openAs(key, decodePage(bytes).sealed, "page", decodePageContent);
+	}
+	const active = await readActiveSubname(rpcUrl, program, name, split, now);
+	if (active === null) return null;
+	const bytes = await readActorState(rpcUrl, program, await subnamePageAddress(program, active.parentSlotId, active.subId));
 	if (bytes.length === 0) return null;
-	return openAs(key, decodePage(bytes).sealed, "page", decodePageContent);
+	return openAs(active.key, decodePage(bytes).sealed, "page", decodePageContent);
 }
-/**
-* The name `accountId` is shown as at the time `now`, or null. A reverse record
-* is only a claim, so it counts only when the forward record points back at the
-* same account.
-*/
 async function reverseLookup(rpcUrl, program, accountId, now = Date.now()) {
 	const bytes = await readActorState(rpcUrl, program, accountId);
 	if (bytes.length === 0) return null;
 	const { name } = decodePrimaryName(bytes);
 	if (!isValidName(name)) return null;
-	const { id, key } = await deriveName(name);
-	const record = await readRecord(rpcUrl, program, id, now);
-	if (record === null) return null;
-	if (record.ownerTag === await ownerTag(id, accountId)) return name;
-	const profile = await openAs(key, record.sealed, "record", decodeProfile);
+	const split = splitSubname(name);
+	if (split === null) {
+		const { id: baseId, key } = await deriveName(name);
+		const slotId = await tieredId(baseId, priceTierForLen(name.length));
+		const record = await readRecord(rpcUrl, program, slotId, now);
+		if (record === null) return null;
+		if (record.ownerTag === await ownerTag(slotId, accountId)) return name;
+		const profile = await openAs(key, record.sealed, "record", decodeProfile);
+		return profile !== null && profile.name === name && profile.account === accountId ? name : null;
+	}
+	const active = await readActiveSubname(rpcUrl, program, name, split, now);
+	if (active === null) return null;
+	if (active.sub.ownerTag === await ownerTag(active.subId, accountId)) return name;
+	const profile = await openAs(active.key, active.sub.sealed, "record", decodeProfile);
 	return profile !== null && profile.name === name && profile.account === accountId ? name : null;
 }
 //#endregion
-export { GRACE_MS, LEGACY_SUFFIX, NAME_SUFFIX, base58Decode, base58Encode, decodeNameRecord, decodePage, decodePageContent, decodePrimaryName, decodeProfile, decodeSettings, deriveName, encodePageContent, encodeProfile, isValidName, normalizeName, openSealed, ownerTag, pageAddress, publicView, readActorState, readShard, recordAddress, resolveName, resolvePage, reverseLookup, seal };
+export { DEFAULT_PRICES, FORWARD_KEY, GRACE_MS, LEGACY_SUFFIX, MARKET_BUCKETS, MARKET_BUCKET_MAX, MAX_SUBNAME_LEN, NAME_SUFFIX, PRICE_TIER_5, PRICE_TIER_6_7, PRICE_TIER_8_PLUS, SITE_BUCKETS, SITE_BUCKET_MAX, TERM_1Y, TERM_30D, TERM_5Y, TERM_PERMANENT, base58Decode, base58Encode, decodeMarketBucket, decodeNameRecord, decodePage, decodePageContent, decodePrimaryName, decodeProfile, decodeSettings, decodeSiteBucket, decodeSiteDirHeader, decodeSubnameRecord, deriveName, encodePageContent, encodeProfile, forwardOf, isValidLabel, isValidName, marketBucketAddress, normalizeName, openSealed, ownerTag, pageAddress, priceTierForLen, publicView, readActorState, readRawNameRecord, readShard, recordAddress, resolveName, resolvePage, resolveUsing, reverseLookup, seal, settingsAddress, siteBucketAddress, siteDirHeaderAddress, splitSubname, subnamePageAddress, subnameRecordAddress, tieredId };
