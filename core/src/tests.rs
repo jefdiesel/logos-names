@@ -396,15 +396,16 @@ impl Chain {
         if let (Instruction::Register { now, .. }, Some(commit_slot)) =
             (&instruction, accounts.get(3))
         {
-            self.actors
-                .entry(commit_slot.account_id)
-                .or_insert_with(|| {
-                    to_bytes(&Commitment {
-                        version: VERSION,
-                        made: now - MIN_COMMIT_AGE_MS,
-                        public: false,
-                    })
+            // A spent commitment leaves an empty account behind; a later registration of the
+            // same slot by the same holder needs a fresh one.
+            let held = self.actors.entry(commit_slot.account_id).or_default();
+            if held.is_empty() {
+                *held = to_bytes(&Commitment {
+                    version: VERSION,
+                    made: now - MIN_COMMIT_AGE_MS,
+                    public: false,
                 });
+            }
         }
         self.run_exactly(accounts, instruction);
     }
@@ -1781,6 +1782,30 @@ fn addresses_and_instructions_match_the_specification() {
             "44".repeat(32),
             "01".repeat(32),
             "02".repeat(32),
+        )
+    );
+    // Mint, byte-for-byte what lez_nft v3 pins in `borsh_vector_authority_sync_and_read_messages`.
+    assert_eq!(
+        hex(to_bytes(&NftAuthoritySyncMessage(NftAuthorityOp::Mint {
+            token_id: [0xAA; 32],
+            owner: [0xBB; 32],
+            linked: LinkedAuthority {
+                program: AccountId::new([0x09; 32]),
+                authority_actor: AccountId::new([0x40; 32]),
+                target: [0x11; 32],
+                record_actor: AccountId::new([0x41; 32]),
+            },
+            content: b"{}".to_vec(),
+            expires: 1_000,
+        }))),
+        format!(
+            "0200{}{}{}{}{}{}020000007b7de803000000000000",
+            "aa".repeat(32),
+            "bb".repeat(32),
+            "09".repeat(32),
+            "40".repeat(32),
+            "11".repeat(32),
+            "41".repeat(32),
         )
     );
     assert_eq!(
