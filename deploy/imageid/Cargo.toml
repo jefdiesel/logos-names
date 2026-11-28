@@ -1,0 +1,13 @@
+[package]
+name = "lns_imageid"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Prints the RISC Zero image id of a guest ELF (the program id LEZ derives a deployed
+# program's header from), plus the ELF's sha256. Used by deploy/deploy.sh.
+[workspace]
+
+[dependencies]
+risc0-binfmt = "3.0.6"
+sha2 = "0.10"

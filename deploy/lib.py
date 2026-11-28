@@ -75,6 +75,18 @@ FORBIDDEN_SECRET_KEYS = {
 
 TERM_NAMES = {"30d": 0, "1y": 1, "5y": 2, "permanent": 3}
 
+# Values Jef must confirm (in params.toml `[confirmed_by_jef]`) before a live send. The
+# compile-time ones are fixed by the guest image; nft_program is fixed by the first Configure.
+LIVE_REQUIRED_CONFIRMATIONS = (
+    "sale_fee_bps", "grace_days", "premium_days", "term_days", "public_wait_minutes",
+    "private_wait_minutes", "shortlist_root", "deed_image", "upgradeable",
+    "admin", "treasury", "nft_admin", "rpc_url", "upgrade_wallet_dir", "image_ids",
+)
+# Admin-adjustable after deploy: deploying unconfirmed defaults is allowed (with a warning).
+ADJUSTABLE_CONFIRMATIONS = ("prices", "premium_start", "held_names", "claims")
+LNS_COLLECTION_DOMAIN = b"logos-names/v8/collection/"
+NFT_CONFIG_SEED_DOMAIN = b"lez-nft/v3/config"
+
 # ---------------------------------------------------------------------------
 # Minimal TOML parser (uses stdlib `tomllib` on Python 3.11+, fallback below)
 # ---------------------------------------------------------------------------
@@ -624,6 +636,9 @@ def get_actor_state(rpc_url: str, account_b58: str, program_b58: str) -> bytes:
     arr = states.get(program_b58)
     if not arr:
         return b""
+    if isinstance(arr, str):
+        import base64
+        return base64.b64decode(arr)
     return bytes(arr)
 
 
@@ -739,6 +754,18 @@ def check_compile_time_immutables(params: dict[str, Any], repo_dir: Path) -> lis
             f"[immutable].term_days = {imm.get('term_days')!r} does NOT match compiled TERM_LENGTHS_MS [30, 365, 1825]"
         )
 
+    nft_rs = (repo_dir / "core" / "src" / "nft.rs").read_text(encoding="utf-8")
+    deed = re.search(r'pub const DEFAULT_DEED_CONTENT: &\[u8\] =\s*br#"(.*?)"#;', nft_rs, re.DOTALL)
+    if not deed:
+        errors.append("could not locate DEFAULT_DEED_CONTENT in core/src/nft.rs")
+    else:
+        try:
+            image = json.loads(deed.group(1)).get("image")
+        except ValueError:
+            image = None
+        if imm.get("deed_image") != image:
+            errors.append(f"[immutable].deed_image = {imm.get('deed_image')!r} does NOT match core/src/nft.rs image {image!r}")
+
     if imm.get("nft_program_binding_is_permanent") is not True:
         errors.append("[immutable].nft_program_binding_is_permanent must be true")
 
@@ -769,15 +796,44 @@ def validate_params(params: dict[str, Any], repo_dir: Path, *, dry_run: bool) ->
             f"(found forbidden field(s): {', '.join(secret_hits)})"
         )
 
-    confirmed = params.get("confirmed_by_jef")
-    if confirmed is not True:
+    # Confirmation is per value (`[confirmed_by_jef]` table), not one global switch: Jef
+    # confirmed some values on 2026-11-28 and not others. A live deploy needs every value
+    # in LIVE_REQUIRED_CONFIRMATIONS confirmed; a rehearsal (local chain) needs none.
+    confirmed_tbl = params.get("confirmed_by_jef", {})
+    if not isinstance(confirmed_tbl, dict):
+        errors.append("[confirmed_by_jef] must be a table of `value = true|false` (one per value)")
+        confirmed_tbl = {}
+    rehearsal = params.get("rehearsal") is True
+    unconfirmed = [k for k in LIVE_REQUIRED_CONFIRMATIONS if confirmed_tbl.get(k) is not True]
+    if unconfirmed and not rehearsal:
+        msg = "not confirmed by Jef in [confirmed_by_jef]: " + ", ".join(unconfirmed)
         if dry_run:
-            warnings.append("confirmed_by_jef is NOT true — dry-run allowed, but live deploy will REFUSE to run")
+            warnings.append(msg + " (dry run allowed; a live send will refuse)")
         else:
-            errors.append(
-                "REFUSED: `confirmed_by_jef = true` is not set in params.toml. "
-                "Jef must personally review every FIXED FOREVER parameter and set `confirmed_by_jef = true`."
-            )
+            errors.append("REFUSED: " + msg)
+    unknown = [k for k in confirmed_tbl if k not in LIVE_REQUIRED_CONFIRMATIONS and k not in ADJUSTABLE_CONFIRMATIONS]
+    if unknown:
+        errors.append("[confirmed_by_jef] has unknown keys: " + ", ".join(unknown))
+    for k in ADJUSTABLE_CONFIRMATIONS:
+        if confirmed_tbl.get(k) is not True:
+            warnings.append(f"{k} is not confirmed by Jef (admin-adjustable after deploy; deploying the default)")
+    confirmed = not unconfirmed
+
+    # Rehearsal and live are told apart by the file, and a rehearsal may only reach a local chain.
+    rpc_url = str(params.get("network", {}).get("rpc_url", "")).strip()
+    if rehearsal:
+        if not re.match(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/?$", rpc_url):
+            errors.append(f"REFUSED: a rehearsal params file may only point at a loopback RPC, not {rpc_url!r}")
+    else:
+        if not rpc_url or "PLACEHOLDER" in rpc_url:
+            (warnings if dry_run else errors).append("[network].rpc_url is a placeholder (fill it on Monday)")
+        if re.match(r"^https?://(127\.0\.0\.1|localhost|\[::1\])", rpc_url or "x"):
+            errors.append("a live params file points at a loopback RPC: use a rehearsal file (rehearsal = true) for local chains")
+    upgrade_dir = str(params.get("keys", {}).get("upgrade_wallet_dir", "")).strip()
+    if not rehearsal and (not upgrade_dir or "PLACEHOLDER" in upgrade_dir):
+        (warnings if dry_run else errors).append("[keys].upgrade_wallet_dir is a placeholder (the folder that will hold the header keys)")
+    if params.get("upgradeable") is not True:
+        errors.append("upgradeable must be true on testnet (Jef, 2026-11-28): the programs keep their header (upgrade) key")
 
     errors.extend(check_compile_time_immutables(params, repo_dir))
 
@@ -786,14 +842,15 @@ def validate_params(params: dict[str, Any], repo_dir: Path, *, dry_run: bool) ->
     parsed_accounts: dict[str, str] = {}
     for field in ("deployer_payer", "nft_admin", "admin", "treasury"):
         val = str(accounts.get(field, "")).strip()
-        if not val:
-            errors.append(f"[accounts].{field} is required")
+        bucket = warnings if dry_run else errors
+        if not val or "PLACEHOLDER" in val:
+            bucket.append(f"[accounts].{field} is not filled in yet")
             continue
         try:
             raw = parse_account_id(val, allow_zero=False, require_prefix="Public")
             parsed_accounts[field] = base58_encode(raw)
         except ValueError as exc:
-            errors.append(f"[accounts].{field}: {exc}")
+            bucket.append(f"[accounts].{field}: {exc}")
 
     # Registry settings
     reg = params.get("registry", {})
@@ -860,8 +917,12 @@ def validate_params(params: dict[str, Any], repo_dir: Path, *, dry_run: bool) ->
         "ok": len(errors) == 0,
         "errors": errors,
         "warnings": warnings,
-        "confirmed_by_jef": confirmed is True,
+        "confirmed_by_jef": confirmed,
+        "rehearsal": rehearsal,
+        "upgradeable": params.get("upgradeable") is True,
+        "deed_image": params.get("immutable", {}).get("deed_image"),
         "accounts": parsed_accounts,
+        "raw_accounts": {k: v for k, v in accounts.items() if not isinstance(v, str)},
         "mode": mode_num,
         "mode_name": mode_str,
         "deposits": deposits,
@@ -1248,6 +1309,40 @@ def cmd_id_info(args: list[str]) -> int:
     return 0
 
 
+def nft_config_address(nft_program: bytes) -> bytes:
+    return pda(nft_program, sha256(NFT_CONFIG_SEED_DOMAIN))
+
+
+def lns_collection_id(registry_program: bytes) -> bytes:
+    return sha256(LNS_COLLECTION_DOMAIN, registry_program)
+
+
+def cmd_ids(args: list[str]) -> int:
+    """`ids <registry> <nft>`: the addresses and ids the deploy derives, as JSON."""
+    reg = parse_account_id(args[0])
+    nft = parse_account_id(args[1])
+    print(json.dumps({
+        "registry": base58_encode(reg),
+        "nft_program": base58_encode(nft),
+        "registry_settings": base58_encode(settings_address(reg)),
+        "nft_config": base58_encode(nft_config_address(nft)),
+        "lns_collection_id": lns_collection_id(reg).hex(),
+    }, indent=2))
+    return 0
+
+
+def cmd_header_image(args: list[str]) -> int:
+    """`header-image <rpc> <header>`: the image id a program header holds (66-byte tagged
+    LoaderEntry::Header), or nothing when the account holds no program."""
+    rpc, acct = args[0], args[1]
+    loader = base58_encode(bytes([0xFE] * 32))
+    st = get_actor_state(rpc, acct, loader)
+    if len(st) == 66 and st[0] == 0:
+        print(st[1:33].hex())
+        return 0
+    return 1
+
+
 def cmd_self_test() -> int:
     # 1. SPEC.md §10 PDA vectors (program = 0x07 * 32)
     prog = b"\x07" * 32
@@ -1333,14 +1428,14 @@ def cmd_self_test() -> int:
     assert rerelease_premium(4_000_000_000, DAY_MS) == 2_000_000_000
     assert rerelease_premium(4_000_000_000, 21 * DAY_MS) == 0
 
-    # 7. Repo params.example.toml check (dry-run mode)
+    # 7. Repo params.toml check (dry-run mode)
     deploy_dir = Path(__file__).resolve().parent
     repo_dir = deploy_dir.parent
-    example = load_toml(deploy_dir / "params.example.toml")
+    example = load_toml(deploy_dir / "params.toml")
     imm_errs = check_compile_time_immutables(example, repo_dir)
-    assert not imm_errs, f"params.example.toml immutables mismatch: {imm_errs}"
+    assert not imm_errs, f"params.toml immutables mismatch: {imm_errs}"
 
-    print("ok   deploy/lib.py self-test passed (SPEC.md §10 vectors, PDAs, v8 Borsh, math, params.example.toml)")
+    print("ok   deploy/lib.py self-test passed (SPEC.md §10 vectors, PDAs, v8 Borsh, math, params.toml)")
     return 0
 
 
@@ -1376,6 +1471,10 @@ def main() -> int:
         return cmd_rpc_probe(rest)
     if cmd == "balance":
         return cmd_balance(rest)
+    if cmd == "ids":
+        return cmd_ids(rest)
+    if cmd == "header-image":
+        return cmd_header_image(rest)
     print(f"unknown subcommand: {cmd}", file=sys.stderr)
     return 2
 

@@ -1,40 +1,62 @@
 # =============================================================================
-# LNS Registry v8 + lez_nft v3 — Official LEZ v0.4 Testnet Deploy Parameters
+# LNS registry v8 + lez_nft v3: parameters for the official LEZ v0.4 testnet deploy
 # =============================================================================
 #
-# Copy this file to `deploy/params.toml` (gitignored if you keep local values,
-# or committed with public IDs only — NEVER put private keys, mnemonics, or
-# wallet passwords in this file; wallet tooling reads keys at run time).
+# Public values only. NEVER put a private key, mnemonic or password here: the wallet folder in
+# LEE_WALLET_HOME_DIR holds the keys, and lib.py refuses a file with such a field.
 #
-# Every parameter below is marked with its mutability:
-#   [FIXED FOREVER — COMPILE-TIME]      Baked into the RISC-V guest ELF.
-#                                       Changing it requires rebuilding and
-#                                       upgrading (or redeploying) the program.
-#   [FIXED FOREVER — INITIAL CONFIGURE] Enforced immutable on chain by
-#                                       Effect::WriteSettings after the first
-#                                       Configure transaction lands.
-#   [FIXED FOREVER — DEPLOY ACCOUNT]    Bound to the deployed program account.
-#   [ADMIN-ADJUSTABLE]                  Can be changed later by `admin` via
-#                                       Configure / SetPrice / SetPremium.
+# Mutability of each value:
+#   [FIXED FOREVER, COMPILE-TIME]      in the guest image: changing it needs a new build and an
+#                                      upgrade (both programs stay upgradeable on testnet)
+#   [FIXED FOREVER, INITIAL CONFIGURE] written by the first Configure, never changeable
+#   [ADMIN-ADJUSTABLE]                 the admin changes it later (Configure / SetPrice / SetPremium)
 #
+# deploy.sh --send refuses unless every value in lib.py LIVE_REQUIRED_CONFIRMATIONS is `true`
+# in [confirmed_by_jef]. Only Jef sets an entry to true. A dry run (no --send) works regardless.
 # =============================================================================
 
-# [SAFETY LATCH]
-# deploy.sh REFUSES to run a live deployment until Jef has personally reviewed
-# every FIXED FOREVER parameter below and changed this line to `true`.
-# `--dry-run` works with `false` so you can inspect every transaction first.
-confirmed_by_jef = false
+# This is the live file. deploy/rehearse.sh writes its own (rehearsal = true, loopback RPC only).
+rehearsal = false
 
-# -----------------------------------------------------------------------------
-# Target LEZ v0.4 network (endpoint unknown until Monday)
-# -----------------------------------------------------------------------------
+# Both programs keep their header (upgrade) key on testnet; immutable is for mainnet.
+upgradeable = true
+
+[confirmed_by_jef]
+# Confirmed by Jef on 2026-11-28 (compiled values, deed image, upgradeable):
+sale_fee_bps = true
+grace_days = true
+premium_days = true
+term_days = true
+public_wait_minutes = true
+private_wait_minutes = true
+shortlist_root = true
+deed_image = true
+upgradeable = true
+# Not confirmed yet; Monday:
+admin = false
+treasury = false
+nft_admin = false
+rpc_url = false
+upgrade_wallet_dir = false
+image_ids = false            # the reproducible build's ids in expected-image-ids.txt
+# Admin-adjustable after deploy (a send goes ahead with the defaults below and a warning):
+prices = false
+premium_start = false
+held_names = false
+claims = false
+
+[keys]
+# A PATH, never a key: the deployer wallet folder that will hold both header (upgrade) keys
+# after the deploy. Back it up (and its password) before anything else on Monday.
+upgrade_wallet_dir = "PLACEHOLDER: e.g. $LNS_DEPLOY_DIR/wallet"
+
 [network]
 # Human-readable network label printed in logs and deployment manifest.
 name = "lez-v0.4-testnet"
 
 # Sequencer JSON-RPC URL. Leave empty here and pass `--rpc <url>` or
 # `LEZ_RPC_URL=<url>` on Monday, OR fill it in once the official endpoint is live.
-rpc_url = ""
+rpc_url = "PLACEHOLDER: official LEZ v0.4 testnet sequencer URL"
 
 # Optional 64-hex Logos Blockchain channel ID (from sequencer `getChannelId`).
 # If non-empty, deploy.sh refuses to run unless the sequencer reports this exact
@@ -80,7 +102,10 @@ nft_cli = "../../lez-nft/target/release/lez-nft"
 # Optional command that takes `<elf-path>` as its argument and prints the
 # 64-hex RISC0 image ID on stdout (overridable via `IMAGEID_CMD`).
 # Example: "../target/release/names-imageid" or "cargo risczero ..."
-imageid_cmd = ""
+imageid_cmd = "imageid/target/release/lns_imageid"
+
+# Where deploy.sh keeps the accounts and ids it made (relative to this file; gitignored).
+state_file = "state/deploy-state.env"
 
 # -----------------------------------------------------------------------------
 # Accounts (IDs ONLY — NEVER put private keys or passwords in this file!)
@@ -91,18 +116,18 @@ imageid_cmd = ""
 # Public account in the deployer wallet that pays program-loader deploy fees
 # and initial account funding. Must be funded before running deploy.sh.
 # Format: "Public/<base58>" or bare "<base58>".
-deployer_payer = ""
+deployer_payer = "PLACEHOLDER"
 
 # [ADMIN-ADJUSTABLE (in lez_nft)]
 # Admin public account for the `lez_nft` v3 program (manages authorized programs).
 # Must exist in the deployer wallet (or be signed by it during deploy.sh).
-nft_admin = ""
+nft_admin = "PLACEHOLDER"
 
 # [ADMIN-ADJUSTABLE (in names_core via Configure)]
 # Registry admin public account: can call Configure, SetPrice, SetPremium, and
 # register locked 1-4 char + reserved names (`post-deploy.sh`).
 # WARNING: rotating `admin` to an account whose key you do not hold is irreversible!
-admin = ""
+admin = "PLACEHOLDER"
 
 # [ADMIN-ADJUSTABLE (in names_core via Configure)]
 # Treasury public account receiving:
@@ -116,7 +141,7 @@ admin = ""
 # itself pays 0 fee on registration. If `admin == treasury`, admin registers held
 # names at 0 fee (gas only). If `admin != treasury`, `admin` pays the tier fee
 # to `treasury` when registering held names.
-treasury = ""
+treasury = "PLACEHOLDER"
 
 # Gas funded to the newly deployed registry program account so it can sign the
 # initial `Instruction::Configure` (which MUST be signed by `signer == program`).
@@ -175,6 +200,11 @@ commit_max_age_hours = 24
 # [FIXED FOREVER — COMPILE-TIME]
 # Finite term durations in days (`core/src/lib.rs:TERM_LENGTHS_MS`); term 3 is permanent (`u64::MAX`).
 term_days = [30, 365, 1825]
+
+# [FIXED FOREVER — COMPILE-TIME] (core/src/nft.rs DEFAULT_DEED_CONTENT; Jef, 2026-11-28)
+# The image every tied name NFT names. The registry never sees a plain name, so `<name>` is a
+# template a client fills in (lns://deed/alice). lns:// only, nothing on HTTPS.
+deed_image = "lns://deed/<name>"
 
 # [FIXED FOREVER — INITIAL CONFIGURE]
 # Reminder flag: `Settings.nft_program` is written ONCE on the deployer's first
