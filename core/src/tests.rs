@@ -4293,3 +4293,424 @@ fn renew_bounds_time_window_and_refreshes_active_listing_expiry() {
     );
     chain.assert_nft_lockstep(&s);
 }
+
+
+// ── Restored from the tested v0.4.0 port (c05f167), adapted to v8 ──
+
+#[test]
+fn a_claim_moves_no_money() {
+    let leaves = claims(&[(JEF, ALICE)]);
+    let instruction = Instruction::Claim { id: JEF, sealed: Vec::new(), now: NOW, proof: claim_proof(&leaves, 0), price_tier: DEFAULT_TIER };
+    let planned = plan(&input(vec![meta(ALICE, true)], &instruction), instruction);
+    assert!(planned.output().chained_calls.is_empty());
+}
+
+#[test]
+fn a_claim_outranks_a_registration_of_the_same_name() {
+    let mut chain = Chain::default();
+    let leaves = claims(&[(JEF, ALICE)]);
+    chain.open_claims(&leaves, NOW + YEAR);
+    chain.register_with_deposit(&JEF, BOB, DEPOSITS[0], NOW);
+    chain.claim(&JEF, ALICE, &leaves, 0, b"");
+    assert_eq!(chain.record(&JEF).expect("claimed").owner, owner_tag(&slot(&JEF), &ALICE));
+}
+
+#[test]
+#[should_panic(expected = "name is already registered")]
+fn a_claimed_name_cannot_be_registered_over() {
+    let mut chain = Chain::default();
+    let leaves = claims(&[(JEF, ALICE)]);
+    chain.open_claims(&leaves, NOW + YEAR);
+    chain.claim(&JEF, ALICE, &leaves, 0, b"");
+    chain.register_with_deposit(&JEF, BOB, DEPOSITS[0], NOW);
+}
+
+#[test]
+fn a_deposit_moves_from_the_payer_into_the_names_deposit_account() {
+    let mut accounts = on_registration(&JEF, ALICE);
+    accounts.push(AccountMeta::native_balance(deposit_address(&PROGRAM, &slot(&JEF)), false));
+    let call = only_call(accounts, deposit_registration(JEF, DEPOSITS[0], NOW));
+    assert!(call.to == Actor::native_balance(ALICE));
+    let to = deposit_address(&PROGRAM, &slot(&JEF));
+    assert_eq!(
+        call.message,
+        borsh::to_vec(&native_token::Message::Transfer { to, amount: DEPOSITS[0] }).expect("serializes")
+    );
+    assert!(call.pda_seeds.is_empty(), "the payer's own signature authorizes a deposit");
+}
+
+#[test]
+#[should_panic(expected = "a permanent or deposit-held name does not lapse or renew")]
+fn a_deposit_name_cannot_be_renewed_even_after_a_switch_to_fees() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    chain.configure(CAROL, CAROL, PRICES);
+    chain.run(
+        paying(on_renewal(&JEF, ALICE), BOB),
+        Instruction::Renew { id: slot(&JEF), term: 1, fee: PRICES[usize::from(DEFAULT_TIER)][1], treasury: None, now: NOW },
+    );
+}
+
+#[test]
+#[should_panic(expected = "the registry charges fees, not deposits")]
+fn a_deposit_registration_is_refused_in_fee_mode() {
+    let mut chain = Chain::default();
+    chain.configure(PROGRAM, ALICE, PRICES);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+}
+
+#[test]
+#[should_panic(expected = "the registry takes deposits")]
+fn a_fee_registration_is_refused_in_deposit_mode() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.run(paying(on_registration(&JEF, ALICE), BOB), register_at(JEF, Vec::new(), 1, PRICES[usize::from(DEFAULT_TIER)][1], NOW));
+}
+
+#[test]
+fn a_holder_claims_their_name_for_free_and_for_good() {
+    let mut chain = Chain::default();
+    let leaves = claims(&[(JEF, ALICE), (ADA, BOB)]);
+    chain.open_claims(&leaves, NOW + YEAR);
+    chain.claim(&JEF, ALICE, &leaves, 0, b"sealed");
+    let record = chain.record(&JEF).expect("claimed");
+    assert_eq!(record.owner, owner_tag(&slot(&JEF), &ALICE));
+    assert_eq!(record.expires, u64::MAX);
+    assert_eq!(record.sealed, b"sealed");
+    assert!(record.claimed);
+}
+
+#[test]
+#[should_panic(expected = "this commitment was already made")]
+fn a_live_private_commitment_cannot_be_overwritten_as_public() {
+    let mut chain = Chain::default();
+    chain.commit(&JEF, ALICE, NOW - MIN_COMMIT_AGE_MS);
+    chain.commit_public(&JEF, ALICE, NOW);
+}
+
+#[test]
+#[should_panic(expected = "only the registry's admin may register it")]
+fn a_locked_name_is_refused_to_everyone_but_the_admin() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&LOCKED_NAME, ALICE, DEPOSITS[0], NOW);
+}
+
+#[test]
+fn a_name_held_by_a_deposit_never_lapses() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    let record = chain.record(&JEF).expect("registered");
+    assert_eq!(record.expires, u64::MAX);
+    assert_eq!(record.owner, owner_tag(&slot(&JEF), &ALICE));
+    assert_eq!(record.version, VERSION);
+}
+
+#[test]
+#[should_panic(expected = "this name was already claimed")]
+fn a_name_is_claimed_once_even_after_a_transfer() {
+    let mut chain = Chain::default();
+    let leaves = claims(&[(JEF, ALICE)]);
+    chain.open_claims(&leaves, NOW + YEAR);
+    chain.claim(&JEF, ALICE, &leaves, 0, b"");
+    chain.run(on_record_and_page(&JEF, ALICE), Instruction::Transfer { id: slot(&JEF), new_owner: owner_tag(&slot(&JEF), &BOB), now: NOW });
+    chain.claim(&JEF, ALICE, &leaves, 0, b"");
+}
+
+#[test]
+fn a_names_two_accounts_differ_from_each_other_and_from_other_names() {
+    let all = [
+        record_address(&PROGRAM, &JEF),
+        page_address(&PROGRAM, &JEF),
+        record_address(&PROGRAM, &ADA),
+        page_address(&PROGRAM, &ADA),
+    ];
+    for (index, account) in all.iter().enumerate() {
+        assert!(!all[index + 1..].contains(account));
+    }
+    assert_ne!(record_address(&PROGRAM, &JEF), record_address(&ALICE, &JEF));
+}
+
+#[test]
+#[should_panic(expected = "this registry takes no claims")]
+fn a_registry_without_a_root_takes_no_claims() {
+    let mut chain = Chain::default();
+    chain.open_claims(&[], NOW + YEAR);
+    chain.claim(&JEF, ALICE, &[[0; 32]], 0, b"");
+}
+
+#[test]
+fn a_release_refunds_the_deposit_to_the_holder_from_the_names_account() {
+    let call = only_call(
+        on_release(&JEF, ALICE, DEPOSITS[0]),
+        Instruction::Release { id: slot(&JEF), refund: DEPOSITS[0] },
+    );
+    assert!(call.to == Actor::native_balance(deposit_address(&PROGRAM, &slot(&JEF))));
+    assert_eq!(
+        call.message,
+        borsh::to_vec(&native_token::Message::Transfer { to: ALICE, amount: DEPOSITS[0] }).expect("serializes")
+    );
+    // Only the registry can sign for the deposit account.
+    assert!(call.pda_seeds.iter().eq([&seed(DEPOSIT_SEED_DOMAIN, &slot(&JEF))]));
+}
+
+#[test]
+fn a_released_deposit_name_can_be_registered_again() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    chain.run(on_release(&JEF, ALICE, DEPOSITS[0]), Instruction::Release { id: slot(&JEF), refund: DEPOSITS[0] });
+    chain.register_with_deposit(&JEF, BOB, DEPOSITS[0], NOW + MONTH);
+    assert_eq!(chain.record(&JEF).expect("registered").owner, owner_tag(&slot(&JEF), &BOB));
+}
+
+#[test]
+#[should_panic(expected = "the deposit is not this name's deposit")]
+fn a_short_deposit_is_refused() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0] - 1, NOW);
+}
+
+#[test]
+#[should_panic(expected = "the length proof does not hold")]
+fn a_short_name_cannot_borrow_another_short_names_proof() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.run(
+        with_deposit_account(&LOCKED_NAME, ALICE),
+        deposit_registration_with(LOCKED_NAME, DEPOSITS[1], length_of(&THREE_NAME)),
+    );
+}
+
+#[test]
+#[should_panic(expected = "the deposit is not this name's deposit")]
+fn a_three_character_name_is_refused_at_the_normal_deposit() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&THREE_NAME, ALICE, DEPOSITS[0], NOW);
+}
+
+#[test]
+fn a_three_character_name_takes_the_higher_deposit() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&THREE_NAME, ALICE, DEPOSITS[1], NOW);
+    assert!(chain.record(&THREE_NAME).is_some());
+}
+
+#[test]
+fn a_transferred_name_keeps_its_deposit_for_the_new_holder() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    chain.run(
+        on_record_and_page(&JEF, ALICE),
+        Instruction::Transfer { id: slot(&JEF), new_owner: owner_tag(&slot(&JEF), &BOB), now: NOW },
+    );
+    // The new holder releases it and is refunded; the old one no longer can.
+    chain.run(on_release(&JEF, BOB, DEPOSITS[0]), Instruction::Release { id: slot(&JEF), refund: DEPOSITS[0] });
+    assert!(chain.record(&JEF).is_none());
+}
+
+#[test]
+#[should_panic(expected = "only the registry's admin may register it")]
+fn an_unconfigured_registry_locks_short_names() {
+    let mut chain = Chain::default();
+    chain.run(on_registration(&LOCKED_NAME, ALICE), register_at(LOCKED_NAME, Vec::new(), 1, 0, NOW));
+}
+
+
+#[test]
+#[should_panic(expected = "mode must be fee (0) or deposit (1)")]
+fn an_unknown_mode_is_refused() {
+    let mut chain = Chain::default();
+    chain.run(
+        vec![meta(settings_address(&PROGRAM), false), meta(PROGRAM, true)],
+        Instruction::Configure { admin: CAROL, treasury: BOB, prices: PRICES, mode: 2, deposits: DEPOSITS, claims_root: [0; 32], claims_until: 0, claims_program: PROGRAM, premium_start: 0, nft_program: NFT_PROGRAM },
+    );
+}
+
+#[test]
+fn another_programs_effect_is_refused_too() {
+    let receive = ReceiveInput {
+        receiver: Actor::new(record_address(&PROGRAM, &JEF), PROGRAM),
+        from: Some(Actor::new(ALICE, BOB)),
+        grants: Default::default(),
+        pre_state: Default::default(),
+        message: Vec::new(),
+    };
+    assert!(!receive.from_own_program());
+}
+
+#[test]
+fn claim_proofs_hold_for_every_list_size() {
+    for size in 1_u8..40 {
+        let leaves: Vec<[u8; 32]> = (0..size).map(|i| [i; 32]).collect();
+        let root = claim_root(&leaves);
+        for (index, leaf) in leaves.iter().enumerate() {
+            assert!(claim_holds(&root, *leaf, &claim_proof(&leaves, index)), "{size}/{index}");
+            assert!(!claim_holds(&root, [0xEE; 32], &claim_proof(&leaves, index)));
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "the claim period has ended")]
+fn claims_stop_at_the_end_of_the_period() {
+    let mut chain = Chain::default();
+    let leaves = claims(&[(JEF, ALICE)]);
+    chain.open_claims(&leaves, NOW);
+    chain.claim(&JEF, ALICE, &leaves, 0, b"");
+}
+
+#[test]
+fn commit_and_reveal_are_valid_only_near_their_claimed_time() {
+    let promised = commitment(&JEF, &owner_tag(&slot(&JEF), &ALICE), &SECRET);
+    for instruction in [
+        Instruction::Commit { commitment: promised, now: NOW },
+        register_at(JEF, Vec::new(), 1, 0, NOW),
+    ] {
+        let accounts = match &instruction {
+            Instruction::Commit { .. } => {
+                vec![meta(commitment_address(&PROGRAM, &promised), false), meta(CAROL, true)]
+            }
+            _ => on_registration(&JEF, ALICE),
+        };
+        let window = plan(&input(accounts, &instruction), instruction).output().timestamp_validity_window;
+        assert_eq!((window.start(), window.end()), (Some(NOW), Some(NOW + TIME_WINDOW_MS)));
+    }
+}
+
+#[test]
+#[should_panic(expected = "the signer's account must sign")]
+fn configuring_needs_a_signature() {
+    Chain::default().run(
+        vec![meta(settings_address(&PROGRAM), false), meta(ALICE, false)],
+        Instruction::Configure {
+            admin: ALICE,
+            treasury: BOB,
+            prices: PRICES,
+            mode: MODE_FEE,
+            deposits: [0, 0],
+            claims_root: [0; 32],
+            claims_until: 0,
+            claims_program: PROGRAM,
+            premium_start: 0,
+            nft_program: NFT_PROGRAM,
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "only the registry's admin may register it")]
+fn locked_names_are_locked_in_fee_mode_too() {
+    let mut chain = Chain::default();
+    chain.configure(PROGRAM, CAROL, PRICES);
+    chain.run(on_registration(&LOCKED_NAME_2, ALICE), register_at(LOCKED_NAME_2, Vec::new(), 1, 0, NOW));
+}
+
+#[test]
+// A deposit-held name never expires, so its renewal is refused before the mode is read.
+#[should_panic(expected = "a permanent or deposit-held name does not lapse or renew")]
+fn names_do_not_renew_in_deposit_mode() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    chain.run(
+        paying(on_renewal(&JEF, ALICE), BOB),
+        Instruction::Renew { id: slot(&JEF), term: 1, fee: PRICES[usize::from(DEFAULT_TIER)][1], treasury: None, now: NOW },
+    );
+}
+
+#[test]
+#[should_panic(expected = "the deposit is not this name's deposit")]
+fn no_deposit_is_refused_in_deposit_mode() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, 0, NOW);
+}
+
+#[test]
+#[should_panic(expected = "name is already registered")]
+fn nobody_takes_a_deposit_held_name_even_decades_later() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    chain.register_with_deposit(&JEF, BOB, DEPOSITS[0], NOW + 50 * YEAR);
+}
+
+#[test]
+#[should_panic(expected = "the deposit is not this name's deposit")]
+fn only_the_admin_skips_the_deposit() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&THREE_NAME, ALICE, 0, NOW);
+}
+
+#[test]
+#[should_panic(expected = "signer does not own this name")]
+fn only_the_holder_collects_the_deposit() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&JEF, ALICE, DEPOSITS[0], NOW);
+    chain.run(on_release(&JEF, BOB, DEPOSITS[0]), Instruction::Release { id: slot(&JEF), refund: DEPOSITS[0] });
+}
+
+#[test]
+#[should_panic(expected = "this account did not hold this name")]
+fn someone_else_cannot_use_a_holders_proof() {
+    let mut chain = Chain::default();
+    let leaves = claims(&[(JEF, ALICE), (ADA, BOB)]);
+    chain.open_claims(&leaves, NOW + YEAR);
+    chain.claim(&JEF, BOB, &leaves, 0, b"");
+}
+
+#[test]
+fn the_admin_places_a_name_without_a_deposit() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&THREE_NAME, CAROL, 0, NOW);
+    chain.run(
+        on_record_and_page(&THREE_NAME, CAROL),
+        Instruction::Transfer { id: slot(&THREE_NAME), new_owner: owner_tag(&slot(&THREE_NAME), &ALICE), now: NOW },
+    );
+    assert_eq!(chain.record(&THREE_NAME).expect("held").owner, owner_tag(&slot(&THREE_NAME), &ALICE));
+}
+
+#[test]
+fn the_admin_releases_a_locked_name_by_registering_and_transferring_it() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.register_with_deposit(&LOCKED_NAME, CAROL, 0, NOW);
+    chain.run(
+        on_record_and_page(&LOCKED_NAME, CAROL),
+        Instruction::Transfer { id: slot(&LOCKED_NAME), new_owner: owner_tag(&slot(&LOCKED_NAME), &ALICE), now: NOW },
+    );
+    assert_eq!(chain.record(&LOCKED_NAME).expect("held").owner, owner_tag(&slot(&LOCKED_NAME), &ALICE));
+}
+
+#[test]
+fn the_admin_switches_modes_and_changes_deposits() {
+    let mut chain = Chain::default();
+    chain.configure_deposits(CAROL);
+    chain.run(
+        vec![meta(settings_address(&PROGRAM), false), meta(CAROL, true)],
+        Instruction::Configure {
+            admin: CAROL,
+            treasury: BOB,
+            prices: PRICES,
+            mode: MODE_DEPOSIT,
+            deposits: [5, 50],
+            claims_root: [0; 32],
+            claims_until: 0,
+            claims_program: PROGRAM,
+            premium_start: 0,
+            nft_program: NFT_PROGRAM,
+        },
+    );
+    assert_eq!(chain.settings().expect("configured").deposits, [5, 50]);
+    chain.register_with_deposit(&JEF, ALICE, 5, NOW);
+}
