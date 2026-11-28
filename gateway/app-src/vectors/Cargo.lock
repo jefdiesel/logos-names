@@ -1507,6 +1507,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lez_nft_core"
+version = "0.3.0"
+dependencies = [
+ "borsh",
+ "lee_core",
+ "risc0-zkvm",
+]
+
+[[package]]
+name = "lez_nft_methods"
+version = "0.3.0"
+dependencies = [
+ "risc0-build",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1540,6 +1556,8 @@ dependencies = [
  "borsh",
  "lee",
  "lee_core",
+ "lez_nft_core",
+ "lez_nft_methods",
  "names_core",
  "names_methods",
  "serde_json",

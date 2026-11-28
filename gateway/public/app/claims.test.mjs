@@ -142,6 +142,28 @@ test("the app's own register.js transactions fit their gas limits on the real en
   }
 });
 
+// What each browser-built v8 step cost on the engine, against the limit the app sends it with
+// (register.js / claims.js). The scenario ran them at a 2,000,000 limit to measure.
+const APP_LIMITS = {
+  "register for a year (fee to the treasury, NFT minted)": 450_000, // REGISTER_GAS
+  "alice re-registers the lapsed name with the premium (old NFT burned, new one minted)": 450_000, // REGISTER_GAS
+  "set record (directory untouched)": 100_000, // SET_RECORD_GAS
+  "list in the market": 180_000, // LIST_GAS
+  "bob buys the name (NFT moves, site leaves the directory)": 350_000, // BUY_GAS
+  "alice claims for free": 300_000, // CLAIM_GAS
+  "bob commits in public": 60_000, // COMMIT_GAS
+};
+
+test("every v8 step the app sends fits the gas limit it sends it with", () => {
+  const steps = Object.fromEntries(REPORT.steps.map((step) => [step.label, step]));
+  for (const [label, limit] of Object.entries(APP_LIMITS)) {
+    const step = steps[label];
+    assert.ok(step, label);
+    assert.equal(step.outcome, "ok", label);
+    assert.ok(step.cycles > 0 && step.cycles <= limit * 0.8, `${label}: ${step.cycles} cycles, app limit ${limit} (want 20% headroom)`);
+  }
+});
+
 test("a public commitment the real guest stored confirms as public", async () => {
   const view = REPORT.views.publicCommitment;
   const [[program]] = Object.entries(view.data.actor_states);
@@ -149,7 +171,7 @@ test("a public commitment the real guest stored confirms as public", async () =>
   setRpc("http://rpc.test");
   const commitment = await confirmCommitted("http://rpc.test", program, fill(0xdd), "tx", { public: true });
   assert.equal(commitment.public, true);
-  assert.equal(commitment.version, 6);
+  assert.equal(commitment.version, 8);
   await assert.rejects(confirmCommitted("http://rpc.test", program, fill(0xdd), "tx", { public: false }), /failed/);
 });
 

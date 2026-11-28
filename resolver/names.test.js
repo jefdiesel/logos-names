@@ -290,42 +290,77 @@ test("settings decode, with claims from version 6", () => {
 });
 
 test("what the real engine stored reads back, in the shape the RPC serves it", async () => {
+  // gateway/app-src/vectors: transactions engine-run.mjs built with the browser's code, run
+  // through the LEZ v0.4.0 state machine with the registry and lez_nft v3 guests.
   const report = JSON.parse(readFileSync(new URL("../gateway/app-src/vectors/engine-report.json", import.meta.url)));
   const views = report.views;
   const [[program, state]] = Object.entries(views.claimedRecord.data.actor_states);
   const answer = (result) => {
     globalThis.fetch = async () => Response.json({ jsonrpc: "2.0", id: 1, result });
   };
+  // `lns_js_vectors run` already refused the report unless every step ended as expected.
 
   answer(views.claimedRecord);
   const record = decodeNameRecord(await readActorState(RPC_URL, program, "any"));
-  assert.equal(record.version, 6);
+  assert.equal(record.version, 8);
   assert.equal(record.claimed, true);
   assert.equal(record.sealed.length, 284);
   assert.ok(record.expires >= Number.MAX_SAFE_INTEGER);
+  assert.equal(record.nftTokenId.length, 64);
   assert.ok(state.length > 0);
 
   answer(views.settings);
   const settings = decodeSettings(await readActorState(RPC_URL, program, "any"));
-  assert.equal(settings.version, 6);
-  assert.equal(settings.mode, 1);
-  assert.deepEqual(settings.deposits, [1_000_000n, 1_000_000n]);
+  assert.equal(settings.version, 8);
+  assert.equal(settings.mode, 0);
+  assert.equal(settings.nftProgram, report.nftProgram);
+  assert.equal(settings.premiumStart, 64_000_000n);
   assert.equal(settings.claimsUntil, report.claimsUntil);
 
   answer(views.reverse);
   assert.equal(decodePrimaryName(await readActorState(RPC_URL, program, "any")).name, "alice");
 
-  // Registered by the app's register.js, sealed for real, stored by the real guest.
+  // Registered by the app's register.js for a year, sealed for real, stored by the real guest.
   answer(views.namedRecord);
-  assert.deepEqual(await resolveName(RPC_URL, program, "alice-lns"), {
+  const named = decodeNameRecord(await readActorState(RPC_URL, program, "any"));
+  assert.equal(named.priceTier, 2);
+  assert.equal(named.listing, null);
+  const resolved = await resolveName(RPC_URL, program, "alice-lns", 1_800_000_000_000);
+  assert.deepEqual(resolved, {
     name: "alice-lns",
-    expires: null,
+    expires: named.expires,
     lapsed: false,
     account: report.account,
     npk: null,
     vpk: null,
     texts: {},
   });
+  // Its tied NFT exists under the NFT program; the released name's record and NFT are gone,
+  // and the sale emptied the market bucket.
+  assert.ok(views.namedToken.data.actor_states[report.nftProgram].length > 0);
+  assert.equal(views.releasedRecord.data.actor_states[program].length, 0);
+  assert.equal(views.releasedToken.data.actor_states[report.nftProgram].length, 0);
+  assert.equal(views.marketBucket.data.actor_states[program].length, 0);
+  // The lapsed name's old NFT burned and the re-registration minted a new one.
+  assert.equal(views.lapsedToken.data.actor_states[report.nftProgram].length, 0);
+  assert.ok(views.reRegisteredToken.data.actor_states[report.nftProgram].length > 0);
+  answer(views.reRegisteredRecord);
+  const reRegistered = decodeNameRecord(await readActorState(RPC_URL, program, "any"));
+  assert.equal(reRegistered.listing, null);
+  assert.notEqual(reRegistered.generation, "00".repeat(32));
+  answer(views.siteHeader);
+  const header = decodeSiteDirHeader(await readActorState(RPC_URL, program, "any"));
+  assert.equal(header.totalListed, 0, "the buy took the site out of the directory");
+
+  // The year fees and the 2.5% sale fee reached the treasury; 97.5% the seller's payout account.
+  const salePrice = BigInt(report.salePrice);
+  const fee = (salePrice + 39n) / 40n;
+  const balances = Object.values(report.balances).map(BigInt);
+  // Two year registrations, two 30-day ones, the sale fee and the re-release premium.
+  const treasuryTotal = 1n + 2n * BigInt(report.yearPrice) + 2n * BigInt(report.thirtyDays) + fee + BigInt(report.premium);
+  assert.ok(BigInt(report.premium) > 0n, "the lapsed name cost a premium");
+  assert.ok(balances.includes(treasuryTotal), "treasury");
+  assert.ok(balances.includes(1n + salePrice - fee), "payout");
 
   // The selected actor has no state on an account that exists, and an account that doesn't.
   answer(views.emptyActor);
@@ -708,3 +743,103 @@ test("subnames resolve for permanent and revocable records, and dead revocable s
   assert.equal(await resolveName(RPC_URL, PROGRAM, "blog.jef", EXPIRES - 1), null);
 });
 
+
+// ---------- states the compiled names_core v8 encoded (gateway/app-src/vectors gen) ----------
+
+test("v8 states made by the compiled names_core decode field for field", async () => {
+  const vectors = JSON.parse(readFileSync(new URL("../gateway/app-src/vectors/vectors.json", import.meta.url)));
+  const { v8 } = vectors;
+  const fromHex = (text) => Uint8Array.from(Buffer.from(text, "hex"));
+  const NOW = 1_700_000_000_000;
+  const DAY = 86_400_000;
+  const id = (byte) => base58Encode(new Uint8Array(32).fill(byte));
+  const payout = v8.accounts.payout;
+
+  // Slot derivation and the record/page addresses, with this file's own (async) derivations.
+  const baseId = fromHex(v8.id);
+  assert.deepEqual(await Promise.all([0, 1, 2].map(async (tier) => toHex(await tieredId(baseId, tier)))), v8.tieredIds);
+  const slot = fromHex(v8.slot);
+  const registry = id(7);
+  assert.equal(await recordAddress(registry, slot), v8.slotRecord);
+  assert.equal(await pageAddress(registry, slot), v8.slotPage);
+  assert.equal(await ownerTag(slot, vectors.addresses.alice), v8.slotOwnerTag);
+  assert.equal(await subnameRecordAddress(registry, slot, fromHex(v8.subname.sub)), v8.subname.record);
+  assert.equal(await subnamePageAddress(registry, slot, fromHex(v8.subname.sub)), v8.subname.page);
+  for (let len = 0; len <= 12; len += 1) assert.equal(priceTierForLen(len), v8.priceTierForLen[len], `tier of ${len}`);
+
+  const full = decodeNameRecord(fromHex(v8.states.fullRecord));
+  assert.deepEqual(full, {
+    version: 8,
+    ownerTag: v8.slotOwnerTag,
+    expires: NOW + 365 * DAY,
+    sealed: Uint8Array.of(0xee, 0xff),
+    claimed: false,
+    priceTier: 2,
+    generation: v8.registerGeneration,
+    subnameSale: { price: 50_000n, payout },
+    nftTokenId: v8.nft.tokenId,
+    nftShielded: false,
+    listing: { price: 3_000_017n, payTo: payout, expiresAt: NOW + 1000, nonce: 4, inMarket: true },
+    listingNonce: 4,
+    siteListed: 2,
+  });
+  const bare = decodeNameRecord(fromHex(v8.states.bareRecord));
+  assert.equal(bare.claimed, true);
+  assert.ok(bare.expires >= Number.MAX_SAFE_INTEGER, "u64::MAX means permanent");
+  assert.equal(bare.priceTier, 0);
+  assert.equal(bare.generation, v8.claimGeneration);
+  assert.equal(bare.subnameSale, null);
+  assert.equal(bare.nftShielded, true);
+  assert.equal(bare.listing, null);
+  assert.equal(bare.siteListed, null);
+  assert.equal(bare.sealed.length, 0);
+
+  const settings = decodeSettings(fromHex(v8.states.settings));
+  assert.deepEqual(settings, {
+    version: 8,
+    admin: v8.accounts.admin,
+    treasury: v8.accounts.treasury,
+    prices: [
+      [2_000_000n, 20_000_000n, 80_000_000n, 400_000_000n],
+      [500_000n, 5_000_000n, 20_000_000n, 100_000_000n],
+      [100_000n, 1_000_000n, 4_000_000n, 20_000_000n],
+    ],
+    mode: 0,
+    deposits: [0n, 0n],
+    claimsRoot: "00".repeat(32),
+    claimsUntil: 0,
+    claimsProgram: id(0x38),
+    premiumStart: 4_000_000_000n,
+    nftProgram: v8.nft.program,
+  });
+
+  const permanent = decodeSubnameRecord(fromHex(v8.states.permanentSubname));
+  assert.deepEqual(permanent, { version: 8, ownerTag: v8.subname.ownerTag, kind: { type: "permanent" }, sealed: Uint8Array.of(0xee) });
+  const revocable = decodeSubnameRecord(fromHex(v8.states.revocableSubname));
+  assert.deepEqual(revocable.kind, { type: "revocable", parentGeneration: v8.registerGeneration });
+
+  const market = decodeMarketBucket(fromHex(v8.states.marketBucket));
+  assert.equal(market.version, 8);
+  assert.deepEqual(market.entries, [
+    {
+      id: v8.slot, price: 3_000_017n, payTo: payout, expiresAt: null, nameExpires: NOW + 365 * DAY, priceTier: 2, nonce: 4,
+      nftTokenId: v8.nft.tokenId, displayName: "alice-lns",
+    },
+    {
+      id: "a0".repeat(32), price: 40n, payTo: vectors.addresses.bob,
+      expiresAt: NOW + 5, nameExpires: market.entries[1].nameExpires, priceTier: 0, nonce: 1, nftTokenId: "a1".repeat(32), displayName: null,
+    },
+  ]);
+  assert.ok(market.entries[1].nameExpires >= Number.MAX_SAFE_INTEGER);
+
+  const sites = decodeSiteBucket(fromHex(v8.states.siteBucket));
+  assert.deepEqual(sites, {
+    version: 8,
+    entries: [{ id: v8.slot, name: "alice-lns", title: "Alice's site", updatedAt: NOW, nameExpires: NOW + 365 * DAY }],
+  });
+  const header = decodeSiteDirHeader(fromHex(v8.states.siteHeader));
+  const pages = new Array(16).fill(0);
+  pages[v8.market.bucket] = 2;
+  pages[15] = 513;
+  assert.deepEqual(header, { version: 8, activePage: pages, totalListed: 70_000 });
+});

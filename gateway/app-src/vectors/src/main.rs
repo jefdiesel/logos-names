@@ -10,6 +10,8 @@
 //! LEZ v0.4.0: public accounts sign with a per-nonce key derived from a
 //! `PublicAccountSecret`, and each witness entry commits to the signer's next key.
 
+#![recursion_limit = "512"]
+
 use std::collections::BTreeMap;
 
 use borsh::{BorshDeserialize, to_vec};
@@ -28,11 +30,18 @@ use lee_core::{
     program::{PdaSeed, SystemProgramName},
     signing_key::{KeyType, SigningKeyState, signature_program_id},
 };
+use lez_nft_core as nft;
 use names_core::{
-    Commitment, Instruction, LengthProof, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, Message, NameId, Settings,
-    VERSION, claim_leaf, claim_proof, claim_root, commitment, commitment_address, commitment_seed,
-    deposit_address, name_seeds, owner_tag, page_address, record_address, settings_address,
-    settings_seed, shortlist,
+    Commitment, DEFAULT_DEED_CONTENT, DEFAULT_PREMIUM_START, DEFAULT_PRICES, Instruction, LengthProof, Listing,
+    MARKET_BUCKETS, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, MODE_FEE, MarketBucket, MarketEntry, Message, NameId, NameRecord,
+    PRICE_TIER_5, PRICE_TIER_6_7, PRICE_TIER_8_PLUS, PRICE_TIERS, SITE_BUCKETS, Settings, SiteBucket, SiteDirHeader,
+    SiteDirOp, SiteEntry, SubnameKind, SubnameRecord, SubnameSale, TERM_1Y, TERM_30D, TERM_5Y, TERM_PERMANENT, TERMS,
+    VERSION, bucket_of, claim_generation, claim_leaf, claim_proof, claim_root, commitment, commitment_address,
+    commitment_seed, deposit_address, market_bucket_address, market_bucket_seed, name_seeds, nft_deed_seed,
+    nft_token_address, nft_token_id, nft_token_seed, owner_tag, page_address, price_tier_for_len, record_address,
+    register_generation, rerelease_premium, sale_split, settings_address, settings_seed, shortlist,
+    site_bucket_address, site_bucket_seed, site_dir_header_address, site_dir_header_seed, subname_commitment,
+    subname_page_address, subname_record_address, subname_seeds, tiered_id,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -196,13 +205,130 @@ fn generate() -> Value {
 
     let id: NameId = core::array::from_fn(|index| index as u8);
     let registry = AccountId::new([7; 32]);
-    let promised = commitment(&id, &owner_tag(&id, &alice), &[0x5A; 32]);
+    let nft_program = AccountId::new([8; 32]);
+    let slot = tiered_id(&id, PRICE_TIER_8_PLUS);
+    let holder = owner_tag(&id, &alice);
+    let promised = commitment(&id, &holder, &[0x5A; 32]);
     let [name_seed, page_seed, deposit_seed] = name_seeds(&id);
     let instruction = |value: Instruction| hex(&to_vec(&Message::Instruction(value)).expect("borsh"));
     let leaves: Vec<_> = (0..5_u8)
         .map(|at| claim_leaf(&AccountId::new([at; 32]), &[at + 100; 32]))
         .collect();
     let commitment_state = |public| hex(&to_vec(&Commitment { version: VERSION, made: NOW, public }).expect("borsh"));
+    let membership = || LengthProof::Membership(shortlist::Membership { index: 7, tier: 3, path: vec![[9; 32]] });
+    let non_membership = || {
+        LengthProof::NonMembership(shortlist::NonMembership {
+            left: shortlist::Leaf { id: [1; 32], tier: 3 },
+            left_path: vec![[3; 32]],
+            right: shortlist::Leaf { id: [2; 32], tier: 1 },
+            right_path: vec![[4; 32], [5; 32]],
+            left_index: 6,
+        })
+    };
+    let sub: NameId = [0x33; 32];
+    let upsert = SiteDirOp::Upsert { name: "alice".into(), title: "Hi".into(), page: 2, now: NOW };
+    let prices: [[u128; TERMS]; PRICE_TIERS] = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]];
+
+    // v8 derivations, on the 8+ tier slot of `id` (and its two other tiers).
+    let slot_holder = owner_tag(&slot, &alice);
+    let reg_gen = register_generation(&slot, &slot_holder, NOW, &[0x5A; 32]);
+    let claim_gen = claim_generation(&slot, &slot_holder, NOW);
+    let token = nft_token_id(&slot, &reg_gen);
+    let [sub_seed, subpage_seed] = subname_seeds(&slot, &sub);
+    let bucket = bucket_of(&slot);
+    let sale_prices: [u128; 7] = [40, 41, 79, 80, 1_000_000, 3_000_017, u128::MAX];
+    let day = 86_400_000_u64;
+    let elapsed: [u64; 10] = [0, 1, day / 2, day, day + 12_345_678, 2 * day, 10 * day + 7, 20 * day, 21 * day - 1, 21 * day];
+
+    // A full v8 record, and the states the resolver and the market/sites readers decode.
+    let listing = Listing { price: 3_000_017, pay_to: id_of(8), expires_at: Some(NOW + 1000), nonce: 4, in_market: true };
+    let full_record = NameRecord {
+        version: VERSION,
+        owner: slot_holder,
+        expires: NOW + 365 * day,
+        sealed: vec![0xEE, 0xFF],
+        claimed: false,
+        price_tier: PRICE_TIER_8_PLUS,
+        generation: reg_gen,
+        subname_sale: Some(SubnameSale { price: 50_000, payout: id_of(8) }),
+        nft_token_id: token,
+        nft_shielded: false,
+        listing: Some(listing),
+        listing_nonce: 4,
+        site_listed: Some(2),
+    };
+    let bare_record = NameRecord {
+        version: VERSION,
+        owner: slot_holder,
+        expires: u64::MAX,
+        sealed: Vec::new(),
+        claimed: true,
+        price_tier: PRICE_TIER_5,
+        generation: claim_gen,
+        subname_sale: None,
+        nft_token_id: [0; 32],
+        nft_shielded: true,
+        listing: None,
+        listing_nonce: 0,
+        site_listed: None,
+    };
+    let settings_state = Settings {
+        version: VERSION,
+        admin: id_of(1),
+        treasury: id_of(7),
+        prices: DEFAULT_PRICES,
+        mode: MODE_FEE,
+        deposits: [0, 0],
+        claims_root: [0; 32],
+        claims_until: 0,
+        claims_program: AccountId::new([0x38; 32]),
+        premium_start: DEFAULT_PREMIUM_START,
+        nft_program,
+    };
+    let permanent_sub = SubnameRecord { version: VERSION, owner: owner_tag(&sub, &alice), kind: SubnameKind::Permanent, sealed: vec![0xEE] };
+    let revocable_sub = SubnameRecord {
+        version: VERSION,
+        owner: owner_tag(&sub, &alice),
+        kind: SubnameKind::Revocable { parent_generation: reg_gen },
+        sealed: Vec::new(),
+    };
+    let market_bucket = MarketBucket {
+        version: VERSION,
+        entries: vec![
+            MarketEntry {
+                id: slot,
+                price: 3_000_017,
+                pay_to: id_of(8),
+                expires_at: None,
+                name_expires: NOW + 365 * day,
+                price_tier: PRICE_TIER_8_PLUS,
+                nonce: 4,
+                nft_token_id: token,
+                display_name: Some("alice-lns".into()),
+            },
+            MarketEntry {
+                id: [0xA0; 32],
+                price: 40,
+                pay_to: id_of(2),
+                expires_at: Some(NOW + 5),
+                name_expires: u64::MAX,
+                price_tier: PRICE_TIER_5,
+                nonce: 1,
+                nft_token_id: [0xA1; 32],
+                display_name: None,
+            },
+        ],
+    };
+    let site_bucket = SiteBucket {
+        version: VERSION,
+        entries: vec![SiteEntry { id: slot, name: "alice-lns".into(), title: "Alice's site".into(), updated_at: NOW, name_expires: NOW + 365 * day }],
+    };
+    let mut active_page = [0_u16; SITE_BUCKETS as usize];
+    active_page[usize::from(bucket)] = 2;
+    active_page[15] = 513;
+    let site_header = SiteDirHeader { version: VERSION, active_page, total_listed: 70_000 };
+    let state_hex = |value: &dyn Fn() -> Vec<u8>| hex(&value());
+
     json!({
         "pinned": message_json(&pinned),
         "pinnedWithKeys": {
@@ -234,7 +360,7 @@ fn generate() -> Value {
             "settings": settings_address(&registry).to_string(),
             "commitment": commitment_address(&registry, &promised).to_string(),
             "commitmentHash": hex(&promised),
-            "ownerTag": hex(&owner_tag(&id, &alice)),
+            "ownerTag": hex(&holder),
         },
         "seeds": {
             "name": hex(name_seed.as_ref()),
@@ -243,44 +369,71 @@ fn generate() -> Value {
             "settings": hex(settings_seed().as_ref()),
             "commitment": hex(commitment_seed(&promised).as_ref()),
         },
+        // borsh(Message::Instruction(..)) for every v8 instruction, with the inputs
+        // gateway/public/app/lez-tx.test.mjs uses.
         "instructions": {
             "register": instruction(Instruction::Register {
-                id,
-                sealed: vec![0xEE, 0xFF],
-                term: 1,
-                fee: 100_000,
-                treasury: Some(AccountId::new([2; 32])),
-                now: NOW,
-                secret: [0x5A; 32],
-                deposit: false,
-                length: LengthProof::Membership(shortlist::Membership { index: 7, tier: 3, path: vec![[9; 32]] }),
+                id, sealed: vec![0xEE, 0xFF], term: TERM_1Y, fee: 100_000, treasury: Some(AccountId::new([2; 32])),
+                now: NOW, secret: [0x5A; 32], deposit: false, length: membership(), price_tier: PRICE_TIER_8_PLUS,
             }),
             "registerDeposit": instruction(Instruction::Register {
-                id,
-                sealed: vec![0xEE],
-                term: 0,
-                fee: DEPOSIT,
-                treasury: None,
-                now: NOW,
-                secret: [0x5A; 32],
-                deposit: true,
-                length: LengthProof::NonMembership(shortlist::NonMembership {
-                    left: shortlist::Leaf { id: [1; 32], tier: 3 },
-                    left_path: vec![[3; 32]],
-                    right: shortlist::Leaf { id: [2; 32], tier: 1 },
-                    right_path: vec![[4; 32], [5; 32]],
-                    left_index: 6,
-                }),
+                id, sealed: vec![0xEE], term: TERM_30D, fee: DEPOSIT, treasury: None, now: NOW, secret: [0x5A; 32],
+                deposit: true, length: non_membership(), price_tier: PRICE_TIER_8_PLUS,
             }),
-            "renew": instruction(Instruction::Renew { id, term: 2, fee: 5, treasury: Some(AccountId::new([2; 32])), now: NOW }),
-            "setRecord": instruction(Instruction::SetRecord { id, sealed: vec![0xEE] }),
-            "setPage": instruction(Instruction::SetPage { id, sealed: Vec::new() }),
-            "transfer": instruction(Instruction::Transfer { id, new_owner: [2; 32] }),
+            "registerPermanentTier5": instruction(Instruction::Register {
+                id, sealed: Vec::new(), term: TERM_PERMANENT, fee: 400_000_000, treasury: Some(AccountId::new([2; 32])),
+                now: NOW, secret: [0x5A; 32], deposit: false, length: non_membership(), price_tier: PRICE_TIER_5,
+            }),
+            "renew": instruction(Instruction::Renew { id, term: TERM_5Y, fee: 5, treasury: Some(AccountId::new([2; 32])), now: NOW }),
+            "renewPermanent": instruction(Instruction::Renew { id, term: TERM_PERMANENT, fee: 20_000_000, treasury: None, now: NOW }),
+            "setRecord": instruction(Instruction::SetRecord { id, sealed: vec![0xEE], site_dir: SiteDirOp::Keep }),
+            "setRecordRemove": instruction(Instruction::SetRecord { id, sealed: vec![0xEE], site_dir: SiteDirOp::Remove }),
+            "setRecordUpsert": instruction(Instruction::SetRecord { id, sealed: vec![0xEE], site_dir: upsert.clone() }),
+            "setPage": instruction(Instruction::SetPage { id, sealed: Vec::new(), site_dir: SiteDirOp::Keep }),
+            "setPageUpsert": instruction(Instruction::SetPage { id, sealed: b"<p>".to_vec(), site_dir: upsert.clone() }),
+            "transfer": instruction(Instruction::Transfer { id, new_owner: [2; 32], now: NOW }),
             "release": instruction(Instruction::Release { id, refund: DEPOSIT }),
             "setPrimary": instruction(Instruction::SetPrimary { name: "jef".into() }),
+            "setPrimarySubname": instruction(Instruction::SetPrimary { name: "blog.alice".into() }),
+            "configure": instruction(Instruction::Configure {
+                admin: AccountId::new([1; 32]), treasury: AccountId::new([2; 32]), prices, mode: MODE_FEE, deposits: [0, 0],
+                claims_root: [0; 32], claims_until: 0, claims_program: AccountId::new([7; 32]),
+                premium_start: DEFAULT_PREMIUM_START, nft_program: AccountId::new([8; 32]),
+            }),
+            "configureDeposit": instruction(Instruction::Configure {
+                admin: AccountId::new([1; 32]), treasury: AccountId::new([2; 32]), prices: DEFAULT_PRICES, mode: MODE_DEPOSIT,
+                deposits: [DEPOSIT, 3 * DEPOSIT], claims_root: [0xC1; 32], claims_until: NOW, claims_program: AccountId::new([0x38; 32]),
+                premium_start: 0, nft_program: AccountId::new([8; 32]),
+            }),
             "commit": instruction(Instruction::Commit { commitment: [0xC0; 32], now: NOW }),
+            "claim": instruction(Instruction::Claim { id, sealed: vec![0xEE], now: NOW, proof: vec![[1; 32], [2; 32]], price_tier: PRICE_TIER_6_7 }),
             "commitPublic": instruction(Instruction::CommitPublic { commitment: [0xC0; 32], now: NOW }),
-            "claim": instruction(Instruction::Claim { id, sealed: vec![0xEE], now: NOW, proof: vec![[1; 32], [2; 32]] }),
+            "setPrice": instruction(Instruction::SetPrice { price_tier: PRICE_TIER_5, term: TERM_PERMANENT, price: 400_000_000 }),
+            "setSubnameSaleOn": instruction(Instruction::SetSubnameSale { id, sale: Some(SubnameSale { price: 100_000, payout: AccountId::new([2; 32]) }) }),
+            "setSubnameSaleOff": instruction(Instruction::SetSubnameSale { id, sale: None }),
+            "createSubname": instruction(Instruction::CreateSubname { parent_id: id, sub_id: sub, owner: [2; 32], revocable: true, sealed: vec![0xEE], now: NOW }),
+            "revokeSubname": instruction(Instruction::RevokeSubname { parent_id: id, sub_id: sub, now: NOW }),
+            "buySubname": instruction(Instruction::BuySubname {
+                parent_id: id, sub_id: sub, sealed: vec![0xEE], price: 100_000, payout: Some(AccountId::new([2; 32])), now: NOW, secret: [0x5A; 32],
+            }),
+            "buySubnameFree": instruction(Instruction::BuySubname { parent_id: id, sub_id: sub, sealed: Vec::new(), price: 0, payout: None, now: NOW, secret: [0x5A; 32] }),
+            "setSubnameRecordNone": instruction(Instruction::SetSubnameRecord { parent_id: id, sub_id: sub, sealed: vec![0xEE], now: None }),
+            "setSubnameRecordSome": instruction(Instruction::SetSubnameRecord { parent_id: id, sub_id: sub, sealed: vec![0xEE], now: Some(NOW) }),
+            "setSubnamePage": instruction(Instruction::SetSubnamePage { parent_id: id, sub_id: sub, sealed: Vec::new(), now: None }),
+            "transferSubname": instruction(Instruction::TransferSubname { parent_id: id, sub_id: sub, new_owner: [2; 32], now: Some(NOW) }),
+            "releaseSubname": instruction(Instruction::ReleaseSubname { parent_id: id, sub_id: sub, now: None }),
+            "setPremium": instruction(Instruction::SetPremium { premium_start: DEFAULT_PREMIUM_START }),
+            "listPublic": instruction(Instruction::List {
+                id, price: 100_000, pay_to: AccountId::new([2; 32]), expires_at: Some(NOW + 1000), now: NOW, display_name: Some("alice".into()),
+            }),
+            "listOtc": instruction(Instruction::List { id, price: 100_000, pay_to: AccountId::new([2; 32]), expires_at: None, now: NOW, display_name: None }),
+            "cancel": instruction(Instruction::Cancel { id }),
+            "buy": instruction(Instruction::Buy {
+                id, price: 100_000, pay_to: AccountId::new([2; 32]), treasury: AccountId::new([3; 32]), expected_nonce: 7, now: NOW,
+            }),
+            "shieldDeed": instruction(Instruction::ShieldDeed { id, deed_account: AccountId::new([4; 32]), now: NOW }),
+            "unshieldDeed": instruction(Instruction::UnshieldDeed { id }),
+            "refreshShieldedDeed": instruction(Instruction::RefreshShieldedDeed { id }),
         },
         "commitmentState": { "made": NOW, "public": commitment_state(true), "private": commitment_state(false) },
         "claims": {
@@ -292,6 +445,11 @@ fn generate() -> Value {
         },
         // The other leaf of the two-leaf claims list `run` configures.
         "scenarioClaimSibling": hex(&claim_leaf(&AccountId::new([0x11; 32]), &[0x22; 32])),
+        // The root of that list, which `run` configures (alice held [0xCC; 32] on [0x38; 32]).
+        "scenarioClaimRoot": hex(&claim_root(&[
+            claim_leaf(&record_address(&AccountId::new([0x38; 32]), &[0xCC; 32]), &owner_tag(&[0xCC; 32], &id_of(2))),
+            claim_leaf(&AccountId::new([0x11; 32]), &[0x22; 32]),
+        ])),
         "lengthProofs": {
             "aa": proof_json(&[0xAA; 32]),
             "bb": proof_json(&[0xBB; 32]),
@@ -299,12 +457,95 @@ fn generate() -> Value {
             // deriveName("alice-lns"), for the run through the app's own register.js.
             "named": proof_json(&unhex(NAMED_ID).try_into().expect("32 bytes")),
         },
+        // The v8 derivations, on `id` (0..31), registry [7; 32], NFT program [8; 32],
+        // account `alice`, secret [0x5A; 32], now NOW.
+        "v8": {
+            "id": hex(&id),
+            "priceTierForLen": (0..=12).map(price_tier_for_len).collect::<Vec<_>>(),
+            "tieredIds": ([PRICE_TIER_5, PRICE_TIER_6_7, PRICE_TIER_8_PLUS].map(|tier| hex(&tiered_id(&id, tier)))),
+            "slot": hex(&slot),
+            "slotOwnerTag": hex(&slot_holder),
+            "slotCommitment": hex(&commitment(&slot, &slot_holder, &[0x5A; 32])),
+            "slotRecord": record_address(&registry, &slot).to_string(),
+            "slotPage": page_address(&registry, &slot).to_string(),
+            "slotDeposit": deposit_address(&registry, &slot).to_string(),
+            "registerGeneration": hex(&reg_gen),
+            "claimGeneration": hex(&claim_gen),
+            "subname": {
+                "sub": hex(&sub),
+                "recordSeed": hex(sub_seed.as_ref()),
+                "pageSeed": hex(subpage_seed.as_ref()),
+                "record": subname_record_address(&registry, &slot, &sub).to_string(),
+                "page": subname_page_address(&registry, &slot, &sub).to_string(),
+                "ownerTag": hex(&owner_tag(&sub, &alice)),
+                "commitment": hex(&subname_commitment(&slot, &sub, &owner_tag(&sub, &alice), &[0x5A; 32])),
+            },
+            "market": {
+                "bucket": bucket,
+                "seeds": (0..MARKET_BUCKETS).map(|b| hex(market_bucket_seed(b).as_ref())).collect::<Vec<_>>(),
+                "addresses": (0..MARKET_BUCKETS).map(|b| market_bucket_address(&registry, b).to_string()).collect::<Vec<_>>(),
+            },
+            "sites": {
+                "headerSeed": hex(site_dir_header_seed().as_ref()),
+                "header": site_dir_header_address(&registry).to_string(),
+                "bucketSeeds": ([(0_u8, 0_u16), (bucket, 0), (bucket, 2), (15, 513)].map(|(b, page)| json!({
+                    "bucket": b, "page": page, "seed": hex(site_bucket_seed(b, page).as_ref()),
+                    "address": site_bucket_address(&registry, b, page).to_string(),
+                }))),
+            },
+            "nft": {
+                "program": nft_program.to_string(),
+                "tokenId": hex(&token),
+                "claimTokenId": hex(&nft_token_id(&slot, &claim_gen)),
+                "tokenSeed": hex(nft_token_seed(&token).as_ref()),
+                "tokenAddress": nft_token_address(&nft_program, &token).to_string(),
+                "deedSeed": hex(nft_deed_seed(&token).as_ref()),
+                "configSeed": hex(nft::config_seed().as_ref()),
+                "configAddress": nft::config_address(&nft_program).to_string(),
+                "lnsCollectionId": hex(&nft::lns_collection_id(&registry)),
+                "deedContent": String::from_utf8(DEFAULT_DEED_CONTENT.to_vec()).expect("utf-8"),
+            },
+            "saleSplit": (sale_prices.map(|price| { let (seller, fee) = sale_split(price); [price.to_string(), seller.to_string(), fee.to_string()] })),
+            "premium": ([DEFAULT_PREMIUM_START, 64_000_000, 1, u128::MAX].iter().flat_map(|start| {
+                elapsed.iter().map(move |at| [start.to_string(), at.to_string(), rerelease_premium(*start, *at).to_string()])
+            }).collect::<Vec<_>>()),
+            "states": {
+                "fullRecord": state_hex(&|| to_vec(&full_record).expect("borsh")),
+                "bareRecord": state_hex(&|| to_vec(&bare_record).expect("borsh")),
+                "settings": state_hex(&|| to_vec(&settings_state).expect("borsh")),
+                "permanentSubname": state_hex(&|| to_vec(&permanent_sub).expect("borsh")),
+                "revocableSubname": state_hex(&|| to_vec(&revocable_sub).expect("borsh")),
+                "marketBucket": state_hex(&|| to_vec(&market_bucket).expect("borsh")),
+                "siteBucket": state_hex(&|| to_vec(&site_bucket).expect("borsh")),
+                "siteHeader": state_hex(&|| to_vec(&site_header).expect("borsh")),
+            },
+            "accounts": { "payout": id_of(8).to_string(), "treasury": id_of(7).to_string(), "admin": id_of(1).to_string() },
+        },
     })
+}
+
+/// The NFT program's address in `run` (as in tools/engine-test).
+const NFT_PROGRAM: [u8; 32] = [0x4E; 32];
+const FUNDS: u128 = 1_000_000_000;
+/// The placeholder price table `run` configures.
+const RUN_PRICES: [[u128; TERMS]; PRICE_TIERS] = DEFAULT_PRICES;
+const RUN_PREMIUM_START: u128 = 64_000_000;
+
+fn sign_and_apply(state: &mut V03State, signer_byte: u8, nonce: u128, root: Actor, bytes: Vec<u8>, actors: Vec<Actor>, evidence: Vec<PublicAccountEvidence>, block: u64, now: u64, what: &str) {
+    let signer_id = id_of(signer_byte);
+    let mut public: Vec<(Actor, Authority)> = actors.into_iter().map(|actor| (actor, Authority::None)).collect();
+    public.push((root, Authority::Signer));
+    let tx = TxMessage::new(root, bytes, public, BTreeMap::from([(signer_id, Nonce(nonce))]), None, evidence);
+    let witness = WitnessSet::sign(&tx, &[signer(signer_byte, nonce)]);
+    state
+        .transition_from_public_transaction(&PublicTransaction::new(tx, witness), block, now)
+        .unwrap_or_else(|error| panic!("{what}: {error:?}"));
 }
 
 fn run_scenario(path: &str) -> Value {
     let scenario: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("a scenario")).expect("JSON");
     let program = id_of(9);
+    let nft_program = AccountId::new(NFT_PROGRAM);
     let alice = id_of(2);
     let held: NameId = [0xCC; 32];
     let old_program = AccountId::new([0x38; 32]);
@@ -312,41 +553,63 @@ fn run_scenario(path: &str) -> Value {
         claim_leaf(&record_address(&old_program, &held), &owner_tag(&held, &alice)),
         claim_leaf(&AccountId::new([0x11; 32]), &[0x22; 32]),
     ];
-    let elf = names_methods::LOGOS_NAMES_ELF;
     let mut state = GenesisBuilder::new()
         .with_public_accounts(
-            [(alice, 10 * DEPOSIT), (id_of(3), 10 * DEPOSIT)].map(|(id, balance)| (id, Account::funded(balance))),
+            [(alice, FUNDS), (id_of(3), FUNDS), (id_of(4), FUNDS), (id_of(6), FUNDS), (id_of(7), 1), (id_of(8), 1)]
+                .map(|(id, balance)| (id, Account::funded(balance))),
         )
-        .with_programs_at([(program, Program::new(elf.into()).expect("the guest loads"), false)])
+        .with_programs_at([
+            (program, Program::new(names_methods::LOGOS_NAMES_ELF.into()).expect("the guest loads"), false),
+            (nft_program, Program::new(lez_nft_methods::LEZ_NFT_GUEST_ELF.into()).expect("the NFT guest loads"), false),
+        ])
         .build();
 
-    // The deployer's Configure is the Rust side's; everything after it is JavaScript's.
-    let settings = Actor::new(settings_address(&program), program);
+    // Deploy order (ENCODING-CHANGES.md): the NFT admin reserves the LNS collection for the
+    // registry, then the registry's own account configures it with the NFT program. Both are
+    // the Rust side's; everything after them is JavaScript's.
+    let nft_admin = Actor::new(id_of(6), nft_program);
+    let nft_configure = nft::Message::Instruction(nft::Instruction::Configure {
+        admin: id_of(6),
+        authorities: vec![nft::AuthorizedProgram { program, collection_id: Some(nft::lns_collection_id(&program)) }],
+    });
+    sign_and_apply(
+        &mut state,
+        6,
+        0,
+        nft_admin,
+        to_vec(&nft_configure).expect("borsh"),
+        vec![Actor::new(nft::config_address(&nft_program), nft_program)],
+        vec![PublicAccountEvidence::Pda { program: nft_program, seed: nft::config_seed() }],
+        1,
+        T0,
+        "NFT configure",
+    );
     let configure = Message::Instruction(Instruction::Configure {
         admin: id_of(9),
-        treasury: id_of(9),
-        prices: [0; 3],
-        mode: MODE_DEPOSIT,
-        deposits: [DEPOSIT, DEPOSIT],
+        treasury: id_of(7),
+        prices: RUN_PRICES,
+        mode: MODE_FEE,
+        deposits: [0, 0],
         claims_root: claim_root(&leaves),
         claims_until: T0 + 10 * MIN_COMMIT_AGE_MS,
         claims_program: old_program,
+        premium_start: RUN_PREMIUM_START,
+        nft_program,
     });
-    let deployer = Actor::new(program, program);
-    let tx = TxMessage::new(
-        deployer,
+    sign_and_apply(
+        &mut state,
+        9,
+        0,
+        Actor::new(program, program),
         to_vec(&configure).expect("borsh"),
-        [(settings, Authority::None), (deployer, Authority::Signer)],
-        BTreeMap::from([(program, Nonce(0))]),
-        None,
+        vec![Actor::new(settings_address(&program), program)],
         vec![PublicAccountEvidence::Pda { program, seed: settings_seed() }],
+        2,
+        T0,
+        "registry configure",
     );
-    let witness = WitnessSet::sign(&tx, &[signer(9, 0)]);
-    state
-        .transition_from_public_transaction(&PublicTransaction::new(tx, witness), 1, T0)
-        .expect("configure");
 
-    let mut block = 1;
+    let mut block = 2;
     let mut steps = Vec::new();
     for step in scenario["steps"].as_array().expect("steps") {
         block += 1;
@@ -439,7 +702,12 @@ fn run_scenario(path: &str) -> Value {
     let stored: Settings = borsh::from_slice(settings_state.data.actor_state(program)).expect("settings");
     json!({
         "program": scenario["program"],
+        "nftProgram": scenario["nftProgram"],
         "account": scenario["account"],
+        "salePrice": scenario["salePrice"],
+        "yearPrice": scenario["yearPrice"],
+        "premium": scenario["premium"],
+        "thirtyDays": scenario["thirtyDays"],
         "steps": steps,
         "views": views,
         "balances": balances,
@@ -447,6 +715,32 @@ fn run_scenario(path: &str) -> Value {
         "expectedKeys": scenario["expectedKeys"],
         "claimsUntil": stored.claims_until,
     })
+}
+
+/// Verifies, with names_core's own verifier and root, the proofs shard-proofs.mjs made the
+/// way the web app does, and that every name the app refused as locked is locked on the list.
+fn check_proofs(path: &str) -> Value {
+    let input: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("proofs")).expect("JSON");
+    let list = short_list();
+    assert_eq!(list.root(), names_core::SHORTLIST_ROOT, "the repo's list builds to the compiled root");
+    let mut out = serde_json::Map::new();
+    for (name, entry) in input["proofs"].as_object().expect("proofs") {
+        let id: NameId = unhex(entry["id"].as_str().expect("id")).try_into().expect("32 bytes");
+        let proof = LengthProof::try_from_slice(&unhex(entry["proof"].as_str().expect("proof"))).expect("a LengthProof");
+        let tier = shortlist::verify(&names_core::SHORTLIST_ROOT, &id, &proof).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(tier, names_core::TIER_NORMAL, "{name} is open");
+        assert_eq!(list.prove(&id).expect("a proof"), proof, "{name}: the shard proof is the full list's");
+        out.insert(name.clone(), json!("open: the shard proof verifies against SHORTLIST_ROOT"));
+    }
+    for (name, entry) in input["locked"].as_object().expect("locked") {
+        let id: NameId = unhex(entry["id"].as_str().expect("id")).try_into().expect("32 bytes");
+        let proof = list.prove(&id).expect("a proof");
+        assert!(matches!(proof, LengthProof::Membership(_)), "{name} is on the list");
+        let tier = shortlist::verify(&names_core::SHORTLIST_ROOT, &id, &proof).expect("verifies");
+        assert_eq!(tier, names_core::TIER_LOCKED, "{name} is locked");
+        out.insert(name.clone(), json!("locked: on the list with TIER_LOCKED, refused by the app"));
+    }
+    Value::Object(out)
 }
 
 fn main() {
@@ -457,6 +751,7 @@ fn main() {
             let report = run_scenario(&args[2]);
             std::fs::write(&args[3], serde_json::to_string_pretty(&report).expect("JSON")).expect("a report");
         }
-        _ => panic!("usage: lns_js_vectors gen | run <scenario.json> <report.json>"),
+        Some("check-proofs") => println!("{}", serde_json::to_string_pretty(&check_proofs(&args[2])).expect("JSON")),
+        _ => panic!("usage: lns_js_vectors gen | run <scenario.json> <report.json> | check-proofs <proofs.json>"),
     }
 }

@@ -1,6 +1,6 @@
-// Pinned vectors from the LEZ v0.4.0 Rust sources, hand-computed byte-for-byte borsh
-// encodings, and the unchanged v0.4.0-compatible sections of vectors.json (made by
-// ../../app-src/vectors). Run: node --test gateway/public/app/lez-tx.test.mjs
+// Pinned vectors from the LEZ v0.4.0 Rust sources, and vectors.json: bytes the compiled LEZ
+// v0.4.0 types, names_core v8 and lez_nft_core v3 made (../../app-src/vectors gen).
+// Run: node --test gateway/public/app/lez-tx.test.mjs
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -533,197 +533,162 @@ test("addresses and seeds match the Rust", () => {
   assert.equal(toHex(lns.commitmentSeed(promised)), seeds.commitment);
 });
 
-test("every v6/v8 instruction matches borsh(Message::Instruction(..))", () => {
+test("every v8 instruction matches borsh(Message::Instruction(..)) from the compiled names_core", () => {
   const { instructions: expected } = VECTORS;
-  const check = (name, encoded, want = expected[name]) => assert.equal(toHex(encoded), want, name);
-  const nowHex = "0068e5cf8b010000"; // 1_700_000_000_000 u64 LE
-
-  // Changed in v7/v8 vs v6 vectors.json: Register (+priceTier), SetRecord (+SiteDirOp),
-  // SetPage (+SiteDirOp), Transfer (+now), Claim (+priceTier).
-  // (v8 suffixes hand-computed from notes/SUBNAMES.md §2.4 & notes/REGISTRY-04-CHANGES.md §2.3 — awaiting compiled v8 vector tool.)
-  check("register", lns.registerInstruction({
-    id: ID, sealed: bytes(0xee, 0xff), term: 1, fee: 100_000n, treasury: fill(2), now: NOW, secret: fill(0x5a), deposit: false,
-    lengthProof: { kind: "Membership", index: 7, tier: 3, path: [fill(9)] }, priceTier: 2,
-  }), `${expected.register}02`);
-  check("registerDeposit", lns.registerInstruction({
-    id: ID, sealed: bytes(0xee), term: 0, fee: 1_000_000n, now: NOW, secret: fill(0x5a), deposit: true,
-    lengthProof: {
-      kind: "NonMembership",
-      left: { id: fill(1), tier: 3 }, leftPath: [fill(3)],
-      right: { id: fill(2), tier: 1 }, rightPath: [fill(4), fill(5)],
-      leftIndex: 6,
-    }, priceTier: 2,
-  }), `${expected.registerDeposit}02`);
-  check("renew", lns.renewInstruction({ id: ID, term: 2, fee: 5n, treasury: fill(2), now: NOW }));
-  check("setRecord (Keep)", lns.setRecordInstruction({ id: ID, sealed: bytes(0xee) }), `${expected.setRecord}00`);
-  check("setRecord (Remove)", lns.setRecordInstruction({ id: ID, sealed: bytes(0xee), siteDir: lns.SITE_DIR_REMOVE }), `${expected.setRecord}02`);
-  check(
-    "setRecord (Upsert)",
-    lns.setRecordInstruction({ id: ID, sealed: bytes(0xee), siteDir: lns.siteDirUpsert({ name: "alice", title: "Hi", page: 2, now: NOW }) }),
-    `${expected.setRecord}0105000000616c6963650200000048690200${nowHex}`,
-  );
-  check("setPage (Keep)", lns.setPageInstruction({ id: ID, sealed: bytes() }), `${expected.setPage}00`);
-  check("transfer", lns.transferInstruction({ id: ID, newOwner: fill(2), now: NOW }), `${expected.transfer}${nowHex}`);
-  check("release", lns.releaseInstruction({ id: ID, refund: 1_000_000n }));
-  check("setPrimary", lns.setPrimaryInstruction({ name: "jef" }));
-  check("commit", lns.commitInstruction({ commitment: fill(0xc0), now: NOW }));
-  check("claim", lns.claimInstruction({ id: ID, sealed: bytes(0xee), now: NOW, proof: [fill(1), fill(2)], priceTier: 1 }), `${expected.claim}01`);
-
-  // CommitPublic (variant 10): exact borsh vector from repo/core/src/lib.rs.
-  assert.equal(
-    toHex(lns.commitPublicInstruction({ commitment: fill(0xc0), now: NOW })),
-    `000a${"c0".repeat(32)}${nowHex}`,
-  );
-});
-
-test("v7/v8 new instructions (0x07 Configure and 0x0b..0x1a) match exact Borsh vectors", () => {
-  // Pinned v7 vectors from notes/SUBNAMES.md §2.4 (0x0b..0x13) and hand-computed v8 vectors
-  // from notes/REGISTRY-04-CHANGES.md §2.3 (0x07, 0x14..0x1a — awaiting compiled v8 vector tool).
-  const idHex = toHex(ID);
   const subId = fill(0x33);
-  const subHex = "33".repeat(32);
-  const nowHex = "0068e5cf8b010000";
-  const u128OneHundredK = `a08601${"00".repeat(13)}`;
-
-  // 0x07 Configure (v8: 3x4 prices + premiumStart + nftProgram)
-  const prices = [[1n, 2n, 3n, 4n], [5n, 6n, 7n, 8n], [9n, 10n, 11n, 12n]];
-  const pricesHex = Array.from({ length: 12 }, (_, i) => `${(i + 1).toString(16).padStart(2, "0")}${"00".repeat(15)}`).join("");
-  assert.equal(
-    toHex(lns.configureInstruction({
-      admin: fill(1), treasury: fill(2), prices, mode: 0, deposits: [0n, 0n],
-      claimsRoot: fill(0), claimsUntil: 0, claimsProgram: fill(7),
-      premiumStart: 4_000_000_000n, nftProgram: fill(8),
-    })),
-    `0007${"01".repeat(32)}${"02".repeat(32)}${pricesHex}00${"00".repeat(72)}${"07".repeat(32)}00286bee${"00".repeat(12)}${"08".repeat(32)}`,
-    "configure v8",
-  );
-
-  // 0x0b SetPrice
-  assert.equal(
-    toHex(lns.setPriceInstruction({ priceTier: 0, term: 3, price: 400_000_000n })),
-    "000b00030084d717000000000000000000000000",
-    "setPrice",
-  );
-
-  // 0x0c SetSubnameSale
-  assert.equal(
-    toHex(lns.setSubnameSaleInstruction({ id: ID, sale: { price: 100_000n, payout: fill(2) } })),
-    `000c${idHex}01${u128OneHundredK}${"02".repeat(32)}`,
-    "setSubnameSale on",
-  );
-  assert.equal(
-    toHex(lns.setSubnameSaleInstruction({ id: ID, sale: null })),
-    `000c${idHex}00`,
-    "setSubnameSale off",
-  );
-
-  // 0x0d CreateSubname
-  assert.equal(
-    toHex(lns.createSubnameInstruction({ parentId: ID, subId, owner: fill(2), revocable: true, sealed: bytes(0xee), now: NOW })),
-    `000d${idHex}${subHex}${"02".repeat(32)}0101000000ee${nowHex}`,
-    "createSubname",
-  );
-
-  // 0x0e RevokeSubname
-  assert.equal(
-    toHex(lns.revokeSubnameInstruction({ parentId: ID, subId, now: NOW })),
-    `000e${idHex}${subHex}${nowHex}`,
-    "revokeSubname",
-  );
-
-  // 0x0f BuySubname
-  assert.equal(
-    toHex(lns.buySubnameInstruction({ parentId: ID, subId, sealed: bytes(0xee), price: 100_000n, payout: fill(2), now: NOW, secret: fill(0x5a) })),
-    `000f${idHex}${subHex}01000000ee${u128OneHundredK}01${"02".repeat(32)}${nowHex}${"5a".repeat(32)}`,
-    "buySubname",
-  );
-
-  // 0x10 SetSubnameRecord
-  assert.equal(
-    toHex(lns.setSubnameRecordInstruction({ parentId: ID, subId, sealed: bytes(0xee), now: null })),
-    `0010${idHex}${subHex}01000000ee00`,
-    "setSubnameRecord None",
-  );
-  assert.equal(
-    toHex(lns.setSubnameRecordInstruction({ parentId: ID, subId, sealed: bytes(0xee), now: NOW })),
-    `0010${idHex}${subHex}01000000ee01${nowHex}`,
-    "setSubnameRecord Some",
-  );
-
-  // 0x11 SetSubnamePage
-  assert.equal(
-    toHex(lns.setSubnamePageInstruction({ parentId: ID, subId, sealed: bytes(), now: null })),
-    `0011${idHex}${subHex}0000000000`,
-    "setSubnamePage",
-  );
-
-  // 0x12 TransferSubname
-  assert.equal(
-    toHex(lns.transferSubnameInstruction({ parentId: ID, subId, newOwner: fill(2), now: NOW })),
-    `0012${idHex}${subHex}${"02".repeat(32)}01${nowHex}`,
-    "transferSubname",
-  );
-
-  // 0x13 ReleaseSubname
-  assert.equal(
-    toHex(lns.releaseSubnameInstruction({ parentId: ID, subId, now: null })),
-    `0013${idHex}${subHex}00`,
-    "releaseSubname",
-  );
-
-  // 0x14 SetPremium (awaiting compiled v8 vector tool)
-  assert.equal(
-    toHex(lns.setPremiumInstruction({ premiumStart: 4_000_000_000n })),
-    `001400286bee${"00".repeat(12)}`,
-    "setPremium",
-  );
-
-  // 0x15 List (public MarketBucket + OTC) (awaiting compiled v8 vector tool)
-  assert.equal(
-    toHex(lns.listInstruction({ id: ID, price: 100_000n, payTo: fill(2), expiresAt: NOW + 1000, now: NOW, displayName: "alice" })),
-    `0015${idHex}${u128OneHundredK}${"02".repeat(32)}01e86be5cf8b010000${nowHex}0105000000616c696365`,
-    "list public",
-  );
-  assert.equal(
-    toHex(lns.listInstruction({ id: ID, price: 100_000n, payTo: fill(2), expiresAt: null, now: NOW, displayName: null })),
-    `0015${idHex}${u128OneHundredK}${"02".repeat(32)}00${nowHex}00`,
-    "list otc",
-  );
-
-  // 0x16 Cancel (awaiting compiled v8 vector tool)
-  assert.equal(toHex(lns.cancelInstruction({ id: ID })), `0016${idHex}`, "cancel");
-
-  // 0x17 Buy (awaiting compiled v8 vector tool)
-  assert.equal(
-    toHex(lns.buyInstruction({ id: ID, price: 100_000n, payTo: fill(2), treasury: fill(3), expectedNonce: 7, now: NOW })),
-    `0017${idHex}${u128OneHundredK}${"02".repeat(32)}${"03".repeat(32)}0700000000000000${nowHex}`,
-    "buy",
-  );
-
-  // 0x18..0x1a ShieldDeed / UnshieldDeed / RefreshShieldedDeed (awaiting compiled v8 vector tool)
-  assert.equal(
-    toHex(lns.shieldDeedInstruction({ id: ID, deedAccount: fill(4), now: NOW })),
-    `0018${idHex}${"04".repeat(32)}${nowHex}`,
-    "shieldDeed",
-  );
-  assert.equal(toHex(lns.unshieldDeedInstruction({ id: ID })), `0019${idHex}`, "unshieldDeed");
-  assert.equal(toHex(lns.refreshShieldedDeedInstruction({ id: ID })), `001a${idHex}`, "refreshShieldedDeed");
+  const membership = { kind: "Membership", index: 7, tier: 3, path: [fill(9)] };
+  const nonMembership = {
+    kind: "NonMembership",
+    left: { id: fill(1), tier: 3 }, leftPath: [fill(3)],
+    right: { id: fill(2), tier: 1 }, rightPath: [fill(4), fill(5)],
+    leftIndex: 6,
+  };
+  const upsert = lns.siteDirUpsert({ name: "alice", title: "Hi", page: 2, now: NOW });
+  const ours = {
+    register: lns.registerInstruction({
+      id: ID, sealed: bytes(0xee, 0xff), term: lns.TERM_1Y, fee: 100_000n, treasury: fill(2), now: NOW, secret: fill(0x5a),
+      deposit: false, lengthProof: membership, priceTier: lns.PRICE_TIER_8_PLUS,
+    }),
+    registerDeposit: lns.registerInstruction({
+      id: ID, sealed: bytes(0xee), term: lns.TERM_30D, fee: 1_000_000n, now: NOW, secret: fill(0x5a), deposit: true,
+      lengthProof: nonMembership, priceTier: lns.PRICE_TIER_8_PLUS,
+    }),
+    registerPermanentTier5: lns.registerInstruction({
+      id: ID, sealed: bytes(), term: lns.TERM_PERMANENT, fee: 400_000_000n, treasury: fill(2), now: NOW, secret: fill(0x5a),
+      deposit: false, lengthProof: nonMembership, priceTier: lns.PRICE_TIER_5,
+    }),
+    renew: lns.renewInstruction({ id: ID, term: lns.TERM_5Y, fee: 5n, treasury: fill(2), now: NOW }),
+    renewPermanent: lns.renewInstruction({ id: ID, term: lns.TERM_PERMANENT, fee: 20_000_000n, treasury: null, now: NOW }),
+    setRecord: lns.setRecordInstruction({ id: ID, sealed: bytes(0xee) }),
+    setRecordRemove: lns.setRecordInstruction({ id: ID, sealed: bytes(0xee), siteDir: lns.SITE_DIR_REMOVE }),
+    setRecordUpsert: lns.setRecordInstruction({ id: ID, sealed: bytes(0xee), siteDir: upsert }),
+    setPage: lns.setPageInstruction({ id: ID, sealed: bytes() }),
+    setPageUpsert: lns.setPageInstruction({ id: ID, sealed: new TextEncoder().encode("<p>"), siteDir: upsert }),
+    transfer: lns.transferInstruction({ id: ID, newOwner: fill(2), now: NOW }),
+    release: lns.releaseInstruction({ id: ID, refund: 1_000_000n }),
+    setPrimary: lns.setPrimaryInstruction({ name: "jef" }),
+    setPrimarySubname: lns.setPrimaryInstruction({ name: "blog.alice" }),
+    configure: lns.configureInstruction({
+      admin: fill(1), treasury: fill(2), prices: [[1n, 2n, 3n, 4n], [5n, 6n, 7n, 8n], [9n, 10n, 11n, 12n]], mode: 0,
+      deposits: [0n, 0n], claimsRoot: fill(0), claimsUntil: 0, claimsProgram: fill(7),
+      premiumStart: lns.DEFAULT_PREMIUM_START, nftProgram: fill(8),
+    }),
+    configureDeposit: lns.configureInstruction({
+      admin: fill(1), treasury: fill(2), prices: lns.DEFAULT_PRICES, mode: 1, deposits: [1_000_000n, 3_000_000n],
+      claimsRoot: fill(0xc1), claimsUntil: NOW, claimsProgram: fill(0x38), premiumStart: 0n, nftProgram: fill(8),
+    }),
+    commit: lns.commitInstruction({ commitment: fill(0xc0), now: NOW }),
+    claim: lns.claimInstruction({ id: ID, sealed: bytes(0xee), now: NOW, proof: [fill(1), fill(2)], priceTier: lns.PRICE_TIER_6_7 }),
+    commitPublic: lns.commitPublicInstruction({ commitment: fill(0xc0), now: NOW }),
+    setPrice: lns.setPriceInstruction({ priceTier: lns.PRICE_TIER_5, term: lns.TERM_PERMANENT, price: 400_000_000n }),
+    setSubnameSaleOn: lns.setSubnameSaleInstruction({ id: ID, sale: { price: 100_000n, payout: fill(2) } }),
+    setSubnameSaleOff: lns.setSubnameSaleInstruction({ id: ID, sale: null }),
+    createSubname: lns.createSubnameInstruction({ parentId: ID, subId, owner: fill(2), revocable: true, sealed: bytes(0xee), now: NOW }),
+    revokeSubname: lns.revokeSubnameInstruction({ parentId: ID, subId, now: NOW }),
+    buySubname: lns.buySubnameInstruction({ parentId: ID, subId, sealed: bytes(0xee), price: 100_000n, payout: fill(2), now: NOW, secret: fill(0x5a) }),
+    buySubnameFree: lns.buySubnameInstruction({ parentId: ID, subId, sealed: bytes(), price: 0n, payout: null, now: NOW, secret: fill(0x5a) }),
+    setSubnameRecordNone: lns.setSubnameRecordInstruction({ parentId: ID, subId, sealed: bytes(0xee), now: null }),
+    setSubnameRecordSome: lns.setSubnameRecordInstruction({ parentId: ID, subId, sealed: bytes(0xee), now: NOW }),
+    setSubnamePage: lns.setSubnamePageInstruction({ parentId: ID, subId, sealed: bytes(), now: null }),
+    transferSubname: lns.transferSubnameInstruction({ parentId: ID, subId, newOwner: fill(2), now: NOW }),
+    releaseSubname: lns.releaseSubnameInstruction({ parentId: ID, subId, now: null }),
+    setPremium: lns.setPremiumInstruction({ premiumStart: lns.DEFAULT_PREMIUM_START }),
+    listPublic: lns.listInstruction({ id: ID, price: 100_000n, payTo: fill(2), expiresAt: NOW + 1000, now: NOW, displayName: "alice" }),
+    listOtc: lns.listInstruction({ id: ID, price: 100_000n, payTo: fill(2), expiresAt: null, now: NOW, displayName: null }),
+    cancel: lns.cancelInstruction({ id: ID }),
+    buy: lns.buyInstruction({ id: ID, price: 100_000n, payTo: fill(2), treasury: fill(3), expectedNonce: 7, now: NOW }),
+    shieldDeed: lns.shieldDeedInstruction({ id: ID, deedAccount: fill(4), now: NOW }),
+    unshieldDeed: lns.unshieldDeedInstruction({ id: ID }),
+    refreshShieldedDeed: lns.refreshShieldedDeedInstruction({ id: ID }),
+  };
+  assert.deepEqual(Object.keys(ours).sort(), Object.keys(expected).sort(), "every compiled vector is checked");
+  for (const [name, encoded] of Object.entries(ours)) assert.equal(toHex(encoded), expected[name], name);
 });
 
-test("saleSplit (2.5% ceil) and rereleasePremium (21-day daily halving) match exact v8 formulas", () => {
-  assert.throws(() => lns.saleSplit(39n), /at least 40/);
-  assert.deepEqual(lns.saleSplit(40n), { seller: 39n, fee: 1n });
-  assert.deepEqual(lns.saleSplit(41n), { seller: 39n, fee: 2n });
-  assert.deepEqual(lns.saleSplit(1_000_000n), { seller: 975_000n, fee: 25_000n });
+test("v8 derivations match the compiled names_core and lez_nft_core", () => {
+  const v8 = VECTORS.v8;
+  const registry = fill(7);
+  const nftProgram = fill(8);
+  const alice = parseAccountId(VECTORS.addresses.alice);
+  assert.equal(toHex(ID), v8.id);
+  assert.deepEqual(v8.priceTierForLen.map((_, len) => lns.priceTierForLen(len)), v8.priceTierForLen);
+  assert.deepEqual([0, 1, 2].map((tier) => toHex(lns.tieredId(ID, tier))), v8.tieredIds);
+  const slot = lns.tieredId(ID, lns.PRICE_TIER_8_PLUS);
+  assert.equal(toHex(slot), v8.slot);
+  const holder = lns.ownerTag(slot, alice);
+  assert.equal(toHex(holder), v8.slotOwnerTag);
+  assert.equal(toHex(lns.commitmentHash(slot, holder, fill(0x5a))), v8.slotCommitment);
+  assert.equal(base58Encode(lns.recordAddress(registry, slot)), v8.slotRecord);
+  assert.equal(base58Encode(lns.pageAddress(registry, slot)), v8.slotPage);
+  assert.equal(base58Encode(lns.depositAddress(registry, slot)), v8.slotDeposit);
+  const gen = lns.registerGeneration(slot, holder, NOW, fill(0x5a));
+  assert.equal(toHex(gen), v8.registerGeneration);
+  const claimGen = lns.claimGeneration(slot, holder, NOW);
+  assert.equal(toHex(claimGen), v8.claimGeneration);
 
-  const start = 4_000_000_000n;
-  assert.equal(lns.rereleasePremium(0n, 0n), 0n);
-  assert.equal(lns.rereleasePremium(start, -1n), 0n);
-  assert.equal(lns.rereleasePremium(start, 0n), start);
-  assert.equal(lns.rereleasePremium(start, lns.DAY_MS), start >> 1n);
-  assert.equal(lns.rereleasePremium(start, lns.DAY_MS / 2n), (start + (start >> 1n)) / 2n);
-  assert.equal(lns.rereleasePremium(start, 20n * lns.DAY_MS), start >> 20n);
-  assert.equal(lns.rereleasePremium(start, 21n * lns.DAY_MS), 0n);
+  const sub = fill(0x33);
+  assert.equal(toHex(lns.subnameSeed(slot, sub)), v8.subname.recordSeed);
+  assert.equal(toHex(lns.subpageSeed(slot, sub)), v8.subname.pageSeed);
+  assert.equal(base58Encode(lns.subnameRecordAddress(registry, slot, sub)), v8.subname.record);
+  assert.equal(base58Encode(lns.subnamePageAddress(registry, slot, sub)), v8.subname.page);
+  assert.equal(toHex(lns.ownerTag(sub, alice)), v8.subname.ownerTag);
+  assert.equal(toHex(lns.subnameCommitmentHash(slot, sub, lns.ownerTag(sub, alice), fill(0x5a))), v8.subname.commitment);
+
+  assert.equal(lns.marketBucketIndex(slot), v8.market.bucket);
+  assert.equal(lns.siteBucketIndex(slot), v8.market.bucket);
+  for (let bucket = 0; bucket < lns.MARKET_BUCKETS; bucket += 1) {
+    assert.equal(toHex(lns.marketBucketSeed(bucket)), v8.market.seeds[bucket], `market seed ${bucket}`);
+    assert.equal(base58Encode(lns.marketBucketAddress(registry, bucket)), v8.market.addresses[bucket], `market ${bucket}`);
+  }
+  assert.equal(toHex(lns.siteDirHeaderSeed()), v8.sites.headerSeed);
+  assert.equal(base58Encode(lns.siteDirHeaderAddress(registry)), v8.sites.header);
+  for (const { bucket, page, seed, address } of v8.sites.bucketSeeds) {
+    assert.equal(toHex(lns.siteBucketSeed(bucket, page)), seed, `site seed ${bucket}/${page}`);
+    assert.equal(base58Encode(lns.siteBucketAddress(registry, bucket, page)), address, `site ${bucket}/${page}`);
+  }
+
+  assert.equal(base58Encode(nftProgram), v8.nft.program);
+  const token = lns.nftTokenId(slot, gen);
+  assert.equal(toHex(token), v8.nft.tokenId);
+  assert.equal(toHex(lns.nftTokenId(slot, claimGen)), v8.nft.claimTokenId);
+  assert.equal(toHex(lns.nftTokenSeed(token)), v8.nft.tokenSeed);
+  assert.equal(base58Encode(lns.nftTokenAddress(nftProgram, token)), v8.nft.tokenAddress);
+  assert.equal(toHex(lns.nftDeedSeed(token)), v8.nft.deedSeed);
+  assert.equal(toHex(lns.nftConfigSeed()), v8.nft.configSeed);
+  assert.equal(base58Encode(lns.nftConfigAddress(nftProgram)), v8.nft.configAddress);
+  assert.equal(v8.nft.deedContent, '{"name":"LNS Name Deed","image":"lns://deed/<name>"}');
+});
+
+test("saleSplit and rereleasePremium match core/src/market.rs at every vector", () => {
+  for (const [price, seller, fee] of VECTORS.v8.saleSplit) {
+    assert.deepEqual(lns.saleSplit(BigInt(price)), { seller: BigInt(seller), fee: BigInt(fee) }, `split ${price}`);
+  }
+  assert.throws(() => lns.saleSplit(39n), /at least 40/);
+  for (const [start, elapsed, value] of VECTORS.v8.premium) {
+    assert.equal(lns.rereleasePremium(BigInt(start), BigInt(elapsed)), BigInt(value), `premium ${start} at ${elapsed}`);
+  }
+});
+
+test("Register and Claim declare the new token and lez_nft's config; a lapsed re-registration also the old token", () => {
+  const program = fill(7);
+  const nftProgram = fill(8);
+  const signer = fill(1);
+  const has = (msg, acc, prog) => msg.actors.some((a) => toHex(a.accountId) === toHex(acc) && toHex(a.programAccountId) === toHex(prog));
+  const slot = lns.tieredId(ID, lns.PRICE_TIER_8_PLUS);
+  const holder = lns.ownerTag(slot, signer);
+  const reg = lns.registerMessage({
+    program, signer, nonce: 1n, gasLimit: 350_000n, id: ID, secret: fill(0x5a), sealed: bytes(0xee), term: lns.TERM_1Y,
+    fee: 1_000_000n, treasury: fill(2), now: NOW, deposit: false, lengthProof: { kind: "Membership", index: 7, tier: 3, path: [fill(9)] },
+    nftProgram, prevNftTokenId: fill(0xab),
+  });
+  const token = lns.nftTokenId(slot, lns.registerGeneration(slot, holder, NOW, fill(0x5a)));
+  assert.ok(has(reg, lns.nftTokenAddress(nftProgram, token), nftProgram), "new token");
+  assert.ok(has(reg, lns.nftConfigAddress(nftProgram), nftProgram), "lez_nft config");
+  assert.ok(has(reg, lns.nftTokenAddress(nftProgram, fill(0xab)), nftProgram), "old token");
+  const claim = lns.claimMessage({ program, signer, nonce: 1n, gasLimit: 300_000n, id: ID, sealed: bytes(0xee), now: NOW, proof: [], nftProgram });
+  const claimToken = lns.nftTokenId(slot, lns.claimGeneration(slot, holder, NOW));
+  assert.ok(has(claim, lns.nftTokenAddress(nftProgram, claimToken), nftProgram), "claim token");
+  assert.ok(has(claim, lns.nftConfigAddress(nftProgram), nftProgram), "claim: lez_nft config");
 });
 
 test("v8 message builders declare required actors and PDA evidence (buy, list, buySubname)", () => {
@@ -975,8 +940,8 @@ test("vectors: transactions Rust signed verify here, and ours match them but for
 test("vectors: CommitPublic is variant 10, and the Commitment state decodes", () => {
   assert.equal(toHex(lns.commitPublicInstruction({ commitment: fill(0xc0), now: NOW })), VECTORS.instructions.commitPublic);
   const { made } = VECTORS.commitmentState;
-  assert.deepEqual(lns.decodeCommitment(fromHex(VECTORS.commitmentState.public)), { version: 6, made, public: true });
-  assert.deepEqual(lns.decodeCommitment(fromHex(VECTORS.commitmentState.private)), { version: 6, made, public: false });
+  assert.deepEqual(lns.decodeCommitment(fromHex(VECTORS.commitmentState.public)), { version: 8, made, public: true });
+  assert.deepEqual(lns.decodeCommitment(fromHex(VECTORS.commitmentState.private)), { version: 8, made, public: false });
 });
 
 test("vectors: the clock's ids", () => {

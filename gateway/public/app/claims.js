@@ -17,7 +17,7 @@ export const SNAPSHOT_URL = "/claims/lez-0.3.json";
 
 // Well above what the real guest used on the LEZ v0.4.0 engine: claim 69k, a small page 48k.
 // A page's gas grows with its size, and the whole limit is only held, not spent.
-const CLAIM_GAS = 150000n;
+const CLAIM_GAS = 300000n; // a v8 claim mints the NFT: 164,337 cycles on the v0.4.0 engine (engine-report.json)
 const PAGE_GAS = 2000000n;
 
 const OLD_VERSION = 5;
