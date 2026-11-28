@@ -116,15 +116,24 @@ read -r NAMES_IMAGE NAMES_SHA _ < <("$IMAGEID" "$NAMES_ELF")
 read -r NFT_IMAGE NFT_SHA _ < <("$IMAGEID" "$NFT_ELF")
 info "registry guest $NAMES_ELF: image $NAMES_IMAGE sha256 $NAMES_SHA"
 info "nft guest      $NFT_ELF: image $NFT_IMAGE sha256 $NFT_SHA"
-if [ "$REHEARSAL" != True ]; then
-  EXP=$(rel "$(p 'd["artifacts"].get("expected_image_ids_file","expected-image-ids.txt")')")
-  if [ -f "$EXP" ]; then
-    want_r=$(sed -nE 's/^registry_image_id *= *"?([0-9a-f]{64})"?.*/\1/p' "$EXP"); want_n=$(sed -nE 's/^nft_image_id *= *"?([0-9a-f]{64})"?.*/\1/p' "$EXP")
-    [ "$want_r" = "$NAMES_IMAGE" ] && [ "$want_n" = "$NFT_IMAGE" ] || { [ $SEND = 1 ] && die "image ids differ from $EXP (registry $want_r, nft $want_n)"; info "WARNING: image ids differ from $EXP"; }
+# The image gate: the ELFs must be the reproducible build's (ids, and the ELF sha256 when the
+# file pins it). A send refuses on any mismatch, in a rehearsal too; a live send also refuses
+# without the file. EXPECTED_IMAGE_IDS overrides the params path.
+EXP=${EXPECTED_IMAGE_IDS:-$(rel "$(p 'd["artifacts"].get("expected_image_ids_file","expected-image-ids.txt")')")}
+if [ -f "$EXP" ]; then
+  GATE=$($LIB check-images "$EXP" "$NAMES_ELF" "$NFT_ELF" "$NAMES_IMAGE" "$NFT_IMAGE" 2>&1) || true
+  if echo "$GATE" | $PY -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["ok"] else 1)' 2>/dev/null; then
+    info "image gate: both ELFs match $EXP"
   else
-    [ $SEND = 1 ] && die "no $EXP: put the reproducible build's image ids there first"
-    info "WARNING: no $EXP yet (needed for a live send)"
+    echo "$GATE" | $PY -c 'import json,sys; [print("   image gate:", e) for e in json.load(sys.stdin)["errors"]]' 2>/dev/null || echo "$GATE"
+    [ $SEND = 1 ] && die "the guest ELFs are not the ones in $EXP: refusing to send"
+    info "WARNING: the ELFs do not match $EXP (a send would refuse)"
   fi
+elif [ "$REHEARSAL" != True ]; then
+  [ $SEND = 1 ] && die "no $EXP: put the reproducible build's image ids there first"
+  info "WARNING: no $EXP yet (needed for a live send)"
+else
+  info "WARNING: no $EXP: the image gate is not checked in this rehearsal"
 fi
 [ -n "$PAYER" ] || die "[accounts].deployer_payer is empty"
 info "payer Public/$PAYER balance $(balance "$PAYER" || echo '?')"

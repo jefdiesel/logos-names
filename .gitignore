@@ -4,6 +4,5 @@ target/
 dist/
 node_modules/
 deploy/state/
-deploy/expected-image-ids.txt
 deploy/rehearsal/
 *.wallet/

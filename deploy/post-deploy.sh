@@ -43,8 +43,10 @@ run() { info "\$ $*"; [ $SEND = 1 ] || return 0; "$@" 2>&1 | grep -vE '^(Stored|
 
 if [ $HELD = 1 ]; then
   say "held names (admin Public/$ADMIN places them permanent, then hands them over)"
-  echo "$V" | $PY -c 'import json,sys; [print(h.get("name",""), h.get("owner","") or "-", h.get("term","permanent")) for h in json.load(sys.stdin)["held_names"]]' |
-  while read -r name owner term; do
+  # An array, not a pipe into `while read`: a wallet password prompt must not eat the next names.
+  mapfile -t HELD_LINES < <(echo "$V" | $PY -c 'import json,sys; [print(h.get("name",""), h.get("owner","") or "-", h.get("term","permanent")) for h in json.load(sys.stdin)["held_names"]]')
+  for line in "${HELD_LINES[@]}"; do
+    read -r name owner term <<< "$line"
     [ -n "$name" ] || continue
     cur=$(holder "$name")
     if [ -z "$cur" ]; then
@@ -71,5 +73,6 @@ if [ $SMOKE = 1 ]; then
   [ $SEND = 1 ] || exit 0
   after=$(bal "$TREASURY")
   info "treasury: $before -> $after (+$((after - before)))"
+  [ "$((after - before))" -gt 0 ] || die "smoke: the treasury received nothing for $NAME"
   LEE_WALLET_HOME_DIR=$SMOKE_WALLET N resolve "$NAME"
 fi

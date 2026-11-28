@@ -15,6 +15,8 @@
 #   SEQ_BIN, WALLET_BIN   sequencer_service (features standalone,prove) and wallet (lee/prove) built from it
 #   NAMES_CLI, NFT_CLI, IMAGEID, NAMES_ELF, NFT_ELF   as for deploy.sh
 #   R           rehearsal home (default deploy/rehearsal; gitignored). --fresh wipes it.
+#   EXPECTED_IDS  the image-id file deploy.sh's gate checks (default deploy/expected-image-ids.txt;
+#               without it the rehearsal pins the given ELFs' own ids and says so)
 #   PORT        RPC port (default 3940)
 # Sends only to 127.0.0.1. Every key it makes lives under $R and is for this chain only.
 set -euo pipefail
@@ -37,8 +39,9 @@ mkdir -p "$R"; chmod 700 "$R"
 T0=$(date +%s)
 RESULTS=$R/results.txt; [ "$FROM" = boot ] && : > "$RESULTS"; touch "$RESULTS"   # --from STEP appends
 say() { printf '\n######## %s  (+%ss)\n' "$*" "$(( $(date +%s) - T0 ))"; }
-ok() { echo "PASS $*" | tee -a "$RESULTS"; }
-bad() { echo "FAIL $*" | tee -a "$RESULTS"; FAILED=1; }
+el() { local t=$(( $(date +%s) - T0 )); printf '%d:%02d' $((t / 60)) $((t % 60)); }
+ok() { echo "PASS [$(el)] $*" | tee -a "$RESULTS"; }
+bad() { echo "FAIL [$(el)] $*" | tee -a "$RESULTS"; FAILED=1; }
 FAILED=0
 die() { echo "STOP: $*" >&2; bad "$*"; exit 1; }
 id_of() { grep -oE "$1/[1-9A-HJ-NP-Za-km-z]{32,44}" | head -1 | cut -d/ -f2; }
@@ -99,10 +102,17 @@ if reached fund; then
 fi
 
 # ---- 2. deploy ----------------------------------------------------------------------------
+EXPECTED_IDS=${EXPECTED_IDS:-$HERE/expected-image-ids.txt}
+if [ ! -f "$EXPECTED_IDS" ]; then
+  EXPECTED_IDS=$R/expected-image-ids.txt
+  read -r a ash _ < <("$IMAGEID" "$NAMES_ELF"); read -r b bsh _ < <("$IMAGEID" "$NFT_ELF")
+  printf '# rehearsal only: the given ELFs own ids (no reproducible ids yet)\nregistry_image_id = %s\nnft_image_id = %s\nregistry_elf_sha256 = %s\nnft_elf_sha256 = %s\n' "$a" "$b" "$ash" "$bsh" > "$EXPECTED_IDS"
+  echo "WARN no deploy/expected-image-ids.txt: the gate checks the given ELFs against their own ids" | tee -a "$RESULTS"
+fi
 P=$R/params.toml
-$PY - "$HERE/params.toml" "$P" "$RPC" "$PAYER" "$ADMIN" "$TREASURY" "$NAMES_CLI" "$NFT_CLI" "$IMAGEID" "$NAMES_ELF" "$NFT_ELF" "$R/deploy-state.env" <<'PY'
+$PY - "$HERE/params.toml" "$P" "$RPC" "$PAYER" "$ADMIN" "$TREASURY" "$NAMES_CLI" "$NFT_CLI" "$IMAGEID" "$NAMES_ELF" "$NFT_ELF" "$R/deploy-state.env" "$EXPECTED_IDS" "$U1" <<'PY'
 import re, sys
-src, dst, rpc, payer, admin, treasury, names, nft, imageid, reg_elf, nft_elf, state = sys.argv[1:13]
+src, dst, rpc, payer, admin, treasury, names, nft, imageid, reg_elf, nft_elf, state, expected, u1 = sys.argv[1:15]
 s = open(src).read()
 s = s.replace("rehearsal = false", "rehearsal = true", 1)
 def setv(section, key, val, s):
@@ -118,14 +128,26 @@ for sec, k, v in [("network", "rpc_url", rpc), ("accounts", "deployer_payer", pa
                   ("accounts", "admin", admin), ("accounts", "treasury", treasury),
                   ("tooling", "names_cli", names), ("tooling", "nft_cli", nft), ("tooling", "imageid_cmd", imageid),
                   ("artifacts", "registry_elf", reg_elf), ("artifacts", "nft_elf", nft_elf),
-                  ("tooling", "state_file", state), ("keys", "upgrade_wallet_dir", "rehearsal")]:
+                  ("tooling", "state_file", state), ("keys", "upgrade_wallet_dir", "rehearsal"),
+                  ("artifacts", "expected_image_ids_file", expected), ("post_deploy", "smoke_public_owner", "Public/" + u1)]:
     s = setv(sec, k, v, s)
+# Held names as Monday places them: `web` handed to a user (U1), the other three stay with the admin.
+s, n = re.subn(r'(?m)^(name = "web"\n)owner = .*$', r'\1owner = "Public/%s"' % u1, s, count=1)
+assert n == 1, "no held name web"
 s = s.replace('name = "lez-v0.4-testnet"', 'name = "local-rehearsal"', 1)
 open(dst, "w").write(s)
 PY
 if reached deploy; then
   say "2. deploy.sh dry run, then --send"
   LEE_WALLET_HOME_DIR=$W "$HERE/deploy.sh" --params "$P" accounts | tail -4
+  # The image gate: a send with an ELF that is not the pinned one must refuse before sending anything.
+  if out=$(LEE_WALLET_HOME_DIR=$W NAMES_ELF=$NFT_ELF STATE=$R/gate-test-state.env "$HERE/deploy.sh" --params "$P" --send 2>&1); then
+    die "deploy.sh sent with the wrong registry ELF"
+  fi
+  if grep -q "refusing to send" <<<"$out" && ! grep -q '^NFT_HEADER=' "$R/gate-test-state.env" 2>/dev/null; then
+    ok "image gate: deploy.sh --send refuses a registry ELF that is not the pinned one (nothing sent)"
+  else echo "$out" | tail -5; die "image gate did not refuse for the right reason"; fi
+  rm -f "$R/gate-test-state.env"
   LEE_WALLET_HOME_DIR=$W "$HERE/deploy.sh" --params "$P" --send && ok "deploy.sh: both programs deployed and configured, read back" || die "deploy.sh failed"
 fi
 # shellcheck source=/dev/null
@@ -229,9 +251,42 @@ if reached upgrade; then
   N "$WU3" resolve "$PUBNAME" > /dev/null 2>&1 && N "$W" settings > /dev/null 2>&1 && ok "names and settings intact after the upgrade" || bad "after the upgrade"
 fi
 
-# ---- 8. private registration finishes -----------------------------------------------------
+# ---- 8. post-deploy.sh with the rehearsal params (held names, then the smoke) ---------------
+tier_price() { # NAME TERM_INDEX: the price the settings charge for this name's length tier
+  N "$W" settings | $PY -c 'import json,sys; n,t=sys.argv[1],int(sys.argv[2]); p=json.load(sys.stdin)["prices"]
+k="tier_5" if len(n)<=5 else ("tier_6_7" if len(n)<=7 else "tier_8_plus"); row=p[k]
+print(row[["30d","1y","5y","permanent"][t]] if isinstance(row,dict) else row[t])' "$1" "$2"
+}
+if reached post; then
+  say "8. post-deploy.sh --send: the four held names (admin places them permanent; web goes to U1), then the smoke"
+  HELD_NAMES=$($PY -c 'import json,sys; [print(h["name"]) for h in json.load(sys.stdin)["held_names"]]' <<<"$($PY "$HERE/lib.py" validate "$P" "$REPO" --dry-run)")
+  need=0; for n in $HELD_NAMES; do need=$((need + $(tier_price "$n" 3))); done
+  # Monday: Jef funds the admin. Here the operator does, with the held names' total plus gas.
+  kitw auth-transfer send --from "Public/$OP" --to-initial-key "$(pk "$W" "$ADMIN")" --amount $((need + 50000000)) 2>&1 | quiet | tail -1
+  t_before=$(bal "$TREASURY")
+  LEE_WALLET_HOME_DIR=$W "$HERE/post-deploy.sh" --params "$P" --send --skip-smoke > "$R/post-held.log" 2>&1 \
+    && ok "post-deploy.sh held names: exit 0 ($(echo $HELD_NAMES))" || { tail -8 "$R/post-held.log"; bad "post-deploy.sh held names (see $R/post-held.log)"; }
+  t_after=$(bal "$TREASURY")
+  [ $((t_after - t_before)) = "$need" ] && ok "treasury got $need for the held names (permanent, by length tier)" || bad "held names: treasury delta $((t_after - t_before)), expected $need"
+  for n in $HELD_NAMES; do
+    h=$(N "$W" resolve "$n" 2>/dev/null | $PY -c 'import json,sys; print(json.load(sys.stdin).get("held_by",""))' 2>/dev/null || true)
+    want=$ADMIN; [ "$n" = web ] && want=$U1
+    [ "$h" = "$want" ] && ok "held name $n held by $([ "$n" = web ] && echo 'its owner U1' || echo 'the admin')" || bad "held name $n held by '$h', expected $want"
+  done
+  LEE_WALLET_HOME_DIR=$W "$HERE/post-deploy.sh" --params "$P" --send --skip-smoke > "$R/post-held-rerun.log" 2>&1
+  t_rerun=$(bal "$TREASURY")
+  [ "$t_rerun" = "$t_after" ] && [ "$(grep -c 'registered already' "$R/post-held-rerun.log")" = "$(echo $HELD_NAMES | wc -w | tr -d ' ')" ] \
+    && ok "post-deploy.sh rerun skips every placed name (nothing paid twice)" || bad "post-deploy.sh rerun (see $R/post-held-rerun.log)"
+  t_before=$(bal "$TREASURY"); smoke=$($PY -c 'import json,sys; print(json.load(sys.stdin)["post_deploy"]["smoke_public_name"])' <<<"$($PY "$HERE/lib.py" validate "$P" "$REPO" --dry-run)")
+  SMOKE_WALLET=$WU1 "$HERE/post-deploy.sh" --params "$P" --send --skip-held > "$R/post-smoke.log" 2>&1 \
+    && ok "post-deploy.sh smoke: $smoke registered from SMOKE_WALLET" || { tail -8 "$R/post-smoke.log"; bad "post-deploy.sh smoke (see $R/post-smoke.log)"; }
+  t_after=$(bal "$TREASURY"); want=$(tier_price "$smoke" 0)
+  [ $((t_after - t_before)) = "$want" ] && ok "smoke: treasury got exactly $want" || bad "smoke: treasury delta $((t_after - t_before)), expected $want"
+fi
+
+# ---- 9. private registration finishes -----------------------------------------------------
 if [ $PRIV = 1 ] && [ -n "${PRIVPID:-}" ]; then
-  say "8. wait for the private registration of $PRIVNAME (15-minute wait + proof)"
+  say "9. wait for the private registration of $PRIVNAME (15-minute wait + proof)"
   wait "$PRIVPID" || true
   tail -4 "$R/reg-priv.log"
   if grep -q "EXIT 0" "$R/reg-priv.log" && LEE_WALLET_HOME_DIR=$WU2 "$NAMES_CLI" --program "$REG" resolve "$PRIVNAME" > "$R/resolve-priv.json" 2>&1; then

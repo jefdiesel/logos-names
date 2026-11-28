@@ -31,5 +31,21 @@ edit '^rehearsal = false$' 'rehearsal = true'; refuses "a rehearsal file whose R
 edit '^upgradeable = true$' 'upgradeable = false'; refuses "upgradeable = false on testnet" "V '$T/p.toml' --dry-run" "upgradeable must be true"
 edit '^sale_fee_bps = true$' 'sale_fee_bps = "true"'; refuses "a confirmation that is not exactly true" "V '$T/p.toml'" "sale_fee_bps"
 edit '^rpc_url = "PLACEHOLDER.*$' 'rpc_url = "http://127.0.0.1:3040"'; refuses "a live file pointing at a loopback RPC" "V '$T/p.toml' --dry-run" "live params file points at a loopback"
+# The image gate deploy.sh runs before any send (lib.py check-images): ids and ELF sha256 pins.
+head -c 4096 /dev/urandom > "$T/r.bin"; head -c 4096 /dev/urandom > "$T/n.bin"
+RS=$($PY -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$T/r.bin")
+NS=$($PY -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$T/n.bin")
+A=$(printf 'a%.0s' {1..64}); B=$(printf 'b%.0s' {1..64})
+printf 'registry_image_id = %s\nnft_image_id = %s\nregistry_elf_sha256 = %s\nnft_elf_sha256 = %s\n' "$A" "$B" "$RS" "$NS" > "$T/ids.txt"
+G() { $PY "$HERE/lib.py" check-images "$1" "$T/r.bin" "$T/n.bin" "$2" "$3"; }
+check "image gate accepts the pinned ids and ELF sha256" "G '$T/ids.txt' $A $B"
+refuses "image gate: a registry ELF with another image id" "G '$T/ids.txt' $B $B" "registry image_id mismatch"
+refuses "image gate: the two ELFs swapped" "G '$T/ids.txt' $B $A" "image_id mismatch"
+sed "s/^nft_elf_sha256 = .*/nft_elf_sha256 = $RS/" "$T/ids.txt" > "$T/ids2.txt"
+refuses "image gate: an ELF whose sha256 is not the pinned one" "G '$T/ids2.txt' $A $B" "nft_elf_sha256 mismatch"
+refuses "image gate: the example file's placeholders" "G '$HERE/expected-image-ids.example.txt' $A $B" "placeholder"
+if [ -f "$HERE/expected-image-ids.txt" ]; then
+  check "expected-image-ids.txt has both ids as 64 hex" "grep -qE '^registry_image_id = [0-9a-f]{64}$' '$HERE/expected-image-ids.txt' && grep -qE '^nft_image_id = [0-9a-f]{64}$' '$HERE/expected-image-ids.txt'"
+fi
 echo "$pass passed, $fail failed"
 [ $fail = 0 ]
