@@ -1,0 +1,19 @@
+# Expected RISC0 image IDs and ELF SHA-256 digests for the Monday LEZ v0.4 launch.
+#
+# Copy this file to `deploy/expected-image-ids.txt` and replace the placeholder
+# values with the exact outputs from the reproducible Docker builds:
+#   - Registry: `cargo risczero build --manifest-path methods/guest/Cargo.toml`
+#   - NFT:      `cargo risczero build --manifest-path ../lez-nft/methods/guest/Cargo.toml`
+#
+# Format: <key> = <64-char lowercase hex>
+# `deploy.sh` refuses to deploy if any required image_id is missing, still a
+# placeholder, or does not match the ELF on disk.
+#
+# Optional: set `*_elf_sha256` to also pin the raw ELF file SHA-256 checksum.
+
+registry_image_id = REPLACE_WITH_REGISTRY_V8_IMAGE_ID_64_HEX
+nft_image_id = REPLACE_WITH_LEZ_NFT_V3_IMAGE_ID_64_HEX
+
+# Optional raw ELF file SHA-256 pins (leave commented until reproducible builds are ready):
+# registry_elf_sha256 = REPLACE_WITH_REGISTRY_ELF_SHA256_64_HEX
+# nft_elf_sha256 = REPLACE_WITH_LEZ_NFT_ELF_SHA256_64_HEX

@@ -10,7 +10,7 @@ SEQ_BIN=/Volumes/exos162/logos/lez-0.4-rc1/target/release/sequencer_service
 SEQ_CONFIG=/Volumes/exos162/logos/lez-0.4-rc1/lez/sequencer/service/networks/local.json
 NAMES=$L/bin/names
 RPC=http://127.0.0.1:3220
-LOCAL_TEST_KEY=10a26a9aec7d34b82364eeae45c5294dbb0a764b000b94eeb9b58511dc487c4d
+LOCAL_TEST_KEY=$("$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/tools/lez-test-key.sh" PRIVATE_KEY_PUB_ACC_A)
 SEGMENT=$((96 * 1024))
 rpc() { curl -sf -m 10 -X POST "$RPC" -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}"; }
 id_of() { grep -oE "$1/[1-9A-HJ-NP-Za-km-z]{32,44}" | head -1 | cut -d/ -f2; }

@@ -10,7 +10,7 @@ set -euo pipefail
 export LEE_WALLET_HOME_DIR=$H/wallet
 export WALLET_TOKENS_SEQUENCER=${WALLET_TOKENS_SEQUENCER:-http://127.0.0.1:3180}
 # LEZ's published local-test key: holds 10T on a fresh local chain.
-LOCAL_TEST_KEY=10a26a9aec7d34b82364eeae45c5294dbb0a764b000b94eeb9b58511dc487c4d
+LOCAL_TEST_KEY=$("$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/tools/lez-test-key.sh" PRIVATE_KEY_PUB_ACC_A)
 T=$BIN
 F= B= P= D=
 [ -f "$H/ids.env" ] && . "$H/ids.env"

@@ -77,6 +77,7 @@ trap 'exit 130' INT TERM
 "$CTL" daemon start --detach || die "daemon start"
 STARTED=1
 export CTL W BASE SEQ_BIN SEQ_CONFIG NAMES_BIN NAMES_LGX
+export LOCAL_TEST_KEY=$("$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/tools/lez-test-key.sh" PRIVATE_KEY_PUB_ACC_A)
 python3 -I -u - <<'PY'
 import hashlib, json, os, re, stat, subprocess, sys, time, urllib.request
 
@@ -84,7 +85,7 @@ CTL, W, SEQ_BIN, SEQ_CONFIG, NAMES_BIN = (os.environ[k] for k in ("CTL", "W", "S
 BASE = int(os.environ["BASE"])
 URL_A, URL_B, URL_B2 = (f"http://127.0.0.1:{BASE + n}" for n in (0, 1, 2))
 # LEZ's published local-test key (PRIVATE_KEY_PUB_ACC_A in lez/testnet_initial_state): local chains only.
-LOCAL_TEST_KEY = "10a26a9aec7d34b82364eeae45c5294dbb0a764b000b94eeb9b58511dc487c4d"
+LOCAL_TEST_KEY = os.environ["LOCAL_TEST_KEY"]  # tools/lez-test-key.sh, exported before this block
 CHANNEL_B = "b2" * 32
 CONFIG = os.path.join(W, "home", ".config", "logos-names", "config.json")
 os.chdir(W)

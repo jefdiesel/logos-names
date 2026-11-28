@@ -58,7 +58,7 @@ RPC_PORT=${RPC_PORT:-3230}
 METRICS_PORT=${METRICS_PORT:-9230}
 RPC=http://127.0.0.1:$RPC_PORT
 # LEZ's published local-test key (PRIVATE_KEY_PUB_ACC_A in lez/testnet_initial_state): local chains only.
-LOCAL_TEST_KEY=10a26a9aec7d34b82364eeae45c5294dbb0a764b000b94eeb9b58511dc487c4d
+LOCAL_TEST_KEY=$("$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/tools/lez-test-key.sh" PRIVATE_KEY_PUB_ACC_A)
 SEGMENT=$((96 * 1024)) # program_loader_core::MAX_SEGMENT_DATA_LEN
 NAME=walletci
 SUBMISSION=lp-0021/names-wallet

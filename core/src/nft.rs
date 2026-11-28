@@ -22,10 +22,12 @@ const NFT_DEED_SEED_DOMAIN: &[u8] = b"lez-nft/v3/deed/";
 pub const NFT_MESSAGE_TAG_AUTHORITY_SYNC: u8 = 2;
 
 /// Default name-free JSON metadata stored on minted LNS deed NFTs.
-/// Clients verify the name locally and render a name card when known; explorers
-/// and wallets that do not know the name show this generic deed metadata.
+/// The registry never sees a name in plain text, so the image is a template:
+/// a client that knows the name fills `<name>` in and renders `lns://deed/alice`
+/// (Jef, 2026-11-28: lns:// only, nothing on HTTPS). Explorers and wallets that
+/// do not know the name show this generic deed metadata.
 pub const DEFAULT_DEED_CONTENT: &[u8] =
-    br#"{"name":"LNS Name Deed","image":"https://nameswallet.app/lns/deed.png"}"#;
+    br#"{"name":"LNS Name Deed","image":"lns://deed/<name>"}"#;
 
 /// Metadata telling `lez_nft` v3 which registry and actors control a tied name NFT.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]

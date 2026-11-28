@@ -1,0 +1,310 @@
+# =============================================================================
+# LNS Registry v8 + lez_nft v3 — Official LEZ v0.4 Testnet Deploy Parameters
+# =============================================================================
+#
+# Copy this file to `deploy/params.toml` (gitignored if you keep local values,
+# or committed with public IDs only — NEVER put private keys, mnemonics, or
+# wallet passwords in this file; wallet tooling reads keys at run time).
+#
+# Every parameter below is marked with its mutability:
+#   [FIXED FOREVER — COMPILE-TIME]      Baked into the RISC-V guest ELF.
+#                                       Changing it requires rebuilding and
+#                                       upgrading (or redeploying) the program.
+#   [FIXED FOREVER — INITIAL CONFIGURE] Enforced immutable on chain by
+#                                       Effect::WriteSettings after the first
+#                                       Configure transaction lands.
+#   [FIXED FOREVER — DEPLOY ACCOUNT]    Bound to the deployed program account.
+#   [ADMIN-ADJUSTABLE]                  Can be changed later by `admin` via
+#                                       Configure / SetPrice / SetPremium.
+#
+# =============================================================================
+
+# [SAFETY LATCH]
+# deploy.sh REFUSES to run a live deployment until Jef has personally reviewed
+# every FIXED FOREVER parameter below and changed this line to `true`.
+# `--dry-run` works with `false` so you can inspect every transaction first.
+confirmed_by_jef = false
+
+# -----------------------------------------------------------------------------
+# Target LEZ v0.4 network (endpoint unknown until Monday)
+# -----------------------------------------------------------------------------
+[network]
+# Human-readable network label printed in logs and deployment manifest.
+name = "lez-v0.4-testnet"
+
+# Sequencer JSON-RPC URL. Leave empty here and pass `--rpc <url>` or
+# `LEZ_RPC_URL=<url>` on Monday, OR fill it in once the official endpoint is live.
+rpc_url = ""
+
+# Optional 64-hex Logos Blockchain channel ID (from sequencer `getChannelId`).
+# If non-empty, deploy.sh refuses to run unless the sequencer reports this exact
+# channel ID (prevents deploying to the wrong chain by mistake).
+expected_channel_id = ""
+
+# -----------------------------------------------------------------------------
+# Guest binaries & expected image IDs
+# -----------------------------------------------------------------------------
+[artifacts]
+# [FIXED FOREVER — COMPILE-TIME]
+# Path to the reproducible RISC-V guest ELF for LNS registry v8 (`logos_names.bin`).
+# Prefer the Docker reproducible build (`cargo risczero build --manifest-path methods/guest/Cargo.toml`).
+# Overridable at run time with `NAMES_ELF`.
+registry_elf = "../target/riscv-guest/names_methods/logos_names/riscv32im-risc0-zkvm-elf/release/logos_names.bin"
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Path to the reproducible RISC-V guest ELF for `lez_nft` v3 (`lez_nft_guest.bin`).
+# Overridable at run time with `NFT_ELF`.
+nft_elf = "../../lez-nft/target/riscv-guest/lez_nft_methods/lez_nft_guest/riscv32im-risc0-zkvm-elf/release/lez_nft_guest.bin"
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Expected RISC0 image IDs (and optional ELF SHA-256 digests) for both guests.
+# Copy `expected-image-ids.example.txt` -> `expected-image-ids.txt` and paste the
+# verified CI/Docker image IDs before Monday. deploy.sh aborts on any mismatch.
+expected_image_ids_file = "expected-image-ids.txt"
+
+# Path to the 61 MB locked-name list (`shortlist.bin`). Checked against
+# `immutable.shortlist_root` before deploying. Overridable with `NAMES_SHORTLIST`.
+shortlist_file = "../shortlist/shortlist.bin"
+
+# -----------------------------------------------------------------------------
+# Local CLI / tooling paths (no secrets)
+# -----------------------------------------------------------------------------
+[tooling]
+# Path to the v8-compatible `names` CLI binary (overridable via `NAMES_CLI`).
+names_cli = "../target/release/names"
+
+# Optional path to the `lez_nft` v3 CLI binary (overridable via `NFT_CLI`),
+# used to send `lez_nft::Instruction::Configure` and inspect linked tokens.
+nft_cli = "../../lez-nft/target/release/lez-nft"
+
+# Optional command that takes `<elf-path>` as its argument and prints the
+# 64-hex RISC0 image ID on stdout (overridable via `IMAGEID_CMD`).
+# Example: "../target/release/names-imageid" or "cargo risczero ..."
+imageid_cmd = ""
+
+# -----------------------------------------------------------------------------
+# Accounts (IDs ONLY — NEVER put private keys or passwords in this file!)
+# Keys are read at run time from the wallet at `LEE_WALLET_HOME_DIR`.
+# -----------------------------------------------------------------------------
+[accounts]
+# [FIXED FOREVER — DEPLOY ACCOUNT]
+# Public account in the deployer wallet that pays program-loader deploy fees
+# and initial account funding. Must be funded before running deploy.sh.
+# Format: "Public/<base58>" or bare "<base58>".
+deployer_payer = ""
+
+# [ADMIN-ADJUSTABLE (in lez_nft)]
+# Admin public account for the `lez_nft` v3 program (manages authorized programs).
+# Must exist in the deployer wallet (or be signed by it during deploy.sh).
+nft_admin = ""
+
+# [ADMIN-ADJUSTABLE (in names_core via Configure)]
+# Registry admin public account: can call Configure, SetPrice, SetPremium, and
+# register locked 1-4 char + reserved names (`post-deploy.sh`).
+# WARNING: rotating `admin` to an account whose key you do not hold is irreversible!
+admin = ""
+
+# [ADMIN-ADJUSTABLE (in names_core via Configure)]
+# Treasury public account receiving:
+#   - registration & renewal fees (100%)
+#   - 21-day re-release premiums (100%)
+#   - secondary marketplace sale fee (fixed 2.5% = 1/40)
+# IMPORTANT (LEZ v0.4): `treasury` MUST be admitted on chain (funded / used)
+# before any paid registration or sale, or credits to it revert with
+# `UnadmittedPublicActor`. deploy.sh funds it with `treasury_init_fund` if empty.
+# NOTE (fee mode): in `names_core` v8 (`Effect::RequirePrice`), only `treasury`
+# itself pays 0 fee on registration. If `admin == treasury`, admin registers held
+# names at 0 fee (gas only). If `admin != treasury`, `admin` pays the tier fee
+# to `treasury` when registering held names.
+treasury = ""
+
+# Gas funded to the newly deployed registry program account so it can sign the
+# initial `Instruction::Configure` (which MUST be signed by `signer == program`).
+registry_gas_fund = 10_000_000
+
+# Gas funded to the newly deployed NFT program header account (0 to skip).
+nft_header_gas_fund = 10_000_000
+
+# Initial native-token transfer to admit `treasury` on chain if its balance is 0.
+treasury_init_fund = 1_000_000
+
+# -----------------------------------------------------------------------------
+# FIXED FOREVER parameters (compiled into names_core v8 or locked on 1st Configure)
+# deploy.sh cross-checks every compile-time value against `repo/core/src/` and
+# `repo/shortlist/root.hex` and aborts if anything disagrees.
+# -----------------------------------------------------------------------------
+[immutable]
+# [FIXED FOREVER — COMPILE-TIME] Record/Settings layout version (`core/src/lib.rs:VERSION`).
+record_version = 8
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Locked-name Merkle root (`core/src/lib.rs:SHORTLIST_ROOT`, `shortlist/root.hex`):
+# all 1-4 character names (1,823,508) + 21,718 reserved names + 2 sentinels = 1,845,228 leaves.
+shortlist_root = "9778bed49005fe7401d25685a27d9cf3e681fa0582b562336cdb8ee9661d990c"
+
+# [FIXED FOREVER — COMPILE-TIME] Merkle tree depth (`core/src/shortlist.rs:SHORTLIST_DEPTH`).
+shortlist_depth = 21
+
+# [FIXED FOREVER — COMPILE-TIME] Total leaves in `shortlist.bin` incl. 2 sentinels.
+shortlist_leaves = 1845228
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Secondary marketplace protocol fee to treasury: 2.5% = 250 bps = 1/40 (`core/src/market.rs`).
+# Plain transfers (Registry -> NFT and NFT -> Registry) are always 0 protocol fee.
+sale_fee_bps = 250
+min_sale_price = 40
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Grace period after a finite term expires (`core/src/lib.rs:GRACE_MS` = 30 * 86_400_000 ms).
+grace_days = 30
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Falling re-release premium duration after grace ends (`core/src/market.rs:PREMIUM_DAYS`).
+# Halves every 24h with linear intra-day interpolation, reaching 0 continuously at day 21.
+premium_days = 21
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Commit-reveal minimum waits (`core/src/lib.rs`):
+#   - Public (`CommitPublic`): 5 min wait, 1 min timestamp validity window.
+#   - Private (`Commit`):      15 min wait, 10 min timestamp validity window.
+#   - Max commitment age:      24 hours (`MAX_COMMIT_AGE_MS`).
+public_wait_minutes = 5
+private_wait_minutes = 15
+commit_max_age_hours = 24
+
+# [FIXED FOREVER — COMPILE-TIME]
+# Finite term durations in days (`core/src/lib.rs:TERM_LENGTHS_MS`); term 3 is permanent (`u64::MAX`).
+term_days = [30, 365, 1825]
+
+# [FIXED FOREVER — INITIAL CONFIGURE]
+# Reminder flag: `Settings.nft_program` is written ONCE on the deployer's first
+# `Instruction::Configure` and can NEVER be changed afterwards (`Effect::WriteSettings`).
+# Must remain `true` to acknowledge this invariant.
+nft_program_binding_is_permanent = true
+
+# -----------------------------------------------------------------------------
+# Initial on-chain Settings (ALL values in [registry] are ADMIN-ADJUSTABLE)
+# -----------------------------------------------------------------------------
+[registry]
+# [ADMIN-ADJUSTABLE] Pricing mode: "fee" (0) or "deposit" (1).
+# Monday launch uses "fee" (paid names with terms + permanent).
+mode = "fee"
+
+# [ADMIN-ADJUSTABLE] Deposits [normal, three_char] (unused in fee mode; kept [0, 0]).
+deposits = [0, 0]
+
+# [ADMIN-ADJUSTABLE via Configure or SetPremium]
+# Day-0 re-release premium in LEZ base units after the 30-day grace period ends.
+# Halves daily over 21 days to 0. Default = 4,000,000,000 (10x a 5-char permanent name).
+# Set to 0 to disable the re-release premium.
+premium_start = 4_000_000_000
+
+# [ADMIN-ADJUSTABLE via Configure or SetPrice]
+# Price table `[price_tier][term]` in LEZ native base units.
+# Columns: [30 days (1/10x), 1 year (1x), 5 years (4x), permanent (20x)].
+# Defaults decided by Jef:
+#   5 chars (and admin-placed 1-4):  2M / 20M / 80M / 400M LEZ
+#   6-7 chars:                     500k /  5M / 20M / 100M LEZ
+#   8+ chars:                      100k /  1M /  4M /  20M LEZ
+[registry.prices]
+tier_5      = [2_000_000, 20_000_000, 80_000_000, 400_000_000]
+tier_6_7    = [  500_000,  5_000_000, 20_000_000, 100_000_000]
+tier_8_plus = [  100_000,  1_000_000,  4_000_000,  20_000_000]
+
+# [ADMIN-ADJUSTABLE via Configure]
+# Legacy chain snapshot claims (disabled by default for the clean v0.4 testnet launch).
+# Set `enabled = true` and fill root/until/program only if enabling legacy claims.
+[registry.claims]
+enabled = false
+claims_root = "0000000000000000000000000000000000000000000000000000000000000000"
+claims_until = 0
+claims_program = "11111111111111111111111111111111"
+
+# -----------------------------------------------------------------------------
+# Held names for `post-deploy.sh` (admin registers, then transfers to owner)
+# -----------------------------------------------------------------------------
+# Every `owner` is a `Public/<base58>` or `Private/<base58>` account ID (never a key).
+# `term` is one of "30d", "1y", "5y", "permanent".
+# WARNING: Transferring a name to the wrong account ID CANNOT be undone!
+
+[[held_names]]
+name = "jef"
+owner = ""          # e.g. "Private/<Jef's v0.4 private account ID>"
+term = "permanent"
+note = "Jef's primary name (3 chars, locked)"
+
+[[held_names]]
+name = "logos"
+owner = ""          # e.g. "Private/<Logos held account ID>"
+term = "permanent"
+note = "Logos project name (reserved list, locked)"
+
+[[held_names]]
+name = "web"
+owner = ""          # e.g. "Public/<web gateway/site holder account ID>"
+term = "permanent"
+note = "LNS web / gateway showcase name (3 chars, locked)"
+
+[[held_names]]
+name = "android"
+owner = ""          # e.g. "Public/<Android app holder account ID>"
+term = "permanent"
+note = "LNS Android app name (reserved/held)"
+
+# Additional project names referenced in notes/repo — uncomment if Jef wants them
+# placed on launch day as well:
+#
+# [[held_names]]
+# name = "names"
+# owner = ""
+# term = "permanent"
+# note = "Names app / wallet brand name (reserved list, locked)"
+#
+# [[held_names]]
+# name = "nameswallet"
+# owner = ""
+# term = "permanent"
+# note = "Names Wallet forward -> names (reserved list, locked)"
+#
+# [[held_names]]
+# name = "sites"
+# owner = ""
+# term = "permanent"
+# note = "Static sites directory mirror lns://sites (reserved list, locked)"
+#
+# [[held_names]]
+# name = "apps"
+# owner = ""
+# term = "permanent"
+# note = "App store / publisher index name (4 chars, locked)"
+#
+# [[held_names]]
+# name = "logosappstore"
+# owner = ""
+# term = "permanent"
+# note = "Logos App Store name (reserved list, locked)"
+
+# -----------------------------------------------------------------------------
+# Post-deploy end-to-end verification (`post-deploy.sh`)
+# -----------------------------------------------------------------------------
+[post_deploy]
+# Non-locked 8+ char names used to test real public (5m wait) and private (15m wait)
+# registrations end to end. Pick fresh names (not on the reserved list).
+smoke_public_name = "lns-smoke-pub-v04"
+smoke_private_name = "lns-smoke-priv-v04"
+smoke_term = "30d"
+
+# Optional separate test wallet directory (`LEE_WALLET_HOME_DIR`) for smoke tests
+# so smoke accounts stay separate from the admin/treasury deployer wallet.
+# Leave empty to reuse the active wallet (with non-admin accounts).
+smoke_wallet_dir = ""
+
+# Accounts used for the public & private E2E checks (must NOT be `treasury` so
+# real fee payment to `treasury` is exercised, and must NOT be `admin` so the
+# non-membership shortlist proof path is exercised).
+smoke_public_owner = ""    # "Public/<base58>"
+smoke_private_owner = ""   # "Private/<base58>"
+
+# Name whose tied NFT mint & lockstep link will be checked on `lez_nft` v3.
+# Defaults to `smoke_public_name` if empty.
+nft_check_name = ""
