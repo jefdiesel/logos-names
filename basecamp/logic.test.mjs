@@ -311,6 +311,7 @@ import { divCeil40, saleSplit, termLabel, quotePrice, graceAndPremiumText, disco
 {
   const logicSource = readFileSync(new URL("./qml/logic.mjs", import.meta.url), "utf8");
   check("no BigInt in logic.mjs", /\bBigInt\b/.test(logicSource), false);
+  check("no BigInt literals in logic.mjs", /(^|[^\w.])\d+n\b/m.test(logicSource.replace(/\/\/.*$/gm, "")), false);
 
   check("divCeil40 boundaries", [divCeil40("0"), divCeil40("1"), divCeil40("39"), divCeil40("40"), divCeil40("41"), divCeil40("1000"), divCeil40("bad")],
     ["0", "1", "1", "1", "2", "25", null]);

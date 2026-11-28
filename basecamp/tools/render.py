@@ -19,7 +19,11 @@ JEF_AVATAR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAMAAADXqc3K
 # base64 (from avatar.rs's jef test, run with PRINT_JEF=1).
 JEF_PIXELS = {"width": 24, "height": 24, "pixels": "EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/wgHDf8IBw3/CAcN/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/CAcN/010Qv9NdEL/TXRC/wgHDf8IBw3/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/wgHDf9NdEL/TXRC/010Qv9NdEL/TXRC/010Qv9NdEL/CAcN/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/CAcN/010Qv9NdEL/TXRC/010Qv9NdEL/TXRC/010Qv9NdEL/TXRC/wgHDf8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/Olgy/zpYMv+W1nj/ltZ4/5bWeP+W1nj/ltZ4/5bWeP+W1nj/Olgy/zpYMv8IBw3/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/wgHDf86WDL/Olgy/5bWeP8SEBr/EhAa/xIQGv8SEBr/EhAa/xIQGv8SEBr/ltZ4/zpYMv86WDL/CAcN/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/wgHDf86WDL/ltZ4/xIQGv8AAAD/faJp/32iaf8AAAD/faJp/32iaf8AAAD/EhAa/5bWeP8jNR7/CAcN/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/wgHDf+W1nj/EhAa/32iaf99omn/faJp/32iaf99omn/faJp/32iaf99omn/faJp/xIQGv+W1nj/CAcN/3h4d/8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/CAcN/zpYMv+W1nj/EhAa/32iaf99omn/XnJT/15yU/99omn/faJp/32iaf9eclP/XnJT/xIQGv+W1nj/IzUe/3Nzdv8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/CAcN/zpYMv+W1nj/EhAa/32iaf99omn//wAA/wAAAP99omn/faJp/32iaf//AAD/AAAA/xIQGv+W1nj/IzUe/3Nzdv8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/CAcN/zpYMv+W1nj/EhAa/32iaf99omn/XnJT/32iaf99omn/faJp/32iaf9eclP/faJp/xIQGv+W1nj/IzUe/3Nzdv8RERD/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/Olgy/5bWeP8SEBr/EhAa/32iaf99omn/faJp/32iaf99omn/faJp/32iaf99omn/faJp/xIQGv8SEBr/ltZ4/4GKfv8IBw3/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/Olgy/5bWeP8SEBr/EhAa/1dxSf99omn/faJp/32iaf99omn/AAAA/wAAAP99omn/faJp/xIQGv8SEBr/ltZ4/4GKfv8IBw3/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/Olgy/5bWeP8SEBr/EhAa/1dxSf9XcUn/faJp/32iaf99omn/faJp/32iaf99omn/V3FJ/xIQGv8SEBr/ltZ4/yM1Hv8IBw3/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/Olgy/5bWeP8SEBr/EhAa/1dxSf9XcUn/V3FJ/1dxSf9XcUn/V3FJ/1dxSf8AAAD/AAAA/wAAAP8AAAD/AAAA/wAAAP8IBw3/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/Olgy/5bWeP8SEBr/EhAa/1dxSf9XcUn/V3FJ/1dxSf8oGwn/KBsJ/wAAAP/Gxsb/xsbG/8bGxv/Gxsb/xsbG/+JbJv8AAAD/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/EhAa/zpYMv+W1nj/EhAa/32iaf9XcUn/V3FJ/1dxSf9CUDr/V3FJ/1dxSf8AAAD/AAAA/wAAAP8AAAD/AAAA/wAAAP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8IBw3/EhAa/zpYMv+W1nj/EhAa/32iaf99omn/V3FJ/1dxSf9XcUn/V3FJ/1dxSf9XcUn/EhAa/5bWeP8jNR7/EhAa/wgHDf8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/CAcN/xIQGv+W1nj/EhAa/32iaf99omn/faJp/wAAAP8SEBr/EhAa/xIQGv8SEBr/ltZ4/yM1Hv8IBw3/CAcN/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/wgHDf+W1nj/EhAa/32iaf99omn/faJp/xIQGv8SEBr/EhAa/5bWeP+W1nj/IzUe/wgHDf8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/EREQ/wgHDf8IBw3/EhAa/32iaf99omn/faJp/xIQGv8IBw3/CAcN/wgHDf8IBw3/CAcN/xEREP8RERD/EREQ/xEREP8RERD/EREQ/xEREP8RERD/"}
 RECORDS = {
+    "grace": {"nft": {"token_id": "71" * 32, "token_account": "Public/9iHYqf77noB5oyGrxhL5GNVLSKcKQZeGBzp294fMi3Mv", "program": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r", "shielded": False},
+              "listing": {"price": "2000000", "fee": "50000", "seller_receives": "1950000", "pay_to": "Public/" + BOB, "expires_at": None, "nonce": 1, "in_market": True}},
     "jef": {"deposit": "0", "account": None, "npk": "a1e38c92", "vpk": "4865",
+            "nft": {"token_id": "72" * 32, "token_account": "Public/2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2", "program": "Public/CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r", "shielded": True},
+            "subname_sale": {"price": "500", "payout": "Public/" + ALICE},
             "owner_tag": "1f7a805e9c3d41b2a07e55c1d2f3e4a5b6c7d8e9f0a1b2c3d4e5f60718ab992",
             "texts": {"avatar": JEF_AVATAR, "color": "#96d678", "theme": "dark"}},
     "hopper": {"deposit": "100000000", "account": CAROL, "npk": "b2f49d03", "vpk": "5976",
@@ -207,6 +211,17 @@ BRIDGE = r"""
             if (method === "avatar") return ok(args[0] === "jef" ? %(avatar)s : null)
             if (method === "page_preview") { var drafts = %(pages)s; return ok(drafts["jef"]) }
             if (method === "page_view" || method === "page") { var pages = %(pages)s; return ok(pages[args[0]] || null) }
+            // LNS v8 (LEZ 0.4): a fee-mode quote, the sites directory, the market (stand-ins).
+            if (method === "quote_registration") return ok({ name: String(args[0]), display: String(args[0]), tier: "normal", price_tier: 1, term: String(args[1] || "1y"),
+                mode: "fee", deposit: "0", base_price: "5000000", rerelease_premium: (%(mock)s).premium || "0", total_price: "5000000", in_grace: false, grace_ends: null,
+                premium_ends: null, claims_until: null, prices: { "30d": "500000", "1y": "5000000", "5y": "20000000", "permanent": "100000000" } })
+            if (method === "sites_list") return ok({ total_listed: 3, sites: [
+                { name: "jef", title: "Jef's notes", updated_at: Date.now() - 3600000, url: "lns://jef" },
+                { name: "hopper", title: "Compilers and nanoseconds", updated_at: Date.now() - 86400000, url: "lns://hopper" },
+                { name: "turing", title: "", updated_at: Date.now() - 172800000, url: "lns://turing" }] })
+            if (method === "market_listings") return ok([{ name: "grace", price: "2000000", fee: "50000", seller_receives: "1950000", pay_to: "Public/%(bob)s", expires_at: null }])
+            if (/^(renew_name|list_name|cancel_listing|buy_name|transfer_via_nft|subname_create|subname_revoke|subname_set_sale|subname_buy|set_discover|cli_register_term)$/.test(method))
+                return ok({ id: String(args[0]).replace(".", "--") + "-1792000000020", name: args[0], kind: method, state: "running", started: Date.now() - 15000 })
             if (method === "resolve") {
                 var name = String(args[0]).toLowerCase().replace(/\.lez$/, "")
                 for (var i = 0; i < names.length; i++) {
@@ -216,7 +231,8 @@ BRIDGE = r"""
                     return ok({ name: name, display: name + ".lez", owner_tag: rich.owner_tag || ("c0ffee" + names[i].owner.substr(0, 10)),
                         expires: null, never: true, lapsed: false, deposit: rich.deposit !== undefined ? rich.deposit : "100000000",
                         account: rich.account !== undefined ? rich.account : names[i].owner, npk: rich.npk || null, vpk: rich.vpk || null,
-                        texts: rich.texts || {} })
+                        texts: rich.texts || {}, nft: rich.nft || null, listing: rich.listing || null, subname_sale: rich.subname_sale || null,
+                        subname: false, permanent: true, in_grace: false, grace_ends: null, site_listed: null, discover_off: false })
                 }
                 return ok(null)
             }
@@ -333,6 +349,13 @@ SCENARIOS = {
     "settings": 'root.manage("jef")',
     "release": 'root.manage("grace"); root.editTab = "giveup"; root.confirmingRelease = true',
     "edit-page": 'root.manage("jef"); root.editTab = "page"',
+    "edit-sell": 'root.manage("jef"); root.editTab = "sell"',
+    "edit-sell-listed": 'root.manage("grace"); root.editTab = "sell"',
+    "edit-subnames": 'root.manage("jef"); root.editTab = "subnames"',
+    "name-forsale": 'root.show("grace")',
+    "name-nft": 'root.show("jef")',
+    "sites-browse": 'root.section = "search"; root.loadSites()',
+    "register-term": 'root.show("satoshi"); root.registerTerm = "permanent"; root.loadQuote("satoshi", "permanent")',
     "edit-giveup": 'root.manage("grace"); root.editTab = "giveup"',
     "register-public": 'root.show("satoshi"); root.publicRegisterOpen = true',
     "register-new": 'root.openRegister()',
@@ -480,9 +503,11 @@ def main():
             handle.write(source.replace(marker, marker + bridge, 1))
         try:
             result = subprocess.run([qml, handle.name], capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            # One scenario that never quits doesn't stop the rest (M-8).
-            print(scenario, "FAILED", "  it didn't quit within 60 s", sep="\n")
+        except subprocess.TimeoutExpired as stuck:
+            # One scenario that never quits doesn't stop the rest (M-8); say what it printed.
+            said = stuck.stderr.decode() if isinstance(stuck.stderr, bytes) else (stuck.stderr or "")
+            tail = [line for line in said.splitlines() if "qt.qpa.fonts" not in line and line.strip()][-6:]
+            print(scenario, "FAILED", "  it didn't quit within 60 s", *("  " + line for line in tail), sep="\n")
             continue
         finally:
             os.unlink(handle.name)  # never leave it beside Main.qml: the package build copies qml/ whole

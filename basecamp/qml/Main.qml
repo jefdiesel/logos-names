@@ -2643,16 +2643,16 @@ Item {
         confirmingRelease = false
         editTransferViaNft = false
         subnameRevocable = true
-        subnameSaleOn = record !== null && record.subname_sale !== null
-        subnameSalePriceField.text = record !== null && record.subname_sale !== null ? String(record.subname_sale.price || "0") : "0"
-        subnameSalePayoutField.text = record !== null && record.subname_sale !== null ? String(record.subname_sale.payout || "") : (cliPublic ? "Public/" + cliPublic.account : "")
+        subnameSaleOn = record !== null && !!record.subname_sale
+        subnameSalePriceField.text = record !== null && !!record.subname_sale ? String(record.subname_sale.price || "0") : "0"
+        subnameSalePayoutField.text = record !== null && !!record.subname_sale ? String(record.subname_sale.payout || "") : (cliPublic ? "Public/" + cliPublic.account : "")
         subnameCreateLabel.text = ""
         subnameCreateOwner.text = ""
         subnameRevokeLabel.text = ""
-        listPriceField.text = record !== null && record.listing !== null ? String(record.listing.price || "") : ""
-        listPayToField.text = record !== null && record.listing !== null ? String(record.listing.pay_to || "") : (cliPublic ? "Public/" + cliPublic.account : "")
+        listPriceField.text = record !== null && !!record.listing ? String(record.listing.price || "") : ""
+        listPayToField.text = record !== null && !!record.listing ? String(record.listing.pay_to || "") : (cliPublic ? "Public/" + cliPublic.account : "")
         listExpiresField.text = ""
-        listPublicName = record !== null && record.listing !== null ? !!record.listing.in_market : false
+        listPublicName = record !== null && !!record.listing ? !!record.listing.in_market : false
         discoverTitleField.text = record !== null && record.texts && record.texts.display ? String(record.texts.display) : ""
         editTab = "profile"
         tool = "settings"
@@ -8286,13 +8286,13 @@ Item {
                             visible: root.registerQuote !== null && root.registerQuote.in_grace === true
                             color: root.alarm
                             font.pixelSize: root.px(15)
-                            text: "This name is in its 30-day grace period" + (root.registerQuote.grace_ends ? " until " + root.dated(root.registerQuote.grace_ends) : "") + ". Only the previous holder can renew it until grace ends."
+                            text: "This name is in its 30-day grace period" + (root.registerQuote && root.registerQuote.grace_ends ? " until " + root.dated(root.registerQuote.grace_ends) : "") + ". Only the previous holder can renew it until grace ends."
                         }
                         Hint {
                             visible: root.registerQuote !== null && Logic.someAmount(root.registerQuote.rerelease_premium)
                             color: root.brass
                             font.pixelSize: root.px(15)
-                            text: "Recently lapsed: a 21-day falling re-release premium of " + root.grouped(root.registerQuote.rerelease_premium) + " applies" + (root.registerQuote.premium_ends ? " (falls to 0 on " + root.dated(root.registerQuote.premium_ends) + ")" : "") + "."
+                            text: !root.registerQuote ? "" : "Recently lapsed: a 21-day falling re-release premium of " + root.grouped(root.registerQuote.rerelease_premium) + " applies" + (root.registerQuote.premium_ends ? " (falls to 0 on " + root.dated(root.registerQuote.premium_ends) + ")" : "") + "."
                         }
                         Link {
                             text: root.registerHow ? "Hide how it works" : "How it works: three steps"
@@ -9287,7 +9287,7 @@ Item {
                                 Layout.fillWidth: true
                                 readonly property string priceErr: listPriceField.text.trim() === "" ? "" : Logic.listingPriceProblem(listPriceField.text)
                                 readonly property var split: listPriceField.text.trim() !== "" && priceErr === "" ? Logic.saleSplit(Logic.amountDigits(listPriceField.text)) : null
-                                Text { text: root.record !== null && root.record.listing !== null ? "Update listing" : "List for sale"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Text { text: root.record !== null && !!root.record.listing ? "Update listing" : "List for sale"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
                                 Hint { font.pixelSize: root.px(15); text: "Set a price (minimum 40). When someone buys it, 2.5% goes to the treasury and 97.5% goes to your payout account." }
                                 Field {
                                     id: listPriceField
@@ -9305,8 +9305,8 @@ Item {
                                     visible: listSaleCard.split !== null
                                     Layout.fillWidth: true
                                     spacing: 4
-                                    Fact { label: "Protocol fee (2.5%)"; value: listSaleCard.split !== null ? root.grouped(listSaleCard.split.fee) : "" }
-                                    Fact { label: "You receive (97.5%)"; value: listSaleCard.split !== null ? root.grouped(listSaleCard.split.seller) : "" }
+                                    Fact { label: "Protocol fee"; value: listSaleCard.split !== null ? root.grouped(listSaleCard.split.fee) + " (2.5%)" : "" }
+                                    Fact { label: "You receive"; value: listSaleCard.split !== null ? root.grouped(listSaleCard.split.seller) + " (97.5%)" : "" }
                                 }
                                 Field {
                                     id: listPayToField
