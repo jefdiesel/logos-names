@@ -7533,7 +7533,7 @@ mod tests {
         let (mut names, dir) = with_wallet("self-transfer", "exit 0");
         let derived = registry::derive("ovone");
         let holder = registry::parse_account(PRIVATE).unwrap();
-        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved { owner: registry::owner_tag(&derived.id, &holder), expires: registry::NEVER, profile: registry::Profile::default(), claimed: false })));
+        registry::RECORDS.with(|records| records.borrow_mut().push((derived.id, registry::Resolved::simple(registry::owner_tag(&derived.id, &holder), registry::NEVER, registry::Profile::default(), false))));
         let refused = parsed(&names.cli_transfer("ovone".into(), format!("Private/{PRIVATE}")));
         assert_eq!(refused["error"], format!("{PRIVATE} already holds ovone, so nothing was sent"), "{refused}");
         assert!(std::fs::read_dir(dir.join("jobs")).map_or(true, |entries| entries.count() == 0), "no job");

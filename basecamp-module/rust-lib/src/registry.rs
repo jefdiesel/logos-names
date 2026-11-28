@@ -54,6 +54,7 @@ const SUBNAME_COMMITMENT_DOMAIN: &[u8] = b"logos-names/v7/sub-commitment";
 const GEN_REGISTER_DOMAIN: &[u8] = b"logos-names/v7/gen/register";
 const NFT_TOKEN_ID_DOMAIN: &[u8] = b"logos-names/v8/nft-token/";
 const NFT_TOKEN_SEED_DOMAIN: &[u8] = b"lez-nft/v3/token/";
+const NFT_CONFIG_SEED_DOMAIN: &[u8] = b"lez-nft/v3/config";
 const MARKET_BUCKET_SEED_DOMAIN: &[u8] = b"logos-names/v8/market/";
 const SITE_DIR_HEADER_SEED_DOMAIN: &[u8] = b"logos-names/v8/sites-meta";
 const SITE_BUCKET_SEED_DOMAIN: &[u8] = b"logos-names/v8/sites/";
@@ -405,6 +406,11 @@ pub fn nft_token_id(slot: &NameId, mint_generation: &[u8; 32]) -> [u8; 32] {
 
 pub fn nft_token_seed(token_id: &[u8; 32]) -> [u8; 32] {
     sha256(&[NFT_TOKEN_SEED_DOMAIN, token_id])
+}
+
+/// The seed of `lez_nft::config_address(nft)`, declared by every Register that mints.
+pub fn nft_config_seed() -> [u8; 32] {
+    sha256(&[NFT_CONFIG_SEED_DOMAIN])
 }
 
 pub fn nft_token_address(nft_program: &AccountId, token_id: &[u8; 32]) -> AccountId {

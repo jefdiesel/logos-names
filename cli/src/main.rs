@@ -429,8 +429,9 @@ enum Command {
         #[arg(long, value_parser = parse_account)]
         payer: Option<AccountId>,
     },
-    /// Set the registry's admin, treasury, prices, premium and NFT program. Anyone may while
-    /// it has no settings; afterwards the wallet must hold the admin's key.
+    /// Set the registry's admin, treasury, prices, premium and NFT program. The first
+    /// settings are signed by the registry program's own account (the wallet must hold the
+    /// program's key) and bind the NFT program for good; afterwards the admin's key signs.
     Configure {
         #[arg(long)]
         admin: AccountId,
@@ -1861,9 +1862,10 @@ impl Client {
             mentions.push(self.registry_actor(settings_seed()));
             mentions.push(self.registry_actor(commitment_seed(&promised)));
             // Declare the new tied NFT token PDA (and old token/market/site cleanup if overwriting a lapsed name).
-            let gen = v8::register_generation(&slot, &holder, claimed, &secret);
-            let new_token = nft_token_id(&slot, &gen);
+            let r#gen = v8::register_generation(&slot, &holder, claimed, &secret);
+            let new_token = nft_token_id(&slot, &r#gen);
             self.push_nft_mention(&mut mentions, settings.as_ref(), &new_token);
+            self.push_nft_config_mention(&mut mentions, settings.as_ref());
             if let Some(prev) = &live_existing {
                 if prev.nft_token_id != new_token {
                     self.push_nft_mention(&mut mentions, settings.as_ref(), &prev.nft_token_id);
@@ -2146,9 +2148,10 @@ impl Client {
         let mut mentions = self.on_record_and_page(&slot, holder);
         mentions.push(self.registry_actor(settings_seed()));
         let new_owner = owner_tag(&slot, &holder);
-        let gen = v8::claim_generation(&slot, &new_owner, now);
-        let new_token = nft_token_id(&slot, &gen);
+        let r#gen = v8::claim_generation(&slot, &new_owner, now);
+        let new_token = nft_token_id(&slot, &r#gen);
         self.push_nft_mention(&mut mentions, Some(&settings), &new_token);
+        self.push_nft_config_mention(&mut mentions, Some(&settings));
         if let Some(prev) = &existing {
             if prev.nft_token_id != new_token {
                 self.push_nft_mention(&mut mentions, Some(&settings), &prev.nft_token_id);

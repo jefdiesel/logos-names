@@ -15,7 +15,7 @@
 
 use crate::registry::{
     account_text, bucket_of, commitment, commitment_seed, deposit_seed, is_valid_name,
-    market_bucket_seed, name_seed, nft_token_id, nft_token_seed, owner_tag, page_seed, pda,
+    market_bucket_seed, name_seed, nft_config_seed, nft_token_id, nft_token_seed, owner_tag, page_seed, pda,
     price_tier_for_len, register_generation, rerelease_premium, seal_page,
     settings_seed, site_bucket_seed, site_dir_header_seed, slot_id, AccountId, Derived, NameId,
     OwnerTag, Profile, Registry, Resolved, Settings, SiteDirOp, SubnameSale, Writer,
@@ -310,15 +310,20 @@ pub fn encode_buy(
     writer.0
 }
 
-/// UNCONFIRMED ENCODING: `lez_nft` v3 `Message::Instruction(Instruction::Transfer { token_id, new_owner, now })`.
-/// Variant index (`0x02`) and field order match `notes/NFT-V3-CHANGES.md` / `cli/src/v8.rs` and must be
-/// confirmed against the `lez_nft` v3 crate when compiling.
+/// `lez_nft` v3 `Message::Instruction(Instruction::Transfer { token_id, new_owner,
+/// sealed: None, now: Some(now), linked_target: Some(slot) })` (lez-nft v3-lez04:
+/// `Message::Instruction` = 0, `Instruction::Transfer` = 3). Pinned to lez_nft's
+/// Borsh output in the tests.
 #[allow(dead_code)]
-pub fn encode_lez_nft_transfer(token_id: &[u8; 32], new_owner: &OwnerTag, now: u64) -> Vec<u8> {
-    let mut writer = Writer(vec![0, 2]);
+pub fn encode_lez_nft_transfer(token_id: &[u8; 32], new_owner: &OwnerTag, now: u64, slot: &NameId) -> Vec<u8> {
+    let mut writer = Writer(vec![0, 3]);
     writer.0.extend(token_id);
     writer.0.extend(new_owner);
+    writer.0.push(0); // sealed: None
+    writer.0.push(1); // now: Some
     writer.u64(now);
+    writer.0.push(1); // linked_target: Some(slot)
+    writer.0.extend(slot);
     writer.0
 }
 
@@ -583,6 +588,8 @@ impl Registry {
             let gen = register_generation(&slot, &owner_t, now, secret);
             let token_id = nft_token_id(&slot, &gen);
             reached.push(foreign_pda_actor(&s.nft_program, nft_token_seed(&token_id)));
+            // lez_nft checks on every linked Mint that the registry is authorised in its Config.
+            reached.push(foreign_pda_actor(&s.nft_program, nft_config_seed()));
         }
         if let Some(old) = existing.as_ref() {
             self.push_cleanup_mentions(old, &slot, settings.as_ref(), &mut reached);
@@ -858,6 +865,90 @@ mod tests {
         let upsert_page = encode_set_page(&id, &[1], &SiteDirOp::Upsert { name: "alice".into(), title: "Hi".into(), page: 0, now: NOW });
         assert_eq!(&upsert_page[..2], &[0, 3]);
         assert_eq!(sale_split(MIN_SALE_PRICE), (39, 1));
+    }
+
+    /// Everything here against `testdata/v8-core-vectors.json`, which is written by
+    /// compiled `names_core` (b63ec93 + the deed constant) and `lez_nft_core`
+    /// (3562907): instructions, account layouts, derivations, the sale split and
+    /// the premium curve. Regenerate it with testdata/core-vectors (cargo run), never by hand.
+    #[test]
+    fn v8_core_vectors() {
+        use crate::registry::{
+            bucket_of, market_bucket_address, nft_config_seed, nft_token_address, nft_token_id, pda,
+            register_generation, rerelease_premium, site_bucket_address, site_dir_header_address,
+            subname_commitment, subname_page_address, subname_record_address, tiered_id, Listing,
+            MarketBucket, Resolved, SiteBucket, SiteDirHeader, SubnameKind, SubnameRecord, SubnameSale,
+        };
+        let v: Value = serde_json::from_str(include_str!("../testdata/v8-core-vectors.json")).expect("JSON");
+        let x = |k: &str| v[k].as_str().unwrap_or_else(|| panic!("vector {k}")).to_owned();
+        let (id, sub, tag, secret, gen, tok) = ([0x31u8; 32], [0x32u8; 32], [0x41u8; 32], [0x51u8; 32], [0x61u8; 32], [0x71u8; 32]);
+        let length = LengthProof::Membership(Membership { index: 7, tier: TIER_NORMAL, path: vec![[0x81; 32], [0x82; 32]] });
+        assert_eq!(hex(&encode_register(&id, &[1, 2, 3], 3, 20_000_000, Some(&[0x91; 32]), 1_700_000_000_000, &secret, false, &length, 1)), x("register"));
+        assert_eq!(hex(&encode_renew(&id, 1, 5_000_000, Some(&[0x91; 32]), 1_700_000_000_001)), x("renew"));
+        assert_eq!(hex(&encode_set_record(&id, &[9], &SiteDirOp::Keep)), x("set_record_keep"));
+        assert_eq!(hex(&encode_set_page(&id, &[8, 7], &SiteDirOp::Upsert { name: "alice".into(), title: "Alice's site".into(), page: 2, now: 5 })), x("set_page_upsert"));
+        assert_eq!(hex(&encode_set_record(&id, &[], &SiteDirOp::Remove)), x("set_record_remove"));
+        assert_eq!(hex(&encode_transfer(&id, &tag, 77)), x("transfer"));
+        assert_eq!(hex(&encode_release(&id, 1_000_000)), x("release"));
+        assert_eq!(hex(&encode_commit(&[0xC1; 32], 11)), x("commit"));
+        assert_eq!(hex(&encode_commit_public(&[0xC2; 32], 12)), x("commit_public"));
+        assert_eq!(hex(&encode_set_subname_sale(&id, Some(SubnameSale { price: 500, payout: [0x92; 32] }))), x("set_subname_sale_on"));
+        assert_eq!(hex(&encode_set_subname_sale(&id, None)), x("set_subname_sale_off"));
+        assert_eq!(hex(&encode_create_subname(&id, &sub, &tag, true, &[4], 13)), x("create_subname"));
+        assert_eq!(hex(&encode_revoke_subname(&id, &sub, 14)), x("revoke_subname"));
+        assert_eq!(hex(&encode_buy_subname(&id, &sub, &[5, 6], 500, Some(&[0x92; 32]), 15, &secret)), x("buy_subname"));
+        assert_eq!(hex(&encode_list(&id, 1000, &[0x93; 32], Some(99), 16, Some("alice"))), x("list"));
+        assert_eq!(hex(&encode_list(&id, 40, &[0x93; 32], None, 17, None)), x("list_unlisted"));
+        assert_eq!(hex(&encode_cancel(&id)), x("cancel"));
+        assert_eq!(hex(&encode_buy(&id, 1000, &[0x93; 32], &[0x91; 32], 3, 18)), x("buy"));
+        assert_eq!(hex(&encode_lez_nft_transfer(&tok, &tag, 42, &id)), x("nft_transfer"));
+
+        // Accounts decode as core encodes them.
+        let record = unhex(&x("name_record")).unwrap();
+        let r = Resolved::decode(&record, &[0; 32], "alice").expect("a v8 record");
+        assert_eq!((r.version, r.owner, r.expires, r.claimed, r.price_tier, r.generation), (8, tag, 123, false, 1, gen));
+        assert_eq!(r.subname_sale, Some(SubnameSale { price: 500, payout: [0x92; 32] }));
+        assert_eq!((r.nft_token_id, r.nft_shielded, r.listing_nonce, r.site_listed), (tok, true, 3, Some(2)));
+        assert_eq!(r.listing, Some(Listing { price: 1000, pay_to: [0x93; 32], expires_at: Some(99), nonce: 3, in_market: true }));
+        let plain = Resolved::decode(&unhex(&x("name_record_plain")).unwrap(), &[0; 32], "alice").expect("a plain record");
+        assert_eq!((plain.expires, plain.claimed, plain.listing, plain.site_listed, plain.subname_sale), (u64::MAX, true, None, None, None));
+        let s = Settings::decode(&unhex(&x("settings")).unwrap()).expect("v8 settings");
+        assert_eq!((s.admin, s.treasury, s.mode, s.deposits, s.claims_root, s.claims_until, s.claims_program), ([0xA1; 32], [0x91; 32], MODE_FEE, [7, 8], [0xB1; 32], 19, [0xB2; 32]));
+        assert_eq!((s.premium_start, s.nft_program), (4_000_000_000, [0x11; 32]));
+        assert_eq!(s.prices[0][3], 400_000_000);
+        assert_eq!(s.prices[2][0], 100_000);
+        let sr = SubnameRecord::decode(&unhex(&x("subname_record")).unwrap()).expect("a subname record");
+        assert_eq!((sr.owner, sr.kind, sr.sealed), (tag, SubnameKind::Revocable { parent_generation: gen }, vec![3]));
+        let mb = MarketBucket::decode(&unhex(&x("market_bucket")).unwrap()).expect("a market bucket");
+        assert_eq!((mb.entries.len(), mb.entries[0].price, mb.entries[0].display_name.as_deref(), mb.entries[0].nonce), (1, 1000, Some("alice"), 3));
+        let sb = SiteBucket::decode(&unhex(&x("site_bucket")).unwrap()).expect("a site bucket");
+        assert_eq!((sb.entries[0].name.as_str(), sb.entries[0].title.as_str(), sb.entries[0].name_expires), ("alice", "Alice", 123));
+        let h = SiteDirHeader::decode(&unhex(&x("site_dir_header")).unwrap()).expect("a header");
+        assert_eq!((h.active_page[3], h.total_listed), (2, 9));
+
+        // Derivations.
+        let (reg, nft) = ([0x22u8; 32], [0x11u8; 32]);
+        assert_eq!(x("reg"), hex(&reg));
+        assert_eq!(hex(&register_generation(&id, &tag, 1_700_000_000_000, &secret)), x("register_generation"));
+        assert_eq!(hex(&nft_token_id(&id, &gen)), x("nft_token_id"));
+        assert_eq!(hex(&nft_token_address(&nft, &tok)), x("nft_token_address"));
+        assert_eq!(hex(&pda(&nft, &nft_config_seed())), x("nft_config_address"));
+        assert_eq!(hex(&tiered_id(&id, 1)), x("tiered_id_1"));
+        assert_eq!(hex(&market_bucket_address(&reg, 3)), x("market_bucket_address_3"));
+        assert_eq!(hex(&site_dir_header_address(&reg)), x("site_dir_header_address"));
+        assert_eq!(hex(&site_bucket_address(&reg, 3, 7)), x("site_bucket_address_3_7"));
+        assert_eq!(hex(&subname_record_address(&reg, &id, &sub)), x("subname_record_address"));
+        assert_eq!(hex(&subname_page_address(&reg, &id, &sub)), x("subname_page_address"));
+        assert_eq!(hex(&subname_commitment(&id, &sub, &tag, &secret)), x("subname_commitment"));
+        assert_eq!(bucket_of(&[0xA7; 32]).to_string(), x("bucket_of"));
+        for item in x("sale_split").split(',') {
+            let parts: Vec<u128> = item.split(':').map(|n| n.parse().unwrap()).collect();
+            assert_eq!(sale_split(parts[0]), (parts[1], parts[2]), "sale_split({})", parts[0]);
+        }
+        for item in x("premium").split(',') {
+            let (elapsed, want) = item.split_once(':').unwrap();
+            assert_eq!(rerelease_premium(4_000_000_000, elapsed.parse().unwrap()).to_string(), want, "premium at {elapsed}");
+        }
     }
 
     /// The seeds a change lists as evidence, and the addresses they give, as core

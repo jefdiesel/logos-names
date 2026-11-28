@@ -703,7 +703,7 @@ export function inscribeCanApprove(state) {
     return !!s.plan && !s.problem
 }
 
-// ── LEZ 0.4 LNS Registry v8 helpers (no BigInt — Qt QML compatible) ──
+// ── LEZ 0.4 LNS Registry v8 helpers (plain decimal strings: Qt QML has no big integers) ──
 
 /// Exact arbitrary-length decimal division by 40, rounded up (`ceil(n / 40)`),
 /// used for the 2.5% marketplace treasury fee. Returns null for non-digit input.
