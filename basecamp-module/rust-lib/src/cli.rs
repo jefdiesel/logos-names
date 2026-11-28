@@ -2783,7 +2783,8 @@ impl Jobs {
             }
         }
         self.forget_old();
-        let mut id = format!("{name}-{}", now_ms());
+        // A subname's dot becomes "--" (banned inside names, so it can't collide).
+        let mut id = format!("{}-{}", name.replace('.', "--"), now_ms());
         while self.path(&id, "json").exists() {
             id.push('-');
             id.push('1');
