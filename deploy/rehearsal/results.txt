@@ -66,8 +66,12 @@ fixed before resuming, then post-deploy.sh on the same chain. The final scripts 
 
 == Measured ==========================================================================
 Payer spent 55.4 M in total for both deploys, the registry header's 10 M Configure fund and
-the 8-segment upgrade (default local fees). Registry Configure fee 365896; NFT Configure ~4.4 k.
+the 8-segment upgrade (default local fees). Registry Configure fee 365896.
 Proofs on 8 Colab cores (CPU, real, not dev mode): about 13 minutes each.
+
+Binaries: steps 2-8 ran a `names` built with the directory fix but before the lapsed-name
+guard (unit-tested only: CLI v8:: tests 9/9 pass; module 323 pass, 3 fail on Colab as root:
+file-ownership and a 4 s RPC deadline, not baselined on b54d8aa).
 
 == Known limits (not fixed here) =======================================================
 - The web app (gateway/public/app/register.js) still sends SiteDirOp::Keep on its direct
@@ -77,3 +81,5 @@ Proofs on 8 Colab cores (CPU, real, not dev mode): about 13 minutes each.
   edit after renewal.
 - The CLI labels a locked 1-4 character name as "5 chars" when quoting its price (it is the
   1-5 character tier).
+- Rehearsal wallets were made with a hand-written wallet_config.json; Monday's wallet gets
+  the CLI default (the checklist's first command was tried once, in an empty folder: OK).

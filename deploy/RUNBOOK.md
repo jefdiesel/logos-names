@@ -35,7 +35,9 @@ deploy/test-dry-run.sh
 ```
 LEE_WALLET_HOME_DIR=<wallet> LOGOS_NAMES_RPC=<official rpc> names wallet account new public
 ```
-(fund that payer from the faucet, put its id in `[accounts].deployer_payer`)
+(it creates the wallet and prints its recovery phrase: run it in a plain Terminal, not in an
+agent session, with the output redirected to a mode-600 file kept with the wallet backup;
+then fund that payer from the faucet and put its id in `[accounts].deployer_payer`)
 ```
 LEE_WALLET_HOME_DIR=<wallet> deploy/deploy.sh --params deploy/params.toml
 ```
@@ -174,8 +176,8 @@ a public and a private registration side by side, the tied NFT check (collection
 metadata), list + buy with the 2.5% split, a `cid` site written the way `lns publish` writes it
 (`names profile --cid`) and its sites-directory entry, `discover=off` and back on, an on-chain
 page, a subname, and an in-place upgrade with the header key. Results go to
-`deploy/rehearsal/results.txt` (`--from STEP` appends to it; `--fresh` wipes the whole folder,
-including that file, so copy it out first). Needs `r0vm` 3.1.0 on the machine (the sequencer
+`deploy/rehearsal/results.txt` (`--from STEP` appends to it; a plain run truncates it and
+`--fresh` wipes the whole folder, so copy the tracked file out first). Needs `r0vm` 3.1.0 on the machine (the sequencer
 and the CLI both run guests through it).
 
 The testnet kit (`jefdiesel/logos-execution-zone` branch `testnet-0.4`, still on rc3) needs two
