@@ -34,9 +34,29 @@ Item {
     property var record: null          // the name on the plate
     property string forwardedFrom: ""  // the name asked for, when the plate shows where it forwards
     property var page: null
-    property string editTab: "profile"   // the Edit screen's tab: profile, page or giveup
+    property string editTab: "profile"   // the Edit screen's tab: profile, page, subnames, sell or giveup
     property bool publicRegisterOpen: false
     property bool registering: false       // the "Register a name" screen is open
+    // LEZ 0.4 LNS registry v8 state: terms, quotes, renewal, subnames, marketplace, NFT transfer, sites directory.
+    property string registerTerm: "1y"     // 30d, 1y, 5y or permanent
+    property var registerQuote: null       // quote_registration reply for `missing`
+    property bool quoteLoading: false
+    property bool registerChecking: false
+    property bool renewOpen: false
+    property string renewTerm: "1y"
+    property var renewQuote: null
+    property bool renewQuoteLoading: false
+    property var sitesList: []             // verified sites from sites_list("")
+    property int sitesTotal: 0
+    property bool sitesLoading: false
+    property bool sitesLoaded: false
+    property string sitesError: ""
+    property bool subnameRevocable: true
+    property bool subnameSaleOn: false
+    property bool listPublicName: false
+    property bool buyConfirm: false
+    property bool transferViaNft: false
+    property bool editTransferViaNft: false
     // Get tokens: bridging from the person's Logos Blockchain node into LEZ (`cli_bridge`).
     property bool gettingTokens: false     // the "Get tokens" screen is open
     property string bridgeKey: ""          // the Logos Blockchain public key last bridged from, as the module keeps it
@@ -515,7 +535,7 @@ Item {
         return name + (channel ? " · channel " + Logic.keyShown(channel) : "")
     }
 
-    /// Reads the deposit a name would lock. Until it is known, registering waits.
+    /// Reads the deposit and v8 term prices a name would cost. Until known, registering waits.
     function loadDeposit(name) {
         deposit = null
         askLater("deposit", [name], function(value) {
@@ -524,6 +544,61 @@ Item {
         }, function(message) {
             console.log("names_ui: deposit:", message)
         })
+        loadQuote(name, registerTerm)
+    }
+
+    /// Reads the on-chain v8 price table and any re-release premium for `name` + `term`.
+    function loadQuote(name, term) {
+        if (!name || name === "")
+            return
+        quoteLoading = true
+        registerQuote = null
+        askLater("quote_registration", [String(name), String(term || registerTerm)], function(value) {
+            if (missing === name) {
+                registerQuote = value
+                quoteLoading = false
+            }
+        }, function(message) {
+            if (missing === name)
+                quoteLoading = false
+            console.log("names_ui: quote_registration:", message)
+        })
+    }
+
+    /// Reads the on-chain v8 renewal price for `name` + `term`.
+    function loadRenewQuote(name, term) {
+        if (!name || name === "")
+            return
+        renewQuoteLoading = true
+        renewQuote = null
+        askLater("quote_registration", [String(name), String(term || renewTerm)], function(value) {
+            if (record !== null && record.name === name) {
+                renewQuote = value
+                renewQuoteLoading = false
+            }
+        }, function(message) {
+            if (record !== null && record.name === name)
+                renewQuoteLoading = false
+            console.log("names_ui: renew quote:", message)
+        })
+    }
+
+    /// Reads the on-chain verified LNS sites directory (sites_list).
+    function loadSites() {
+        if (sitesLoading || registry === "")
+            return
+        sitesLoading = true
+        sitesError = ""
+        askLater("sites_list", [""], function(value) {
+            sitesLoading = false
+            sitesLoaded = true
+            sitesTotal = value && value.total_listed ? Number(value.total_listed) : 0
+            sitesList = value && Array.isArray(value.sites) ? value.sites : []
+        }, function(message) {
+            sitesLoading = false
+            sitesLoaded = true
+            sitesError = sentence(message)
+        }, 60000)
     }
 
     /// A time in milliseconds as a date.
@@ -1856,15 +1931,17 @@ Item {
         }
     }
 
-    /// Whether the CLI's private account can pay the deposit, as far as is known.
+    /// Whether the CLI's private account can pay the selected registration cost, as far as is known.
     function cliCanPay() {
-        if (cliBalance === undefined || cliBalance === null || deposit === null)
+        if (cliBalance === undefined || cliBalance === null)
             return cliBalance === undefined
-        var need = deposit.deposit !== null && deposit.deposit !== undefined ? deposit.deposit : deposit.fee
-        if (need === undefined || need === null)
+        var qp = Logic.quotePrice(registerQuote, registerTerm)
+        var need = qp !== null ? qp.total
+            : (deposit !== null && deposit.deposit !== null && deposit.deposit !== undefined ? deposit.deposit
+               : deposit !== null ? deposit.fee : null)
+        if (need === undefined || need === null || need === "")
             return true
-        var have = String(cliBalance.balance), want = String(need)
-        return have.length !== want.length ? have.length > want.length : have >= want
+        return Logic.atLeast(String(cliBalance.balance), String(need))
     }
 
     /// The CLI's registration of `name` still finishing (or stopped), or null.
@@ -2063,21 +2140,30 @@ Item {
     /// its registration, a held one is said to be taken.
     function checkRegister(typed) {
         var text = String(typed).trim()
-        if (text === "")
+        if (text === "" || registerChecking)
             return
         say("", false)
+        registerTaken = ""
         try {
             var name = String(call("names", "normalize", [text]))
-            if (name === "") {
+            if (name === "" || name.indexOf(".") >= 0) {
                 say("A name is 1 to 32 characters of a-z, 0-9 or a hyphen, such as jef.", true)
                 return
             }
-            if (ask("resolve", [name]) !== null) {
-                registerTaken = name
-                return
-            }
-            show(name)
+            registerChecking = true
+            askLater("resolve", [name], function(found) {
+                registerChecking = false
+                if (found !== null) {
+                    registerTaken = name
+                    return
+                }
+                show(name)
+            }, function(message) {
+                registerChecking = false
+                say(message, true)
+            })
         } catch (error) {
+            registerChecking = false
             say(error.message, true)
         }
     }
@@ -2153,6 +2239,9 @@ Item {
                 return
             }
             missing = ""
+            renewOpen = false
+            renewQuote = null
+            buyConfirm = false
             if (avatarPixels !== null && avatarPixels.name !== found.name)
                 avatarPixels = null
             record = found
@@ -2196,7 +2285,7 @@ Item {
     /// The same change for a name the names CLI holds: the module starts the
     /// CLI, which proves the change on this machine (minutes), and this polls
     /// the job until it ends, then reads the name back.
-    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page", register: "cli_register", transfer: "cli_transfer" })
+    readonly property var cliMethods: ({ set_text: "cli_set_text", set_profile: "cli_profile", set_page: "cli_set_page", register: "cli_register_term", transfer: "cli_transfer" })
 
     // ── Handing names on (names transfer / receive-privately) ───────────
     property string transferTarget: ""   // the name whose Transfer card is open
@@ -2205,6 +2294,7 @@ Item {
     function openTransfer(name) {
         transferTarget = name
         transferConfirm = false
+        transferViaNft = false
         transferToField.text = ""
         say("", false)
     }
@@ -2225,11 +2315,146 @@ Item {
     function transferNow() {
         var name = transferTarget
         var to = transferToField.text.trim()
+        var viaNft = transferViaNft
         transferConfirm = false
-        boardStart("cli_transfer", [name, to], "Transferring " + name, function() {
+        var method = viaNft ? "transfer_via_nft" : "cli_transfer"
+        var label = (viaNft ? "Transferring " + name + " via linked NFT" : "Transferring " + name)
+        boardStart(method, [String(name), String(to)], label, function() {
             say(name + " now belongs to " + Logic.keyShown(to.replace(/^(Public|Private)\//, "")) + ". They set it up under Names, in Got a name from someone, or with names receive-privately.", false)
             transferTarget = ""
             loadCliMine()
+            loadActivity()
+        }, name)
+    }
+
+    // ── LEZ 0.4 LNS registry v8 actions (all module args are Strings) ───
+
+    function startRenew(name, term) {
+        var chosen = String(term || renewTerm)
+        boardStart("renew_name", [String(name), chosen], "Renewing " + name + " (" + Logic.termLabel(chosen) + ")", function() {
+            renewOpen = false
+            read(name)
+            loadCliMine()
+            loadCliBalance()
+            loadActivity()
+        }, name)
+    }
+
+    function startSubnameCreate(parent, label, owner, revocable) {
+        var lbl = String(label || "").trim().toLowerCase()
+        var problem = Logic.subnameLabelProblem(lbl)
+        if (problem !== "") {
+            say(problem, true)
+            return
+        }
+        var full = lbl + "." + parent
+        boardStart("subname_create", [String(parent), lbl, String(owner || "").trim(), revocable ? "true" : "false"], "Creating " + full, function() {
+            subnameCreateLabel.text = ""
+            subnameCreateOwner.text = ""
+            loadCliMine()
+            loadActivity()
+        }, full)
+    }
+
+    function startSubnameRevoke(parent, label) {
+        var lbl = String(label || "").trim().toLowerCase()
+        var problem = Logic.subnameLabelProblem(lbl)
+        if (problem !== "") {
+            say(problem, true)
+            return
+        }
+        var full = lbl + "." + parent
+        boardStart("subname_revoke", [String(parent), lbl], "Revoking " + full, function() {
+            subnameRevokeLabel.text = ""
+            loadCliMine()
+            loadActivity()
+        }, full)
+    }
+
+    function startSubnameSetSale(parent, enabled, price, payout) {
+        var p = enabled ? String(price || "0").trim() : "0"
+        if (enabled && p !== "0" && p !== "") {
+            var readPrice = Logic.amountRead(p)
+            if (readPrice.problem !== "") {
+                say(readPrice.problem, true)
+                return
+            }
+            p = readPrice.digits
+        } else {
+            p = "0"
+        }
+        boardStart("subname_set_sale", [String(parent), enabled ? "true" : "false", p, enabled ? String(payout || "").trim() : ""],
+            enabled ? "Turning on subname sales for " + parent : "Turning off subname sales for " + parent, function() {
+            read(parent)
+            loadActivity()
+        }, parent)
+    }
+
+    function startSubnameBuy(parent, label) {
+        var lbl = String(label || "").trim().toLowerCase()
+        var problem = Logic.subnameLabelProblem(lbl)
+        if (problem !== "") {
+            say(problem, true)
+            return
+        }
+        var full = lbl + "." + parent
+        boardStart("subname_buy", [String(parent), lbl], "Buying " + full, function() {
+            buySubnameLabel.text = ""
+            loadCliMine()
+            loadCliBalance()
+            loadActivity()
+        }, full)
+    }
+
+    function startListName(name, price, payTo, expires, showPublic) {
+        var priceErr = Logic.listingPriceProblem(price)
+        if (priceErr !== "") {
+            say(priceErr, true)
+            return
+        }
+        var digits = Logic.amountDigits(price)
+        boardStart("list_name", [String(name), digits, String(payTo || "").trim(), String(expires || "").trim(), showPublic ? "true" : "false"],
+            "Listing " + name + " for sale", function() {
+            read(name)
+            loadActivity()
+        }, name)
+    }
+
+    function startCancelListing(name) {
+        boardStart("cancel_listing", [String(name)], "Cancelling listing for " + name, function() {
+            read(name)
+            loadActivity()
+        }, name)
+    }
+
+    function startBuyName(name) {
+        buyConfirm = false
+        boardStart("buy_name", [String(name)], "Buying " + name, function() {
+            read(name)
+            loadCliMine()
+            loadCliBalance()
+            loadActivity()
+        }, name)
+    }
+
+    function startTransferViaNft(name, to) {
+        var target = String(to || "").trim()
+        if (target === "") {
+            say("Enter the recipient account ID.", true)
+            return
+        }
+        boardStart("transfer_via_nft", [String(name), target], "Transferring " + name + " via linked NFT", function() {
+            read(name)
+            loadCliMine()
+            loadActivity()
+        }, name)
+    }
+
+    function startSetDiscover(name, discoverOn, title) {
+        boardStart("set_discover", [String(name), discoverOn ? "on" : "off", String(title || "").trim()],
+            discoverOn ? "Listing " + name + " in Browse LNS sites" : "Hiding " + name + " from Browse LNS sites", function() {
+            read(name)
+            sitesLoaded = false
             loadActivity()
         }, name)
     }
@@ -2372,9 +2597,10 @@ Item {
             return
         // The job ending is the answer: the commitment is made.
         var public_ = registerPublic
-        cliChange("register", [name, public_], name, function() {
+        var term = String(registerTerm || "1y")
+        cliChange("register", [String(name), public_ ? "true" : "false", term], name, function() {
             return true
-        }, "Committed privately. " + name + " finishes registering in about 15 to 20 minutes, in the background"
+        }, "Committed privately (" + Logic.termLabel(term) + "). " + name + " finishes registering after the 15-minute wait, in the background"
            + (public_ ? ", then moves to its own public account (about 10 more minutes)." : "."))
     }
 
@@ -2382,13 +2608,14 @@ Item {
     function registerName() {
         var name = missing
         var owner = wallet[fromIndex].account
+        var term = String(registerTerm || "1y")
         if (busy)
             return
         pending = { name: name, sent: false }
         say("Asking the wallet to sign.", false)
-        askLater("register_name", [name, owner, "auto"], function(value) {
+        askLater("register_with_term", [String(name), String(owner), "auto", term], function(value) {
             pending = null
-            say("Committed. The name finishes registering in about 15 to 20 minutes; keep Basecamp open.", false)
+            say("Committed publicly (" + Logic.termLabel(term) + "). Public commits wait 5 minutes, then reveal within 1 minute; keep Basecamp open.", false)
             missing = ""
             loadMine()
         }, function(message) {
@@ -2405,7 +2632,7 @@ Item {
     }
 
     /// Everything the holder can do with the name on the plate: where it
-    /// pays, its entries and page, transferring it, releasing it.
+    /// pays, its entries and page, subnames, selling, transferring, releasing.
     function openSettings() {
         say("", false)
         pageArea.text = page !== null && page.text !== null ? page.text : ""
@@ -2414,6 +2641,19 @@ Item {
         newValueField.text = ""
         newOwnerField.text = ""
         confirmingRelease = false
+        editTransferViaNft = false
+        subnameRevocable = true
+        subnameSaleOn = record !== null && record.subname_sale !== null
+        subnameSalePriceField.text = record !== null && record.subname_sale !== null ? String(record.subname_sale.price || "0") : "0"
+        subnameSalePayoutField.text = record !== null && record.subname_sale !== null ? String(record.subname_sale.payout || "") : (cliPublic ? "Public/" + cliPublic.account : "")
+        subnameCreateLabel.text = ""
+        subnameCreateOwner.text = ""
+        subnameRevokeLabel.text = ""
+        listPriceField.text = record !== null && record.listing !== null ? String(record.listing.price || "") : ""
+        listPayToField.text = record !== null && record.listing !== null ? String(record.listing.pay_to || "") : (cliPublic ? "Public/" + cliPublic.account : "")
+        listExpiresField.text = ""
+        listPublicName = record !== null && record.listing !== null ? !!record.listing.in_market : false
+        discoverTitleField.text = record !== null && record.texts && record.texts.display ? String(record.texts.display) : ""
         editTab = "profile"
         tool = "settings"
     }
@@ -3342,7 +3582,12 @@ Item {
                 return
             var job = running[0]
             var labels = { make_public: "Making " + job.name + " public", post: "Your post", like: "Your like", hide: "Taking it down",
-                           anon: "Setting up your anon name", pay: "Your payment", pay_account: "Your payment", register: "Registering " + job.name }
+                           anon: "Setting up your anon name", pay: "Your payment", pay_account: "Your payment", register: "Registering " + job.name,
+                           renew: "Renewing " + job.name, list: "Listing " + job.name + " for sale", cancel: "Cancelling listing for " + job.name,
+                           buy: "Buying " + job.name, transfer_via_nft: "Transferring " + job.name + " via linked NFT",
+                           subname_create: "Creating " + job.name, subname_revoke: "Revoking " + job.name,
+                           subname_sale: "Updating subname sales for " + job.name, subname_buy: "Buying " + job.name,
+                           set_discover: "Updating site listing for " + job.name }
             boardJob = { id: job.id, label: labels[job.kind] || "A change to " + job.name, started: job.started || Date.now(),
                          kind: job.kind, name: job.name, after: function() { loadCliMine() } }
         }, function() {})
@@ -4892,7 +5137,7 @@ Item {
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Names"; current: root.section === "wallet" && root.walletView === "names"; onPressed: { root.openWallet("names"); root.loadCliMine() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Messages"; current: root.section === "messages"; onPressed: { root.go("messages"); root.chatLoad() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Profile"; current: root.section === "profile"; onPressed: { root.say("", false); root.openProfile() } }
-                Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus() } }
+                Tab { Layout.fillWidth: true; alignLeft: true; label: "Search"; current: root.section === "search"; onPressed: { root.go("search"); searchField.forceActiveFocus(); if (!root.sitesLoaded) root.loadSites() } }
                 Tab { Layout.fillWidth: true; alignLeft: true; label: "Settings"; current: root.section === "settings"; onPressed: { root.go("settings"); root.registering = false; root.gettingTokens = false; root.record = null; root.missing = ""; root.loadAccounts() } }
 
                 Item { Layout.fillHeight: true }
@@ -6241,14 +6486,22 @@ Item {
                         }
                     }
 
-                    // Hand a name to someone else (names transfer).
+                    // Hand a name to someone else (names transfer, or via its linked NFT).
                     Card {
                         visible: root.transferTarget !== ""
                         Layout.fillWidth: true
                         Part { Layout.topMargin: 0; text: "Transfer " + root.transferTarget }
                         Hint {
                             font.pixelSize: root.px(15)
-                            text: "Hands " + root.transferTarget + " to another LEZ account. Its receiving keys, profile entries and page are cleared; payments to it go to the new holder once they set it up. Any deposit goes with it. It can't be undone."
+                            text: root.transferViaNft
+                                ? "Transfers " + root.transferTarget + " by moving its linked NFT deed. The name and its NFT always move together; receiving keys, profile entries and page are cleared. It can't be undone."
+                                : "Hands " + root.transferTarget + " to another LEZ account. Its linked NFT moves with it, and its receiving keys, profile entries and page are cleared; payments to it go to the new holder once they set it up. It can't be undone."
+                        }
+                        RowLayout {
+                            visible: root.transferTarget.indexOf(".") < 0
+                            spacing: 6
+                            Tab { label: "Transfer via name"; current: !root.transferViaNft; onPressed: { root.transferViaNft = false; root.transferConfirm = false } }
+                            Tab { label: "Transfer via linked NFT"; current: root.transferViaNft; onPressed: { root.transferViaNft = true; root.transferConfirm = false } }
                         }
                         Part { text: "Their account" }
                         Field {
@@ -6264,7 +6517,7 @@ Item {
                             visible: !root.transferConfirm
                             spacing: 8
                             Action {
-                                label: "Transfer…"
+                                label: root.boardJob !== null && (root.boardJob.kind === "cli_transfer" || root.boardJob.kind === "transfer_via_nft") ? "Transferring…" : "Transfer…"
                                 strong: true
                                 enabledNow: transferToField.text.trim() !== "" && root.transferProblem() === "" && root.boardJob === null
                                 onPressed: root.transferConfirm = true
@@ -6276,12 +6529,12 @@ Item {
                             Layout.fillWidth: true
                             Hint {
                                 color: root.ink
-                                text: "Give " + root.transferTarget + " to " + Logic.keyShown(transferToField.text.trim().replace(/^(Public|Private)\//, "")) + "? It's proven on this computer, usually 5–12 minutes, and then it's theirs."
+                                text: (root.transferViaNft ? "Transfer " + root.transferTarget + " via its linked NFT to " : "Give " + root.transferTarget + " to ") + Logic.keyShown(transferToField.text.trim().replace(/^(Public|Private)\//, "")) + "? It's proven on this computer, usually 5–12 minutes, and then it's theirs."
                             }
                             RowLayout {
                                 spacing: 8
                                 Action {
-                                    label: "Yes, transfer it"
+                                    label: root.boardJob !== null ? "Transferring…" : "Yes, transfer it"
                                     grave: true
                                     enabledNow: root.boardJob === null
                                     onPressed: root.transferNow()
@@ -6307,7 +6560,7 @@ Item {
                         }
                     }
                     Hint {
-                        visible: root.boardJob !== null && /^cli_(transfer|receive_privately)$/.test(root.boardJob.kind)
+                        visible: root.boardJob !== null && /^(cli_(transfer|receive_privately)|transfer_via_nft)$/.test(root.boardJob.kind)
                         color: root.brass
                         font.pixelSize: root.px(15)
                         text: root.boardJob === null ? "" : root.boardJob.label + ": proving it on this computer. Usually 5–12 min, " + Math.max(0, Math.floor((Math.max(root.clockTick, Date.now()) - root.boardJob.started) / 60000)) + " so far."
@@ -7694,6 +7947,13 @@ Item {
                     Rectangle { Layout.fillWidth: true; Layout.topMargin: 8; height: 1; color: root.line }
                 }
 
+                Hint {
+                    visible: root.boardJob !== null && (root.section === "search" || root.section === "profile")
+                    color: root.brass
+                    font.pixelSize: root.px(16)
+                    text: root.boardJob === null ? "" : root.boardJobLine(root.boardJob)
+                }
+
                 Text {
                     visible: root.notice !== ""
                     Layout.fillWidth: true
@@ -7709,8 +7969,8 @@ Item {
                 ColumnLayout {
                     visible: root.section === "search" && root.record === null && root.missing === "" && !root.registering
                     Layout.fillWidth: true
-                    Layout.topMargin: 60
-                    spacing: 10
+                    Layout.topMargin: 40
+                    spacing: 14
                     Text {
                         text: root.moduleOutdated !== "" ? "Update the names module" : !root.configKnown ? "Starting" : root.registry === "" ? "Choose a registry to begin" : "Find someone"
                         color: root.ink
@@ -7721,14 +7981,109 @@ Item {
                     Hint {
                         font.pixelSize: root.px(18)
                         color: root.ink
-                        text: root.moduleOutdated !== "" ? "This app needs names module " + root.neededModule + " or newer; Basecamp loaded " + root.moduleOutdated + ". Open Applications, click Names and press Install." : !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name in the box on the left to see its profile and page."
+                        text: root.moduleOutdated !== "" ? "This app needs names module " + root.neededModule + " or newer; Basecamp loaded " + root.moduleOutdated + ". Open Applications, click Names and press Install." : !root.configKnown ? "Waiting for the names module to answer." : root.registry === "" ? "Open Advanced and enter the registry's program ID." : "Type a name (or subname like blog.jef) above to see its profile and page."
                     }
                     Action {
                         visible: root.configKnown && root.registry !== ""
-                        Layout.topMargin: 10
+                        Layout.topMargin: 6
                         label: "Register a name"
                         strong: true
                         onPressed: root.openRegister()
+                    }
+                    // On-chain verified LNS sites directory (sites_list, verified locally).
+                    Card {
+                        visible: root.configKnown && root.registry !== ""
+                        Layout.fillWidth: true
+                        Layout.topMargin: 10
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Browse LNS sites" + (root.sitesTotal > 0 ? " (" + root.sitesTotal + ")" : "")
+                                color: root.ink
+                                font.family: root.sans
+                                font.weight: Font.DemiBold
+                                font.pixelSize: root.px(21)
+                            }
+                            Action {
+                                label: root.sitesLoading ? "Loading sites…" : "Refresh"
+                                enabledNow: !root.sitesLoading
+                                onPressed: root.loadSites()
+                            }
+                        }
+                        Hint {
+                            font.pixelSize: root.px(15)
+                            text: "Public pages published on LNS names whose holders haven't opted out with discover=off. Verified on your computer."
+                        }
+                        Hint {
+                            visible: root.sitesError !== ""
+                            color: root.alarm
+                            font.pixelSize: root.px(15)
+                            text: root.sitesError
+                        }
+                        Hint {
+                            visible: root.sitesError === "" && root.sitesList.length === 0
+                            font.pixelSize: root.px(15)
+                            text: root.sitesLoading ? "Reading LNS sites from the chain…" : "No listed sites yet."
+                        }
+                        Repeater {
+                            model: root.sitesList
+                            Rectangle {
+                                id: siteRow
+                                required property var modelData
+                                Layout.fillWidth: true
+                                implicitHeight: siteCol.implicitHeight + 20
+                                radius: 8
+                                color: siteMouse.containsMouse ? root.hover : "transparent"
+                                border.width: 1
+                                border.color: root.line
+                                ColumnLayout {
+                                    id: siteCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: 14
+                                    anchors.rightMargin: 14
+                                    spacing: 2
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        Text {
+                                            text: siteRow.modelData.name || ""
+                                            textFormat: Text.PlainText
+                                            color: root.ink
+                                            font.family: root.sans
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: root.px(17)
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            visible: !!siteRow.modelData.title
+                                            text: siteRow.modelData.title ? String(siteRow.modelData.title) : ""
+                                            textFormat: Text.PlainText
+                                            color: root.dim
+                                            font.family: root.sans
+                                            font.pixelSize: root.px(15)
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            text: "Open ›"
+                                            color: root.brass
+                                            font.family: root.sans
+                                            font.pixelSize: root.px(15)
+                                        }
+                                    }
+                                }
+                                MouseArea {
+                                    id: siteMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.show(siteRow.modelData.name)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -7747,7 +8102,7 @@ Item {
                     }
                     Hint {
                         font.pixelSize: root.px(18)
-                        text: "Pick a name people can use to find your profile and page. Held privately, with a deposit you get back when you release it."
+                        text: "Pick a name people can use to find your profile and page. Choose a registration term and see the on-chain price before you sign."
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -7761,9 +8116,9 @@ Item {
                             onAccepted: root.checkRegister(registerField.text)
                         }
                         Action {
-                            label: "Check"
+                            label: root.registerChecking ? "Checking…" : "Check"
                             strong: true
-                            enabledNow: registerField.text.trim() !== ""
+                            enabledNow: !root.registerChecking && registerField.text.trim() !== ""
                             onPressed: root.checkRegister(registerField.text)
                         }
                     }
@@ -7879,8 +8234,10 @@ Item {
                         Hint { visible: root.claimLine !== ""; text: root.claimLine }
                     }
                     Card {
+                        id: registerPrivCard
                         visible: root.cliPath !== "" && !(root.deposit !== null && root.deposit.tier === "locked")
                         Layout.fillWidth: true
+                        readonly property var qp: Logic.quotePrice(root.registerQuote, root.registerTerm)
                         Text {
                             text: "Register privately"
                             color: root.ink
@@ -7888,7 +8245,16 @@ Item {
                             font.pixelSize: root.px(22)
                             font.weight: Font.DemiBold
                         }
-                        Hint { text: "Held by your private account, which never appears on chain. Nobody can find who holds it." }
+                        Hint { text: "Held by your private account, which never appears on chain. Nobody can find who holds it. Private commits wait 15 minutes before reveal (10-minute window)." }
+                        Text { Layout.topMargin: 4; text: "Term"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Tab { label: "30 days"; current: root.registerTerm === "30d"; onPressed: { root.registerTerm = "30d"; root.loadQuote(root.missing, "30d") } }
+                            Tab { label: "1 year"; current: root.registerTerm === "1y"; onPressed: { root.registerTerm = "1y"; root.loadQuote(root.missing, "1y") } }
+                            Tab { label: "5 years"; current: root.registerTerm === "5y"; onPressed: { root.registerTerm = "5y"; root.loadQuote(root.missing, "5y") } }
+                            Tab { label: "Permanent"; current: root.registerTerm === "permanent"; onPressed: { root.registerTerm = "permanent"; root.loadQuote(root.missing, "permanent") } }
+                        }
                         GridLayout {
                             Layout.fillWidth: true
                             Layout.topMargin: 6
@@ -7897,17 +8263,36 @@ Item {
                             Figure {
                                 Layout.fillWidth: true
                                 Layout.alignment: Qt.AlignTop
-                                label: "Deposit"
-                                value: root.deposit === null ? "…" : root.deposit.deposit !== null && root.deposit.deposit !== undefined ? root.grouped(root.deposit.deposit) : root.deposit.fee ? root.grouped(root.deposit.fee) : "Not set up"
-                                note: "Refunded in full when you release it"
+                                label: registerPrivCard.qp !== null && registerPrivCard.qp.mode === "deposit" ? "Deposit" : "Price (" + Logic.termLabel(root.registerTerm) + ")"
+                                value: root.quoteLoading ? "Checking price…"
+                                    : registerPrivCard.qp !== null ? root.grouped(registerPrivCard.qp.total)
+                                    : root.deposit === null ? "…"
+                                    : root.deposit.deposit !== null && root.deposit.deposit !== undefined ? root.grouped(root.deposit.deposit)
+                                    : root.deposit.fee ? root.grouped(root.deposit.fee) : "Not set up"
+                                note: registerPrivCard.qp !== null && registerPrivCard.qp.mode === "deposit" ? "Refunded in full when you release it"
+                                    : registerPrivCard.qp !== null && Logic.someAmount(registerPrivCard.qp.premium)
+                                        ? "Base " + root.grouped(registerPrivCard.qp.base) + " + re-release premium " + root.grouped(registerPrivCard.qp.premium)
+                                    : "Read from the on-chain price table; network fee extra"
                             }
                             Figure {
                                 Layout.fillWidth: true
                                 Layout.alignment: Qt.AlignTop
-                                label: "Time"
-                                value: "About 20 min"
-                                note: "Keep this computer on and awake until it's done."
+                                label: "Wait"
+                                value: "15-min commit wait"
+                                note: "Private commit-reveal (~20 min total). Keep this computer awake until it's done."
                             }
+                        }
+                        Hint {
+                            visible: root.registerQuote !== null && root.registerQuote.in_grace === true
+                            color: root.alarm
+                            font.pixelSize: root.px(15)
+                            text: "This name is in its 30-day grace period" + (root.registerQuote.grace_ends ? " until " + root.dated(root.registerQuote.grace_ends) : "") + ". Only the previous holder can renew it until grace ends."
+                        }
+                        Hint {
+                            visible: root.registerQuote !== null && Logic.someAmount(root.registerQuote.rerelease_premium)
+                            color: root.brass
+                            font.pixelSize: root.px(15)
+                            text: "Recently lapsed: a 21-day falling re-release premium of " + root.grouped(root.registerQuote.rerelease_premium) + " applies" + (root.registerQuote.premium_ends ? " (falls to 0 on " + root.dated(root.registerQuote.premium_ends) + ")" : "") + "."
                         }
                         Link {
                             text: root.registerHow ? "Hide how it works" : "How it works: three steps"
@@ -7934,7 +8319,7 @@ Item {
                             visible: root.cliBalance !== undefined && root.cliBalance !== null && !root.cliCanPay()
                             color: root.alarm
                             font.pixelSize: root.px(15)
-                            text: "That's less than the deposit. Add funds to this private account first."
+                            text: "That's less than the registration cost. Add funds to this private account first."
                         }
                         Link {
                             visible: root.cliBalance !== undefined && root.cliBalance !== null && !root.cliCanPay()
@@ -7956,10 +8341,10 @@ Item {
                         }
                         Action {
                             Layout.topMargin: 6
-                            label: "Register " + root.missing
+                            label: root.busy ? "Starting…" : "Register " + root.missing + " (" + Logic.termLabel(root.registerTerm) + ")"
                             strong: true
                             changes: true
-                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured" && root.cliBalance !== null && root.cliBalance !== undefined && root.cliCanPay()
+                            enabledNow: !root.quoteLoading && root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured" && root.cliBalance !== null && root.cliBalance !== undefined && root.cliCanPay() && !(root.registerQuote !== null && root.registerQuote.in_grace === true)
                             onPressed: root.registerPrivately()
                         }
                         Text {
@@ -7980,17 +8365,17 @@ Item {
                     }
                     Panel {
                         visible: root.wallet.length > 0 && (root.cliPath === "" || root.publicRegisterOpen)
-                        title: root.cliPath !== "" ? "From a public account" : "Register it to"
+                        title: root.cliPath !== "" ? "From a public account (5-min commit wait)" : "Register it to"
                         Accounts {}
                         Hint {
                             color: root.cliPath !== "" ? root.dim : root.brass
-                            text: "Anyone who knows the name can find this account, and so its balance and history." + (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account."
+                            text: "Public commits wait 5 minutes, then reveal within 1 minute. Anyone who knows the name can find this account, and so its balance and history." + (root.cliPath !== "" ? "" : " To hide it, install the names CLI and register privately.") + " Payments to the name still go to your private account."
                         }
                         Action {
-                            label: "Register " + root.missing + " publicly"
+                            label: root.busy ? "Starting…" : "Register " + root.missing + " publicly (" + Logic.termLabel(root.registerTerm) + ")"
                             strong: root.cliPath === ""
                             changes: true
-                            enabledNow: root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured"
+                            enabledNow: !root.quoteLoading && root.deposit !== null && root.deposit.tier !== "locked" && root.deposit.mode !== "unconfigured" && !(root.registerQuote !== null && root.registerQuote.in_grace === true)
                             onPressed: root.registerName()
                         }
                     }
@@ -8100,17 +8485,212 @@ Item {
                         Chip { label: root.holderChip() }
                         Chip { label: root.paymentsChip() }
                         Chip {
+                            visible: root.record !== null && root.record.subname === true
+                            label: root.record !== null && root.record.subname === true
+                                ? ("Subname" + (root.record.subname_kind ? " · " + root.record.subname_kind : ""))
+                                : ""
+                        }
+                        Chip {
+                            visible: root.record !== null && root.record.parent !== null && root.record.parent !== undefined && root.record.parent !== ""
+                            label: root.record !== null && root.record.parent ? "Parent: " + root.record.parent : ""
+                            link: true
+                            onPressed: root.show(root.record.parent)
+                        }
+                        Chip {
                             visible: root.record !== null && Logic.someAmount(root.record.deposit)
                             label: root.record !== null && Logic.someAmount(root.record.deposit) ? "Deposit " + root.grouped(root.record.deposit) : ""
                         }
                         Chip {
+                            visible: root.record !== null && (root.record.permanent === true || root.record.never === true)
+                            label: "Permanent"
+                        }
+                        Chip {
                             visible: root.record !== null && !root.record.never
-                            label: root.record === null || root.record.never ? "" : (root.record.lapsed ? "Lapsed " : "Held until ") + root.dated(root.record.expires)
+                            label: root.record === null || root.record.never ? "" : (root.record.in_grace ? "In 30-day grace · " : root.record.lapsed ? "Lapsed " : "Held until ") + root.dated(root.record.expires)
+                        }
+                        Chip {
+                            visible: root.record !== null && !root.record.never && !root.record.subname && root.cliPath !== ""
+                            label: root.renewOpen ? "Hide renew" : "Renew…"
+                            link: true
+                            onPressed: {
+                                root.renewOpen = !root.renewOpen
+                                if (root.renewOpen && root.record !== null)
+                                    root.loadRenewQuote(root.record.name, root.renewTerm)
+                            }
                         }
                         Chip {
                             label: "Copy link"
                             link: true
                             onPressed: root.copy(root.linkFor(root.record.name), "Link")
+                        }
+                    }
+                    Hint {
+                        visible: root.tool !== "settings" && root.record !== null && (root.record.in_grace === true || root.record.lapsed === true)
+                        color: root.record !== null && root.record.in_grace ? root.alarm : root.brass
+                        font.pixelSize: root.px(15)
+                        text: Logic.graceAndPremiumText(root.record, Math.max(root.clockTick, Date.now()))
+                    }
+                    // Renew card: anyone can pay to renew any non-permanent top-level name (incl. permanent upgrade).
+                    Card {
+                        id: renewCard
+                        visible: root.tool !== "settings" && root.renewOpen && root.record !== null && !root.record.never && !root.record.subname
+                        Layout.fillWidth: true
+                        readonly property var rqp: Logic.quotePrice(root.renewQuote, root.renewTerm)
+                        Text {
+                            text: root.record !== null ? "Renew " + root.record.name : "Renew"
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(20)
+                            font.weight: Font.DemiBold
+                        }
+                        Hint { font.pixelSize: root.px(15); text: "Anyone can pay to extend a name, or upgrade it to permanent so it never expires." }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Tab { label: "30 days"; current: root.renewTerm === "30d"; onPressed: { root.renewTerm = "30d"; root.loadRenewQuote(root.record.name, "30d") } }
+                            Tab { label: "1 year"; current: root.renewTerm === "1y"; onPressed: { root.renewTerm = "1y"; root.loadRenewQuote(root.record.name, "1y") } }
+                            Tab { label: "5 years"; current: root.renewTerm === "5y"; onPressed: { root.renewTerm = "5y"; root.loadRenewQuote(root.record.name, "5y") } }
+                            Tab { label: "Permanent"; current: root.renewTerm === "permanent"; onPressed: { root.renewTerm = "permanent"; root.loadRenewQuote(root.record.name, "permanent") } }
+                        }
+                        Fact {
+                            label: "Renewal price"
+                            value: root.renewQuoteLoading ? "Checking price…"
+                                : renewCard.rqp !== null ? root.grouped(renewCard.rqp.base) + " (" + Logic.termLabel(root.renewTerm) + ")"
+                                : "—"
+                        }
+                        RowLayout {
+                            spacing: 8
+                            Action {
+                                label: root.boardJob !== null && root.boardJob.kind === "renew_name" ? "Renewing…" : "Renew for " + Logic.termLabel(root.renewTerm)
+                                strong: true
+                                enabledNow: !root.renewQuoteLoading && root.boardJob === null && root.record !== null
+                                onPressed: root.startRenew(root.record.name, root.renewTerm)
+                            }
+                            Action { label: "Close"; onPressed: root.renewOpen = false }
+                        }
+                    }
+                    // Linked NFT deed (names as NFTs).
+                    Card {
+                        visible: root.tool !== "settings" && root.record !== null && root.record.nft !== null && root.record.nft !== undefined
+                        Layout.fillWidth: true
+                        Text { text: "Linked NFT"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(19); font.weight: Font.DemiBold }
+                        Hint { font.pixelSize: root.px(15); text: "Every registered name is backed by a 1-of-1 NFT deed. Transferring either the name or its NFT moves both together." }
+                        Fact {
+                            label: "Token ID"
+                            code: true
+                            value: root.record !== null && root.record.nft ? root.shorten(String(root.record.nft.token_id || "")) : ""
+                            full: root.record !== null && root.record.nft ? String(root.record.nft.token_id || "") : ""
+                        }
+                        Fact {
+                            visible: root.record !== null && root.record.nft && !!root.record.nft.token_account
+                            label: "NFT account"
+                            code: true
+                            value: root.record !== null && root.record.nft && root.record.nft.token_account ? root.shorten(String(root.record.nft.token_account)) : ""
+                            full: root.record !== null && root.record.nft && root.record.nft.token_account ? String(root.record.nft.token_account) : ""
+                        }
+                        Fact {
+                            label: "Deed privacy"
+                            value: root.record !== null && root.record.nft && root.record.nft.shielded ? "Shielded deed (private)" : "Public deed"
+                        }
+                    }
+                    // Marketplace listing card (when listed for sale).
+                    Card {
+                        visible: root.tool !== "settings" && root.record !== null && root.record.listing !== null && root.record.listing !== undefined
+                        Layout.fillWidth: true
+                        border.color: root.brass
+                        Text {
+                            text: root.record !== null ? root.record.name + " is for sale" : "For sale"
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(20)
+                            font.weight: Font.DemiBold
+                        }
+                        Fact {
+                            label: "Price"
+                            value: root.record !== null && root.record.listing ? root.grouped(root.record.listing.price) : ""
+                        }
+                        Fact {
+                            label: "Protocol fee"
+                            value: root.record !== null && root.record.listing ? root.grouped(root.record.listing.fee) + " (2.5%)" : ""
+                        }
+                        Fact {
+                            label: "Seller receives"
+                            value: root.record !== null && root.record.listing ? root.grouped(root.record.listing.seller_receives) + " (97.5%)" : ""
+                        }
+                        Fact {
+                            visible: root.record !== null && root.record.listing && root.record.listing.expires_at !== null && root.record.listing.expires_at !== undefined
+                            label: "Listing ends"
+                            value: root.record !== null && root.record.listing && root.record.listing.expires_at ? root.dated(root.record.listing.expires_at) : ""
+                        }
+                        RowLayout {
+                            visible: !root.mine && root.cliPath !== "" && !root.buyConfirm
+                            spacing: 8
+                            Action {
+                                label: root.boardJob !== null && root.boardJob.kind === "buy_name" ? "Buying…" : "Buy " + (root.record !== null ? root.record.name : "")
+                                strong: true
+                                enabledNow: root.boardJob === null
+                                onPressed: root.buyConfirm = true
+                            }
+                        }
+                        Card {
+                            visible: !root.mine && root.buyConfirm
+                            Layout.fillWidth: true
+                            Hint {
+                                color: root.ink
+                                text: root.record !== null && root.record.listing
+                                    ? "Buy " + root.record.name + " for " + root.grouped(root.record.listing.price) + " (includes " + root.grouped(root.record.listing.fee) + " protocol fee; seller receives " + root.grouped(root.record.listing.seller_receives) + ")?"
+                                    : ""
+                            }
+                            RowLayout {
+                                spacing: 8
+                                Action {
+                                    label: root.boardJob !== null && root.boardJob.kind === "buy_name" ? "Buying…" : "Confirm purchase"
+                                    strong: true
+                                    enabledNow: root.boardJob === null
+                                    onPressed: root.startBuyName(root.record.name)
+                                }
+                                Action { label: "Cancel"; onPressed: root.buyConfirm = false }
+                            }
+                        }
+                    }
+                    // Parent subname sales card (buy <label>.<parent>).
+                    Card {
+                        visible: root.tool !== "settings" && root.record !== null && root.record.subname_sale !== null && root.record.subname_sale !== undefined && !root.record.subname && root.cliPath !== ""
+                        Layout.fillWidth: true
+                        Text {
+                            text: root.record !== null ? "Subnames for sale under " + root.record.name : "Subnames for sale"
+                            color: root.ink
+                            font.family: root.sans
+                            font.pixelSize: root.px(19)
+                            font.weight: Font.DemiBold
+                        }
+                        Hint {
+                            font.pixelSize: root.px(15)
+                            text: root.record !== null && root.record.subname_sale
+                                ? ("Price: " + (Logic.someAmount(root.record.subname_sale.price) ? root.grouped(root.record.subname_sale.price) : "Free") + ". Bought subnames are permanent (non-revocable) and use a commit-reveal wait.")
+                                : ""
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Field {
+                                id: buySubnameLabel
+                                Layout.fillWidth: true
+                                size: 17
+                                hint: "label (for label." + (root.record !== null ? root.record.name : "name") + ")"
+                            }
+                            Action {
+                                label: root.boardJob !== null && root.boardJob.kind === "subname_buy" ? "Buying…" : "Buy subname"
+                                strong: true
+                                enabledNow: root.boardJob === null && buySubnameLabel.text.trim() !== "" && Logic.subnameLabelProblem(buySubnameLabel.text) === ""
+                                onPressed: root.startSubnameBuy(root.record.name, buySubnameLabel.text)
+                            }
+                        }
+                        Hint {
+                            visible: buySubnameLabel.text.trim() !== "" && Logic.subnameLabelProblem(buySubnameLabel.text) !== ""
+                            color: root.alarm
+                            font.pixelSize: root.px(14)
+                            text: Logic.subnameLabelProblem(buySubnameLabel.text)
                         }
                     }
                     RowLayout {
@@ -8162,6 +8742,8 @@ Item {
                             Item { Layout.preferredWidth: 8 }
                             Tab { label: "Profile"; current: root.editTab === "profile"; onPressed: root.editTab = "profile" }
                             Tab { label: "Page"; current: root.editTab === "page"; onPressed: root.editTab = "page" }
+                            Tab { visible: root.record !== null && !root.record.subname; label: "Subnames"; current: root.editTab === "subnames"; onPressed: root.editTab = "subnames" }
+                            Tab { visible: root.record !== null && !root.record.subname; label: "Sell"; current: root.editTab === "sell"; onPressed: root.editTab = "sell" }
                             Tab { label: "Give it up"; current: root.editTab === "giveup"; onPressed: root.editTab = "giveup" }
                             Item { Layout.fillWidth: true }
                         }
@@ -8552,11 +9134,232 @@ Item {
                                 onPressed: root.savePage("")
                             }
                         }
+                        Card {
+                            id: discoverCard
+                            visible: root.cliPath !== "" && root.record !== null
+                            Layout.fillWidth: true
+                            Layout.topMargin: 8
+                            readonly property bool optedOut: Logic.discoverIsOff(root.record)
+                            Text { text: "Browse LNS sites directory"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(19); font.weight: Font.DemiBold }
+                            Hint {
+                                font.pixelSize: root.px(15)
+                                text: discoverCard.optedOut
+                                    ? "Currently hidden from Browse LNS sites (discover=off). Turn listing back on to appear in the public directory when you have a page."
+                                    : "Currently listed in Browse LNS sites when you have a published page. Set discover=off to keep your page unlisted."
+                            }
+                            Field {
+                                id: discoverTitleField
+                                Layout.fillWidth: true
+                                size: 17
+                                hint: "Site title for directory (optional, up to 64 bytes)"
+                            }
+                            RowLayout {
+                                spacing: 8
+                                Action {
+                                    label: root.boardJob !== null && root.boardJob.kind === "set_discover"
+                                        ? "Saving…"
+                                        : (discoverCard.optedOut ? "Show in Browse LNS sites" : "Hide from Browse LNS sites (discover=off)")
+                                    strong: discoverCard.optedOut
+                                    enabledNow: root.boardJob === null && root.record !== null
+                                    onPressed: root.startSetDiscover(root.record.name, discoverCard.optedOut, discoverTitleField.text)
+                                }
+                            }
+                        }
                         }
 
-                        Hint {
+                        // Subnames tab: create, revoke, and parent subname sales.
+                        ColumnLayout {
+                            visible: root.editTab === "subnames" && root.record !== null && !root.record.subname
+                            Layout.fillWidth: true
+                            spacing: 16
+                            Card {
+                                Layout.fillWidth: true
+                                Text { text: "Create a subname"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Hint { font.pixelSize: root.px(15); text: "Create label." + (root.record !== null ? root.record.name : "") + " as revocable (you can take it back) or permanent (only its holder can release or transfer it)." }
+                                Field {
+                                    id: subnameCreateLabel
+                                    Layout.fillWidth: true
+                                    size: 17
+                                    hint: "Label, such as blog or pay"
+                                }
+                                Hint {
+                                    visible: subnameCreateLabel.text.trim() !== "" && Logic.subnameLabelProblem(subnameCreateLabel.text) !== ""
+                                    color: root.alarm
+                                    font.pixelSize: root.px(14)
+                                    text: Logic.subnameLabelProblem(subnameCreateLabel.text)
+                                }
+                                RowLayout {
+                                    spacing: 6
+                                    Tab { label: "Revocable"; current: root.subnameRevocable; onPressed: root.subnameRevocable = true }
+                                    Tab { label: "Permanent"; current: !root.subnameRevocable; onPressed: root.subnameRevocable = false }
+                                }
+                                Field {
+                                    id: subnameCreateOwner
+                                    Layout.fillWidth: true
+                                    size: 17
+                                    code: true
+                                    hint: "Owner account (optional: leave blank to hold it yourself, or Public/… / Private/…)"
+                                }
+                                Action {
+                                    label: root.boardJob !== null && root.boardJob.kind === "subname_create" ? "Creating…" : "Create subname"
+                                    strong: true
+                                    enabledNow: root.boardJob === null && root.cliPath !== "" && subnameCreateLabel.text.trim() !== "" && Logic.subnameLabelProblem(subnameCreateLabel.text) === ""
+                                    onPressed: root.startSubnameCreate(root.record.name, subnameCreateLabel.text, subnameCreateOwner.text, root.subnameRevocable)
+                                }
+                            }
+                            Card {
+                                Layout.fillWidth: true
+                                Text { text: "Revoke a revocable subname"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Hint { font.pixelSize: root.px(15); text: "Permanent subnames cannot be revoked." }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Field {
+                                        id: subnameRevokeLabel
+                                        Layout.fillWidth: true
+                                        size: 17
+                                        hint: "Label to revoke"
+                                    }
+                                    Action {
+                                        label: root.boardJob !== null && root.boardJob.kind === "subname_revoke" ? "Revoking…" : "Revoke"
+                                        grave: true
+                                        enabledNow: root.boardJob === null && root.cliPath !== "" && subnameRevokeLabel.text.trim() !== "" && Logic.subnameLabelProblem(subnameRevokeLabel.text) === ""
+                                        onPressed: root.startSubnameRevoke(root.record.name, subnameRevokeLabel.text)
+                                    }
+                                }
+                            }
+                            Card {
+                                Layout.fillWidth: true
+                                Text { text: "Sell subnames automatically"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Hint { font.pixelSize: root.px(15); text: "Let anyone buy a permanent subname under " + (root.record !== null ? root.record.name : "") + " at a fixed price (or 0 for free)." }
+                                RowLayout {
+                                    spacing: 6
+                                    Tab { label: "Off"; current: !root.subnameSaleOn; onPressed: root.subnameSaleOn = false }
+                                    Tab { label: "On"; current: root.subnameSaleOn; onPressed: root.subnameSaleOn = true }
+                                }
+                                Field {
+                                    id: subnameSalePriceField
+                                    visible: root.subnameSaleOn
+                                    Layout.fillWidth: true
+                                    size: 17
+                                    hint: "Price (0 for free)"
+                                }
+                                Field {
+                                    id: subnameSalePayoutField
+                                    visible: root.subnameSaleOn
+                                    Layout.fillWidth: true
+                                    size: 17
+                                    code: true
+                                    hint: "Payout public account (Public/…)"
+                                }
+                                Action {
+                                    label: root.boardJob !== null && root.boardJob.kind === "subname_sale" ? "Saving…" : "Save subname sales"
+                                    strong: true
+                                    enabledNow: root.boardJob === null && root.cliPath !== ""
+                                    onPressed: root.startSubnameSetSale(root.record.name, root.subnameSaleOn, subnameSalePriceField.text, subnameSalePayoutField.text)
+                                }
+                            }
+                        }
+
+                        // Sell tab: marketplace listing with exact 2.5% fee / 97.5% seller payout preview.
+                        ColumnLayout {
+                            visible: root.editTab === "sell" && root.record !== null && !root.record.subname
+                            Layout.fillWidth: true
+                            spacing: 16
+                            Card {
+                                visible: root.record !== null && root.record.listing !== null && root.record.listing !== undefined
+                                Layout.fillWidth: true
+                                border.color: root.brass
+                                Text { text: "Currently listed for sale"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Fact { label: "Price"; value: root.record !== null && root.record.listing ? root.grouped(root.record.listing.price) : "" }
+                                Fact { label: "Protocol fee"; value: root.record !== null && root.record.listing ? root.grouped(root.record.listing.fee) + " (2.5%)" : "" }
+                                Fact { label: "You receive"; value: root.record !== null && root.record.listing ? root.grouped(root.record.listing.seller_receives) + " (97.5%)" : "" }
+                                Fact { label: "Paid to"; code: true; value: root.record !== null && root.record.listing ? root.shorten(String(root.record.listing.pay_to || "")) : ""; full: root.record !== null && root.record.listing ? String(root.record.listing.pay_to || "") : "" }
+                                Action {
+                                    label: root.boardJob !== null && root.boardJob.kind === "cancel_listing" ? "Cancelling…" : "Cancel listing"
+                                    grave: true
+                                    enabledNow: root.boardJob === null && root.cliPath !== ""
+                                    onPressed: root.startCancelListing(root.record.name)
+                                }
+                            }
+                            Card {
+                                id: listSaleCard
+                                Layout.fillWidth: true
+                                readonly property string priceErr: listPriceField.text.trim() === "" ? "" : Logic.listingPriceProblem(listPriceField.text)
+                                readonly property var split: listPriceField.text.trim() !== "" && priceErr === "" ? Logic.saleSplit(Logic.amountDigits(listPriceField.text)) : null
+                                Text { text: root.record !== null && root.record.listing !== null ? "Update listing" : "List for sale"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Hint { font.pixelSize: root.px(15); text: "Set a price (minimum 40). When someone buys it, 2.5% goes to the treasury and 97.5% goes to your payout account." }
+                                Field {
+                                    id: listPriceField
+                                    Layout.fillWidth: true
+                                    size: 17
+                                    hint: "Price (minimum 40, e.g. 10,000)"
+                                }
+                                Hint {
+                                    visible: listSaleCard.priceErr !== ""
+                                    color: root.alarm
+                                    font.pixelSize: root.px(14)
+                                    text: listSaleCard.priceErr
+                                }
+                                ColumnLayout {
+                                    visible: listSaleCard.split !== null
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    Fact { label: "Protocol fee (2.5%)"; value: listSaleCard.split !== null ? root.grouped(listSaleCard.split.fee) : "" }
+                                    Fact { label: "You receive (97.5%)"; value: listSaleCard.split !== null ? root.grouped(listSaleCard.split.seller) : "" }
+                                }
+                                Field {
+                                    id: listPayToField
+                                    Layout.fillWidth: true
+                                    size: 17
+                                    code: true
+                                    hint: "Payout public account (Public/…)"
+                                }
+                                Field {
+                                    id: listExpiresField
+                                    Layout.fillWidth: true
+                                    size: 17
+                                    hint: "Listing expiry (optional, e.g. 7d or 24h; leave blank for no expiry)"
+                                }
+                                RowLayout {
+                                    spacing: 6
+                                    Tab { label: "Private listing (direct buyers only)"; current: !root.listPublicName; onPressed: root.listPublicName = false }
+                                    Tab { label: "Show name in public marketplace"; current: root.listPublicName; onPressed: root.listPublicName = true }
+                                }
+                                Action {
+                                    label: root.boardJob !== null && root.boardJob.kind === "list_name" ? "Listing…" : "List for sale"
+                                    strong: true
+                                    enabledNow: root.boardJob === null && root.cliPath !== "" && listPriceField.text.trim() !== "" && listSaleCard.priceErr === "" && listPayToField.text.trim() !== ""
+                                    onPressed: root.startListName(root.record.name, listPriceField.text, listPayToField.text, listExpiresField.text, root.listPublicName)
+                                }
+                            }
+                        }
+
+                        ColumnLayout {
                             visible: root.editTab === "giveup" && root.cliHeld
-                            text: "To hand this name to someone, use Names → Transfer… beside it. To give it up for good, use the names CLI: names release."
+                            Layout.fillWidth: true
+                            spacing: 14
+                            Hint {
+                                text: "To hand this name to someone, use Names → Transfer… beside it, or transfer it via its linked NFT below. To give it up for good, use the names CLI: names release."
+                            }
+                            Card {
+                                visible: root.record !== null && !root.record.subname && root.record.nft !== null
+                                Layout.fillWidth: true
+                                Text { text: "Transfer via linked NFT"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(20); font.weight: Font.DemiBold }
+                                Hint { font.pixelSize: root.px(15); text: "Moves the linked NFT deed directly; the name ownership follows automatically." }
+                                Field {
+                                    id: cliNftOwnerField
+                                    Layout.fillWidth: true
+                                    code: true
+                                    hint: "Recipient account (Public/… or Private/…)"
+                                }
+                                Action {
+                                    label: root.boardJob !== null && root.boardJob.kind === "transfer_via_nft" ? "Transferring…" : "Transfer via linked NFT"
+                                    grave: true
+                                    enabledNow: root.boardJob === null && cliNftOwnerField.text.trim() !== ""
+                                    onPressed: root.startTransferViaNft(root.record.name, cliNftOwnerField.text)
+                                }
+                            }
                         }
                         RowLayout {
                             visible: root.editTab === "giveup" && !root.cliHeld
@@ -8567,7 +9370,13 @@ Item {
                                 Layout.preferredWidth: 1
                                 Layout.alignment: Qt.AlignTop
                                 Text { text: "Transfer"; color: root.ink; font.family: root.sans; font.pixelSize: root.px(22); font.weight: Font.DemiBold }
-                                Hint { text: root.record !== null ? "Give " + root.shown(root.record.name) + " to someone else. Its profile and page are cleared for them." : "" }
+                                Hint { text: root.record !== null ? "Give " + root.shown(root.record.name) + " to someone else. Its linked NFT moves with it, and its profile and page are cleared for them." : "" }
+                                RowLayout {
+                                    visible: root.record !== null && !root.record.subname && root.record.nft !== null && root.cliPath !== ""
+                                    spacing: 6
+                                    Tab { label: "Via name"; current: !root.editTransferViaNft; onPressed: root.editTransferViaNft = false }
+                                    Tab { label: "Via linked NFT"; current: root.editTransferViaNft; onPressed: root.editTransferViaNft = true }
+                                }
                                 Text { text: "Their account"; color: root.faint; font.family: root.sans; font.pixelSize: root.px(15) }
                                 Field {
                                     id: newOwnerField
@@ -8585,7 +9394,7 @@ Item {
                                         x: 14
                                         y: 12
                                         width: parent.width - 28
-                                        text: root.record !== null && Logic.someAmount(root.record.deposit) ? "Your deposit of " + root.grouped(root.record.deposit) + " goes with the name. They get it back when they release it, not you." : "Any deposit goes with the name."
+                                        text: root.record !== null && Logic.someAmount(root.record.deposit) ? "Your deposit of " + root.grouped(root.record.deposit) + " goes with the name. They get it back when they release it, not you." : "Ownership and the linked NFT move together."
                                         color: root.brass
                                         font.family: root.sans
                                         font.pixelSize: root.px(15)
@@ -8593,10 +9402,11 @@ Item {
                                     }
                                 }
                                 Action {
-                                    label: root.record !== null ? "Transfer " + root.shown(root.record.name) : ""
+                                    label: root.busy || (root.boardJob !== null && root.boardJob.kind === "transfer_via_nft") ? "Transferring…"
+                                        : root.record !== null ? (root.editTransferViaNft ? "Transfer " + root.shown(root.record.name) + " via NFT" : "Transfer " + root.shown(root.record.name)) : ""
                                     changes: true
-                                    enabledNow: newOwnerField.text.trim() !== ""
-                                    onPressed: root.transferName()
+                                    enabledNow: newOwnerField.text.trim() !== "" && root.boardJob === null
+                                    onPressed: root.editTransferViaNft ? root.startTransferViaNft(root.record.name, newOwnerField.text) : root.transferName()
                                 }
                             }
                             Card {

@@ -211,11 +211,192 @@ impl Setup {
 /// appears on chain. It returns once the commitment is made; the CLI reveals
 /// it in the background (`names mine` says when).
 pub fn register_args(name: &str, public: bool) -> Result<Vec<String>, String> {
+    register_args_with_term(name, public, "")
+}
+
+/// `names register` with an explicit term (`30d`, `1y`, `5y`, `permanent`).
+pub fn register_args_with_term(name: &str, public: bool, term: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_top_level_name(name)?;
     let mut args = vec!["register".to_owned()];
     if public {
         args.push("--public".to_owned());
     }
-    args.extend(["--".to_owned(), registry::parse_name(name)?]);
+    let term = term.trim();
+    if !term.is_empty() {
+        let parsed = registry::parse_term(term)?;
+        args.push(format!("--term={}", registry::term_label(parsed)));
+    }
+    args.extend(["--".to_owned(), name]);
+    Ok(args)
+}
+
+/// `names renew <name> --term=<term>`: anyone may pay to extend a top-level name.
+pub fn renew_args(name: &str, term: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_top_level_name(name)?;
+    let parsed = registry::parse_term(term)?;
+    Ok(vec![
+        "renew".to_owned(),
+        format!("--term={}", registry::term_label(parsed)),
+        "--".to_owned(),
+        name,
+    ])
+}
+
+/// `names list <name> <price> [--pay-to=...] [--expires=...] [--public-name]`.
+pub fn list_args(
+    name: &str,
+    price: &str,
+    pay_to: &str,
+    expires: &str,
+    public_name: bool,
+) -> Result<Vec<String>, String> {
+    let name = registry::parse_top_level_name(name)?;
+    let price_num = amount(price)?;
+    if price_num < registry::MIN_SALE_PRICE {
+        return Err(format!(
+            "the minimum listing price is {} (so the 2.5% fee is at least 1)",
+            registry::MIN_SALE_PRICE
+        ));
+    }
+    let mut args = vec!["list".to_owned()];
+    let pay_to = pay_to.trim();
+    if !pay_to.is_empty() {
+        let id = pay_to.strip_prefix("Public/").unwrap_or(pay_to);
+        if pay_to.starts_with("Private/") {
+            return Err("the payout account for a listing must be a public account (Public/<id>)".to_owned());
+        }
+        let account = registry::bare_account(id)?;
+        args.push(format!("--pay-to=Public/{}", registry::account_text(&account)));
+    }
+    let expires = expires.trim();
+    if !expires.is_empty() {
+        plain_text(expires, "listing expiry")?;
+        if expires.len() > 32 || !expires.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err("listing expiry must be a duration such as 7d, 24h, or a timestamp in ms".to_owned());
+        }
+        args.push(format!("--expires={expires}"));
+    }
+    if public_name {
+        args.push("--public-name".to_owned());
+    }
+    args.extend(["--".to_owned(), name, price_num.to_string()]);
+    Ok(args)
+}
+
+/// `names cancel <name>`.
+pub fn cancel_args(name: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_top_level_name(name)?;
+    Ok(vec!["cancel".to_owned(), "--".to_owned(), name])
+}
+
+/// `names buy <name>`.
+pub fn buy_args(name: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_top_level_name(name)?;
+    Ok(vec!["buy".to_owned(), "--".to_owned(), name])
+}
+
+/// `names transfer --via-nft <name> <new_owner>`.
+pub fn transfer_via_nft_args(name: &str, new_owner: &str) -> Result<Vec<String>, String> {
+    let mut args = transfer_args(name, new_owner)?;
+    args.insert(1, "--via-nft".to_owned());
+    Ok(args)
+}
+
+/// `names subname create <label>.<parent> [--owner=...] [--revocable|--permanent]`.
+pub fn subname_create_args(parent: &str, label: &str, owner: &str, revocable: bool) -> Result<Vec<String>, String> {
+    let parent = registry::parse_top_level_name(parent)?;
+    let label = registry::normalize_name(label);
+    if !registry::is_valid_label(&label) {
+        return Err("subname label must be 1-32 characters of a-z, 0-9 or '-' (without '--')".to_owned());
+    }
+    let full = format!("{label}.{parent}");
+    registry::parse_name(&full)?;
+    let mut args = vec!["subname".to_owned(), "create".to_owned()];
+    if revocable {
+        args.push("--revocable".to_owned());
+    } else {
+        args.push("--permanent".to_owned());
+    }
+    let owner = owner.trim();
+    if !owner.is_empty() {
+        let (kind, id) = match (owner.strip_prefix("Public/"), owner.strip_prefix("Private/")) {
+            (Some(id), _) => ("Public", id),
+            (_, Some(id)) => ("Private", id),
+            _ => return Err("write Public/ or Private/ before the recipient account ID".to_owned()),
+        };
+        let account = registry::bare_account(id)?;
+        registry::plausible_holder(id, &account)?;
+        args.push(format!("--owner={kind}/{}", registry::account_text(&account)));
+    }
+    args.extend(["--".to_owned(), full]);
+    Ok(args)
+}
+
+/// `names subname revoke <label>.<parent>`.
+pub fn subname_revoke_args(parent: &str, label: &str) -> Result<Vec<String>, String> {
+    let parent = registry::parse_top_level_name(parent)?;
+    let label = registry::normalize_name(label);
+    let full = if label.contains('.') { label } else { format!("{label}.{parent}") };
+    if registry::split_subname(&full).is_none() {
+        return Err("enter a valid subname label".to_owned());
+    }
+    Ok(vec!["subname".to_owned(), "revoke".to_owned(), "--".to_owned(), full])
+}
+
+/// `names subname sale <parent> --off` or `names subname sale <parent> --price=<p> [--payout=Public/<id>]`.
+pub fn subname_sale_args(parent: &str, enabled: bool, price: &str, payout: &str) -> Result<Vec<String>, String> {
+    let parent = registry::parse_top_level_name(parent)?;
+    let mut args = vec!["subname".to_owned(), "sale".to_owned()];
+    if !enabled {
+        args.push("--off".to_owned());
+    } else {
+        let typed = price.trim();
+        let p = if typed.is_empty() || typed.bytes().all(|b| b == b'0') {
+            "0".to_owned()
+        } else {
+            amount_text(typed)?
+        };
+        args.push(format!("--price={p}"));
+        let payout = payout.trim();
+        if !payout.is_empty() {
+            if payout.starts_with("Private/") {
+                return Err("subname sales payout must be a public account (Public/<id>)".to_owned());
+            }
+            let id = payout.strip_prefix("Public/").unwrap_or(payout);
+            let account = registry::bare_account(id)?;
+            args.push(format!("--payout=Public/{}", registry::account_text(&account)));
+        }
+    }
+    args.extend(["--".to_owned(), parent]);
+    Ok(args)
+}
+
+/// `names subname buy <label>.<parent>`.
+pub fn subname_buy_args(parent: &str, label: &str) -> Result<Vec<String>, String> {
+    let parent = registry::parse_top_level_name(parent)?;
+    let label = registry::normalize_name(label);
+    let full = if label.contains('.') { label } else { format!("{label}.{parent}") };
+    if registry::split_subname(&full).is_none() {
+        return Err("enter a valid subname label".to_owned());
+    }
+    Ok(vec!["subname".to_owned(), "buy".to_owned(), "--".to_owned(), full])
+}
+
+/// `names profile --no-discover` / `names profile --discover [--display=...] <name>`.
+pub fn set_discover_args(name: &str, discover_off: bool, title: &str) -> Result<Vec<String>, String> {
+    let name = registry::parse_top_level_name(name)?;
+    let mut args = vec!["profile".to_owned()];
+    if discover_off {
+        args.push("--no-discover".to_owned());
+    } else {
+        args.push("--discover".to_owned());
+        let title = title.trim();
+        if !title.is_empty() {
+            registry::validate_site_title(title)?;
+            args.push(format!("--display={title}"));
+        }
+    }
+    args.extend(["--".to_owned(), name]);
     Ok(args)
 }
 
@@ -1667,7 +1848,10 @@ pub fn parse_mine(output: &str) -> Vec<Value> {
             not_public.insert(name, why.to_owned());
             continue;
         }
-        let (lapsed, registering, failed) = if state.starts_with("held ") {
+        let (lapsed, registering, failed) = if state.starts_with("held ")
+            || state.starts_with("permanent")
+            || state.starts_with("revocable")
+        {
             (false, false, false)
         } else if state.starts_with("lapsed ") {
             (true, false, false)
@@ -1742,8 +1926,17 @@ pub fn job_problem(kind: &str, log: &str) -> String {
         "token_receive" => "Receiving didn't finish",
         "receive" => "Claiming didn't finish",
         "shield" => "Moving to private didn't go through",
-        "transfer" => "Giving the name away didn't go through",
+        "transfer" | "transfer_via_nft" => "Giving the name away didn't go through",
         "register" => "Registering the name didn't finish",
+        "renew" => "Renewing the name didn't finish",
+        "list" => "Listing the name for sale didn't finish",
+        "cancel" => "Cancelling the listing didn't finish",
+        "buy" => "Buying the name didn't go through",
+        "subname_create" => "Creating the subname didn't finish",
+        "subname_revoke" => "Revoking the subname didn't finish",
+        "subname_sale" => "Saving subname sales didn't finish",
+        "subname_buy" => "Buying the subname didn't finish",
+        "set_discover" => "Updating site directory listing didn't finish",
         "claim" => "Taking the name back didn't finish",
         "receive_privately" => "Setting up private payments didn't finish",
         "profile" | "set_text" => "Saving the profile didn't finish",
@@ -1907,7 +2100,7 @@ fn confirm_names(setup: &Setup, doubts: &[String], deadline: registry::Deadline)
                     accounts = Some(wallet_accounts(setup, deadline).map_err(|problem| format!("the names CLI couldn't list this wallet's accounts: {}", clause(&problem)))?);
                 }
                 let holder = accounts.iter().flatten().find(|account| {
-                    account.split_once('/').and_then(|(_, id)| registry::parse_account(id).ok()).is_some_and(|id| record.is_held_by(&derived.id, &id))
+                    account.split_once('/').and_then(|(_, id)| registry::parse_account(id).ok()).is_some_and(|id| record.is_held_by_name(name, &derived, &id))
                 });
                 if let Some(holder) = holder {
                     confirmed.held.push(held_entry(name, &record, holder, registry::local_now()));
@@ -3836,5 +4029,58 @@ mod tests {
         let refusing = Setup { program: fake_cli(&dir, "echo 'Error: not a token' >&2; exit 1"), ..setup };
         assert!(run_token_info(&refusing, &[3; 32], &[4; 32]).unwrap_err().contains("not a token"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn v8_cli_arg_builders_and_parse_mine() {
+        assert_eq!(
+            register_args_with_term("alice", true, "permanent").unwrap(),
+            strings(&["register", "--public", "--term=permanent", "--", "alice"])
+        );
+        assert!(register_args_with_term("blog.alice", false, "1y").is_err());
+        assert_eq!(
+            renew_args("alice", "5y").unwrap(),
+            strings(&["renew", "--term=5y", "--", "alice"])
+        );
+        assert_eq!(
+            list_args("alice", "1,000", &format!("Public/{HOLDER}"), "7d", true).unwrap(),
+            strings(&["list", &format!("--pay-to=Public/{HOLDER}"), "--expires=7d", "--public-name", "--", "alice", "1000"])
+        );
+        assert!(list_args("alice", "39", "", "", false).is_err());
+        assert!(list_args("alice", "100", &format!("Private/{HOLDER}"), "", false).is_err());
+        assert_eq!(cancel_args("alice").unwrap(), strings(&["cancel", "--", "alice"]));
+        assert_eq!(buy_args("alice").unwrap(), strings(&["buy", "--", "alice"]));
+        assert_eq!(
+            subname_create_args("alice", "blog", &format!("Public/{HOLDER}"), true).unwrap(),
+            strings(&["subname", "create", "--revocable", &format!("--owner=Public/{HOLDER}"), "--", "blog.alice"])
+        );
+        assert_eq!(
+            subname_revoke_args("alice", "blog").unwrap(),
+            strings(&["subname", "revoke", "--", "blog.alice"])
+        );
+        assert_eq!(
+            subname_sale_args("alice", true, "500", &format!("Public/{HOLDER}")).unwrap(),
+            strings(&["subname", "sale", "--price=500", &format!("--payout=Public/{HOLDER}"), "--", "alice"])
+        );
+        assert_eq!(
+            subname_sale_args("alice", false, "", "").unwrap(),
+            strings(&["subname", "sale", "--off", "--", "alice"])
+        );
+        assert_eq!(
+            subname_buy_args("alice", "blog").unwrap(),
+            strings(&["subname", "buy", "--", "blog.alice"])
+        );
+        assert_eq!(
+            set_discover_args("alice", true, "").unwrap(),
+            strings(&["profile", "--no-discover", "--", "alice"])
+        );
+        assert_eq!(
+            set_discover_args("alice", false, "Alice Home").unwrap(),
+            strings(&["profile", "--discover", "--display=Alice Home", "--", "alice"])
+        );
+        let parsed = parse_mine("alice  permanent (no expiry); held privately\nblog.alice  revocable subname; held privately\n");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["name"], "alice");
+        assert_eq!(parsed[1]["name"], "blog.alice");
     }
 }

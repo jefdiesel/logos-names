@@ -106,8 +106,11 @@ struct Mention {
     account: String,
     /// Whose state on `account` it is.
     program: String,
-    /// A registry account's seed, the evidence that lets the transaction create it.
+    /// A PDA's seed, the evidence that lets the transaction create it.
     seed: Option<String>,
+    /// The program that owns the PDA when `seed` is set; defaults to the registry program.
+    #[serde(default)]
+    pda_program: Option<String>,
     signs: bool,
 }
 
@@ -314,7 +317,7 @@ impl Client {
         let mentions = change.mentions.iter().map(|mention| self.mention(mention)).collect::<Result<Vec<_>>>()?;
         let message = hex::decode(&change.message).context("the message is not hex")?;
         let spent = change.spent.parse().context("the amount spent is not a number")?;
-        let program = self.program().await?;
+        let programs = self.programs_for(&mentions).await?;
         let decoded = borsh::from_slice::<names_core::Message>(&message).ok();
         let is_public = !mentions.iter().any(|mention| mention.identity.is_private());
         if is_public {
@@ -336,7 +339,7 @@ impl Client {
                 _ => None,
             })
             .unwrap_or(65_590);
-        self.transact(mentions, message, vec![(self.program, program)], spent, cycles).await
+        self.transact(mentions, message, programs, spent, cycles).await
     }
 
     fn mention(&self, mention: &Mention) -> Result<AccountMention> {
@@ -345,7 +348,11 @@ impl Client {
         let identity = match &mention.seed {
             Some(seed) => {
                 let seed = parse_hex32(seed).ok_or_else(|| anyhow!("a seed is 32 bytes of hex"))?;
-                AccountIdentity::PublicPda { program: self.program, seed: PdaSeed::new(seed) }
+                let pda_program = match &mention.pda_program {
+                    Some(p) => parse_account(p).map_err(|error| anyhow!(error))?,
+                    None => self.program,
+                };
+                AccountIdentity::PublicPda { program: pda_program, seed: PdaSeed::new(seed) }
             }
             None if mention.signs => self.signer(account),
             None => AccountIdentity::PublicNoSign(account),

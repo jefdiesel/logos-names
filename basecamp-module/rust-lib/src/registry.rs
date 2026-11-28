@@ -20,9 +20,15 @@ use std::time::{Duration, Instant};
 pub const NAME_SUFFIX: &str = "";
 /// The text entry that points a name to another (SPEC.md §7, Forwarding).
 pub const FORWARD_KEY: &str = "forward";
+/// The text entry that opts a site out of the public sites directory (`discover=off`).
+pub const DISCOVER_KEY: &str = "discover";
 /// The old suffix, still accepted and removed when typed or pasted.
 pub const LEGACY_SUFFIX: &str = ".lez";
+/// Current registry layout version (LEZ 0.4, v8).
+pub const VERSION: u8 = 8;
 const MAX_NAME_LEN: usize = 32;
+pub const MAX_SUBNAME_LEN: usize = 62;
+pub const MAX_SITE_TITLE_BYTES: usize = 64;
 const PDA_PREFIX: &[u8] = b"/LEE/v0.2/AccountId/PDA/";
 /// One fixed salt for every network, on purpose: a name keeps its identifier
 /// and key from testnet to mainnet.
@@ -41,14 +47,42 @@ const COMMITMENT_DOMAIN: &[u8] = b"logos-names/v5/commitment";
 const COMMITMENT_SEED_DOMAIN: &[u8] = b"logos-names/v5/commit/";
 const DEPOSIT_SEED_DOMAIN: &[u8] = b"logos-names/v5/deposit/";
 const CLAIM_LEAF_DOMAIN: &[u8] = b"logos-names/v6/claim-leaf";
+const TIER_ID_DOMAIN: &[u8] = b"logos-names/v7/tier/";
+const SUBNAME_SEED_DOMAIN: &[u8] = b"logos-names/v7/subname/";
+const SUBPAGE_SEED_DOMAIN: &[u8] = b"logos-names/v7/subpage/";
+const SUBNAME_COMMITMENT_DOMAIN: &[u8] = b"logos-names/v7/sub-commitment";
+const GEN_REGISTER_DOMAIN: &[u8] = b"logos-names/v7/gen/register";
+const NFT_TOKEN_ID_DOMAIN: &[u8] = b"logos-names/v8/nft-token/";
+const NFT_TOKEN_SEED_DOMAIN: &[u8] = b"lez-nft/v3/token/";
+const MARKET_BUCKET_SEED_DOMAIN: &[u8] = b"logos-names/v8/market/";
+const SITE_DIR_HEADER_SEED_DOMAIN: &[u8] = b"logos-names/v8/sites-meta";
+const SITE_BUCKET_SEED_DOMAIN: &[u8] = b"logos-names/v8/sites/";
+pub const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 /// After a fee-mode name expires, only its holder can renew it for this long.
 /// Past that it reads as unregistered and anyone may register it.
-pub const GRACE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-/// How long each fee-mode term holds a name, in milliseconds, by term index.
-#[allow(dead_code)] // Fee mode is read through `Settings::deposit_mode`; kept for the layout's sake.
-pub const TERM_LENGTHS_MS: [u64; 3] = [30 * 24 * 60 * 60 * 1000, 365 * 24 * 60 * 60 * 1000, 5 * 365 * 24 * 60 * 60 * 1000];
-/// The registry charges a fee per term, paid to its treasury; names lapse.
-#[allow(dead_code)] // Fee mode is read through `Settings::deposit_mode`; kept for the layout's sake.
+pub const GRACE_MS: u64 = 30 * DAY_MS;
+/// How long each finite fee-mode term holds a name, in milliseconds, by term index.
+pub const TERM_LENGTHS_MS: [u64; 3] = [30 * DAY_MS, 365 * DAY_MS, 5 * 365 * DAY_MS];
+pub const TERMS: usize = 4;
+pub const TERM_30D: u8 = 0;
+pub const TERM_1Y: u8 = 1;
+pub const TERM_5Y: u8 = 2;
+pub const TERM_PERMANENT: u8 = 3;
+pub const PRICE_TIERS: usize = 3;
+pub const PRICE_TIER_5: u8 = 0;
+pub const PRICE_TIER_6_7: u8 = 1;
+pub const PRICE_TIER_8_PLUS: u8 = 2;
+/// 21-day falling re-release premium window after grace ends.
+pub const PREMIUM_DAYS: u64 = 21;
+pub const PREMIUM_DURATION_MS: u64 = PREMIUM_DAYS * DAY_MS;
+/// Fixed secondary-sale protocol fee: 2.5% = 1/40 (`price.div_ceil(40)`).
+pub const SALE_FEE_DIVISOR: u128 = 40;
+pub const SALE_FEE_BPS: u16 = 250;
+pub const MIN_SALE_PRICE: u128 = SALE_FEE_DIVISOR;
+pub const MARKET_BUCKETS: u8 = 16;
+pub const SITE_BUCKETS: u8 = 16;
+/// The registry charges a fee per term, paid to its treasury; names lapse
+/// (unless registered or renewed with [`TERM_PERMANENT`]).
 pub const MODE_FEE: u8 = 0;
 /// The registry takes a refundable deposit into the name's deposit account;
 /// names never lapse.
@@ -91,17 +125,20 @@ pub type NameId = [u8; 32];
 /// What a record keeps in place of its holder's account: [`owner_tag`].
 pub type OwnerTag = [u8; 32];
 
-/// Turns what a person typed, such as `Jef`, `@jef`, `lns:jef` or `jef.lez`,
+/// Turns what a person typed, such as `Jef`, `@jef`, `lns:jef`, `lns://blog.jef` or `jef.lez`,
 /// into the bare name.
 pub fn normalize_name(input: &str) -> String {
     let lowered = input.trim().to_ascii_lowercase();
-    let bare = lowered.strip_prefix("lns:").unwrap_or(&lowered);
+    let bare = lowered
+        .strip_prefix("lns://")
+        .or_else(|| lowered.strip_prefix("lns:"))
+        .unwrap_or(&lowered);
     let bare = bare.strip_prefix('@').unwrap_or(bare);
     bare.strip_suffix(LEGACY_SUFFIX).unwrap_or(bare).to_owned()
 }
 
-pub fn is_valid_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
+pub fn is_valid_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= MAX_NAME_LEN
         && bytes
@@ -109,10 +146,31 @@ pub fn is_valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
         && bytes[0] != b'-'
         && bytes[bytes.len() - 1] != b'-'
+        && !bytes.windows(2).any(|w| w == b"--")
 }
 
-/// Normalises typed input and returns the bare name, or why it is not a name.
-/// The chain never sees a name, so this check is the only one there is.
+/// Splits a valid one-level subname `label.parent` into `(label, parent)`.
+pub fn split_subname(name: &str) -> Option<(&str, &str)> {
+    if name.len() > MAX_SUBNAME_LEN {
+        return None;
+    }
+    let (label, parent) = name.split_once('.')?;
+    if !is_valid_label(label) || !is_valid_label(parent) {
+        return None;
+    }
+    Some((label, parent))
+}
+
+pub fn is_valid_name(name: &str) -> bool {
+    if name.contains('.') {
+        split_subname(name).is_some()
+    } else {
+        is_valid_label(name)
+    }
+}
+
+/// Normalises typed input and returns the bare name (top-level or one-level subname),
+/// or why it is not a name. The chain never sees a name, so this check is the only one there is.
 pub fn parse_name(input: &str) -> Result<String, String> {
     let name = normalize_name(input);
     if is_valid_name(&name) && parse_account(&name).is_err() {
@@ -121,8 +179,17 @@ pub fn parse_name(input: &str) -> Result<String, String> {
     } else if is_valid_name(&name) {
         Err(format!("{name} is also an account ID, so it can't be a name"))
     } else {
-        Err("a name is 1-32 characters of a-z, 0-9 or '-', such as jef".to_owned())
+        Err("a name is 1-32 characters of a-z, 0-9 or '-' (without '--'), or a subname like blog.jef".to_owned())
     }
+}
+
+/// Normalises typed input and requires a top-level name (not a subname).
+pub fn parse_top_level_name(input: &str) -> Result<String, String> {
+    let name = parse_name(input)?;
+    if name.contains('.') {
+        return Err("a top-level name has no dot (1-32 characters of a-z, 0-9 or '-', such as jef)".to_owned());
+    }
+    Ok(name)
 }
 
 pub fn parse_account(text: &str) -> Result<AccountId, String> {
@@ -279,6 +346,183 @@ pub fn claim_leaf(old_record: &AccountId, holder: &OwnerTag) -> [u8; 32] {
     sha256(&[CLAIM_LEAF_DOMAIN, old_record, holder])
 }
 
+/// Pricing tier for a top-level name of length `len`:
+/// `0` for <=5 chars, `1` for 6-7 chars, `2` for 8+ chars.
+pub const fn price_tier_for_len(len: usize) -> u8 {
+    if len <= 5 {
+        PRICE_TIER_5
+    } else if len <= 7 {
+        PRICE_TIER_6_7
+    } else {
+        PRICE_TIER_8_PLUS
+    }
+}
+
+/// On-chain v7/v8 slot identifier for a top-level name: `SHA-256("logos-names/v7/tier/" || tier || base_id)`.
+pub fn tiered_id(base_id: &NameId, price_tier: u8) -> NameId {
+    assert!(usize::from(price_tier) < PRICE_TIERS, "invalid price tier");
+    sha256(&[TIER_ID_DOMAIN, &[price_tier], base_id])
+}
+
+/// The on-chain identifier used for records/pages/ownership/commitments:
+/// `tiered_id(base_id, price_tier_for_len(name.len()))` for top-level names,
+/// and `base_id` unchanged for subnames (`label.parent`).
+pub fn slot_id(name: &str, base_id: &NameId) -> NameId {
+    if split_subname(name).is_some() {
+        *base_id
+    } else {
+        tiered_id(base_id, price_tier_for_len(name.len()))
+    }
+}
+
+pub fn subname_record_seed(parent_id: &NameId, sub_id: &NameId) -> [u8; 32] {
+    sha256(&[SUBNAME_SEED_DOMAIN, parent_id, sub_id])
+}
+
+pub fn subname_page_seed(parent_id: &NameId, sub_id: &NameId) -> [u8; 32] {
+    sha256(&[SUBPAGE_SEED_DOMAIN, parent_id, sub_id])
+}
+
+pub fn subname_record_address(program: &AccountId, parent_id: &NameId, sub_id: &NameId) -> AccountId {
+    pda(program, &subname_record_seed(parent_id, sub_id))
+}
+
+pub fn subname_page_address(program: &AccountId, parent_id: &NameId, sub_id: &NameId) -> AccountId {
+    pda(program, &subname_page_seed(parent_id, sub_id))
+}
+
+pub fn subname_commitment(parent_id: &NameId, sub_id: &NameId, holder: &OwnerTag, secret: &[u8; 32]) -> [u8; 32] {
+    sha256(&[SUBNAME_COMMITMENT_DOMAIN, parent_id, sub_id, holder, secret])
+}
+
+pub fn register_generation(slot: &NameId, owner: &OwnerTag, now: u64, secret: &[u8; 32]) -> [u8; 32] {
+    sha256(&[GEN_REGISTER_DOMAIN, slot, owner, &now.to_le_bytes(), secret])
+}
+
+pub fn nft_token_id(slot: &NameId, mint_generation: &[u8; 32]) -> [u8; 32] {
+    sha256(&[NFT_TOKEN_ID_DOMAIN, slot, mint_generation])
+}
+
+pub fn nft_token_seed(token_id: &[u8; 32]) -> [u8; 32] {
+    sha256(&[NFT_TOKEN_SEED_DOMAIN, token_id])
+}
+
+pub fn nft_token_address(nft_program: &AccountId, token_id: &[u8; 32]) -> AccountId {
+    pda(nft_program, &nft_token_seed(token_id))
+}
+
+pub const fn bucket_of(id: &NameId) -> u8 {
+    id[0] & 0x0f
+}
+
+pub fn market_bucket_seed(bucket: u8) -> [u8; 32] {
+    assert!(bucket < MARKET_BUCKETS, "market bucket out of range");
+    sha256(&[MARKET_BUCKET_SEED_DOMAIN, &[bucket]])
+}
+
+pub fn market_bucket_address(program: &AccountId, bucket: u8) -> AccountId {
+    pda(program, &market_bucket_seed(bucket))
+}
+
+pub fn site_dir_header_seed() -> [u8; 32] {
+    sha256(&[SITE_DIR_HEADER_SEED_DOMAIN])
+}
+
+pub fn site_dir_header_address(program: &AccountId) -> AccountId {
+    pda(program, &site_dir_header_seed())
+}
+
+pub fn site_bucket_seed(bucket: u8, page: u16) -> [u8; 32] {
+    assert!(bucket < SITE_BUCKETS, "site bucket out of range");
+    sha256(&[SITE_BUCKET_SEED_DOMAIN, &[bucket], &page.to_le_bytes()])
+}
+
+pub fn site_bucket_address(program: &AccountId, bucket: u8, page: u16) -> AccountId {
+    pda(program, &site_bucket_seed(bucket, page))
+}
+
+/// Splits a secondary-sale `price` into `(seller_amount, treasury_fee)` at the fixed
+/// 2.5% (`1 / 40`) treasury fee using ceiling division for the fee.
+pub const fn sale_split(price: u128) -> (u128, u128) {
+    let fee = price.div_ceil(SALE_FEE_DIVISOR);
+    (price - fee, fee)
+}
+
+/// 21-day falling re-release premium `elapsed_ms` after a lapsed name's 30-day grace
+/// period ends. Halves every 24 hours with linear interpolation within each day.
+pub const fn rerelease_premium(premium_start: u128, elapsed_ms: u64) -> u128 {
+    if premium_start == 0 || elapsed_ms >= PREMIUM_DURATION_MS {
+        return 0;
+    }
+    let day = elapsed_ms / DAY_MS;
+    let rem = (elapsed_ms % DAY_MS) as u128;
+    let day_ms = DAY_MS as u128;
+    let hi = premium_start >> day;
+    let lo = if day + 1 == PREMIUM_DAYS { 0 } else { premium_start >> (day + 1) };
+    let span = hi - lo;
+    let drop = match span.checked_mul(rem) {
+        Some(prod) => prod / day_ms,
+        None => (span / day_ms) * rem,
+    };
+    hi - drop
+}
+
+pub fn parse_term(text: &str) -> Result<u8, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "30d" | "30" | "month" => Ok(TERM_30D),
+        "1y" | "1yr" | "year" | "" => Ok(TERM_1Y),
+        "5y" | "5yr" | "5years" => Ok(TERM_5Y),
+        "permanent" | "perm" | "forever" => Ok(TERM_PERMANENT),
+        other => Err(format!("term must be 30d, 1y, 5y, or permanent, not {other:?}")),
+    }
+}
+
+pub fn term_label(term: u8) -> &'static str {
+    match term {
+        TERM_30D => "30d",
+        TERM_1Y => "1y",
+        TERM_5Y => "5y",
+        TERM_PERMANENT => "permanent",
+        _ => "1y",
+    }
+}
+
+pub fn validate_site_title(title: &str) -> Result<(), String> {
+    if title.len() > MAX_SITE_TITLE_BYTES {
+        return Err(format!("site title must be at most {MAX_SITE_TITLE_BYTES} bytes"));
+    }
+    if title.bytes().any(|b| b <= 0x1f || b == 0x7f) {
+        return Err("site title must not contain control characters".to_owned());
+    }
+    Ok(())
+}
+
+pub fn discover_is_off(profile: &Profile) -> bool {
+    profile
+        .texts
+        .iter()
+        .find(|(k, _)| k == DISCOVER_KEY)
+        .is_some_and(|(_, v)| v.trim().eq_ignore_ascii_case("off"))
+}
+
+pub fn site_title_for(profile: &Profile) -> String {
+    let raw = profile
+        .texts
+        .iter()
+        .find(|(k, _)| k == "display")
+        .map(|(_, v)| v.trim())
+        .unwrap_or("");
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let mut out = String::new();
+    for ch in cleaned.chars() {
+        if out.len() + ch.len_utf8() > MAX_SITE_TITLE_BYTES {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// The ID of the chain's clock system program (`AccountId::from_system_program_name("clock")`).
 fn clock_program() -> AccountId {
     crate::deposit::system_program(b"clock")
@@ -297,8 +541,8 @@ pub struct Settings {
     pub admin: AccountId,
     /// Where fees go in fee mode. It pays nothing itself.
     pub treasury: AccountId,
-    /// The fee for each term, in fee mode.
-    pub prices: [u128; 3],
+    /// The fee for each `[price_tier][term]` in fee mode (3 tiers × 4 terms: 30d, 1y, 5y, permanent).
+    pub prices: [[u128; TERMS]; PRICE_TIERS],
     /// [`MODE_FEE`] or [`MODE_DEPOSIT`].
     pub mode: u8,
     /// The deposit for a normal name and for a three-character name, in deposit mode.
@@ -311,19 +555,37 @@ pub struct Settings {
     pub claims_until: u64,
     /// The registry on the earlier chain the list was taken from.
     pub claims_program: AccountId,
+    /// Day-0 re-release premium after a lapsed name's 30-day grace ends (0 disables).
+    pub premium_start: u128,
+    /// Standalone `lez_nft` v3 program ID bound on initial `Configure` (all zeros if unbound).
+    pub nft_program: AccountId,
 }
 
 impl Settings {
-    /// Decodes `{version, admin, treasury, prices: [u128; 3], mode: u8, deposits:
-    /// [u128; 2], claims_root, claims_until: u64, claims_program}`.
+    /// Decodes v5, v6, v7, or v8 on-chain settings bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut reader = Reader { bytes };
         let version = reader.u8()?;
         let admin = reader.account()?;
         let treasury = reader.account()?;
-        let mut prices = [0_u128; 3];
-        for price in &mut prices {
-            *price = reader.u128()?;
+        let mut prices = [[0_u128; TERMS]; PRICE_TIERS];
+        if version < 7 {
+            let mut flat = [0_u128; 3];
+            for price in &mut flat {
+                *price = reader.u128()?;
+            }
+            for row in &mut prices {
+                row[0] = flat[0];
+                row[1] = flat[1];
+                row[2] = flat[2];
+                row[3] = 0;
+            }
+        } else {
+            for row in &mut prices {
+                for price in row {
+                    *price = reader.u128()?;
+                }
+            }
         }
         let mode = reader.u8()?;
         let mut deposits = [0_u128; 2];
@@ -333,7 +595,31 @@ impl Settings {
         // Version 5 (the registry on the LEZ 0.3 testnet) has no claims list.
         let (claims_root, claims_until, claims_program) =
             if version < 6 { ([0; 32], 0, [0; 32]) } else { (reader.account()?, reader.u64()?, reader.account()?) };
-        Ok(Self { admin, treasury, prices, mode, deposits, claims_root, claims_until, claims_program })
+        let (premium_start, nft_program) = if version < 8 {
+            (0, [0; 32])
+        } else {
+            (reader.u128()?, reader.account()?)
+        };
+        Ok(Self {
+            admin,
+            treasury,
+            prices,
+            mode,
+            deposits,
+            claims_root,
+            claims_until,
+            claims_program,
+            premium_start,
+            nft_program,
+        })
+    }
+
+    pub fn price_for(&self, price_tier: u8, term: u8) -> u128 {
+        self.prices
+            .get(usize::from(price_tier))
+            .and_then(|row| row.get(usize::from(term)))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Whether names from the earlier chain can still be claimed at `now`.
@@ -350,6 +636,188 @@ impl Settings {
             Some(settings) if settings.deposit_mode() => "deposit",
             Some(_) => "fee",
             None => "unconfigured",
+        }
+    }
+}
+
+/// Subname primary sale settings stored on a parent name's record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubnameSale {
+    pub price: u128,
+    pub payout: AccountId,
+}
+
+/// Active secondary-sale listing stored on a top-level name record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Listing {
+    pub price: u128,
+    pub pay_to: AccountId,
+    pub expires_at: Option<u64>,
+    pub nonce: u64,
+    pub in_market: bool,
+}
+
+/// Whether a subname is permanent or revocable by its parent's holder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubnameKind {
+    Permanent,
+    Revocable { parent_generation: [u8; 32] },
+}
+
+/// A registered one-level subname (`label.parent`), stored at `subname_record_address`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubnameRecord {
+    pub version: u8,
+    pub owner: OwnerTag,
+    pub kind: SubnameKind,
+    pub sealed: Vec<u8>,
+}
+
+impl SubnameRecord {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut reader = Reader { bytes };
+        let version = reader.u8()?;
+        let owner = reader.account()?;
+        let kind = match reader.u8()? {
+            0 => SubnameKind::Permanent,
+            1 => SubnameKind::Revocable { parent_generation: reader.account()? },
+            _ => return Err("unknown subname kind".to_owned()),
+        };
+        let sealed = reader.byte_vec()?.to_vec();
+        Ok(Self { version, owner, kind, sealed })
+    }
+}
+
+/// Public marketplace directory entry inside a `MarketBucket`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketEntry {
+    pub id: NameId,
+    pub price: u128,
+    pub pay_to: AccountId,
+    pub expires_at: Option<u64>,
+    pub name_expires: u64,
+    pub price_tier: u8,
+    pub nonce: u64,
+    pub nft_token_id: [u8; 32],
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketBucket {
+    pub version: u8,
+    pub entries: Vec<MarketEntry>,
+}
+
+impl MarketBucket {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut reader = Reader { bytes };
+        let version = reader.u8()?;
+        let count = reader.u32()?;
+        let mut entries = Vec::with_capacity(count.min(128));
+        for _ in 0..count {
+            let id = reader.account()?;
+            let price = reader.u128()?;
+            let pay_to = reader.account()?;
+            let expires_at = reader.optional_u64()?;
+            let name_expires = reader.u64()?;
+            let price_tier = reader.u8()?;
+            let nonce = reader.u64()?;
+            let nft_token_id = reader.account()?;
+            let display_name = reader.optional_string()?;
+            entries.push(MarketEntry {
+                id,
+                price,
+                pay_to,
+                expires_at,
+                name_expires,
+                price_tier,
+                nonce,
+                nft_token_id,
+                display_name,
+            });
+        }
+        Ok(Self { version, entries })
+    }
+}
+
+/// One entry in a `SiteBucket` page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteEntry {
+    pub id: NameId,
+    pub name: String,
+    pub title: String,
+    pub updated_at: u64,
+    pub name_expires: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteBucket {
+    pub version: u8,
+    pub entries: Vec<SiteEntry>,
+}
+
+impl SiteBucket {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut reader = Reader { bytes };
+        let version = reader.u8()?;
+        let count = reader.u32()?;
+        let mut entries = Vec::with_capacity(count.min(64));
+        for _ in 0..count {
+            let id = reader.account()?;
+            let name = reader.string()?;
+            let title = reader.string()?;
+            let updated_at = reader.u64()?;
+            let name_expires = reader.u64()?;
+            entries.push(SiteEntry { id, name, title, updated_at, name_expires });
+        }
+        Ok(Self { version, entries })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteDirHeader {
+    pub version: u8,
+    pub active_page: [u16; SITE_BUCKETS as usize],
+    pub total_listed: u32,
+}
+
+impl SiteDirHeader {
+    pub fn empty() -> Self {
+        Self { version: VERSION, active_page: [0; SITE_BUCKETS as usize], total_listed: 0 }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut reader = Reader { bytes };
+        let version = reader.u8()?;
+        let mut active_page = [0_u16; SITE_BUCKETS as usize];
+        for page in &mut active_page {
+            *page = reader.u16()?;
+        }
+        let total_listed = reader.u32_val()?;
+        Ok(Self { version, active_page, total_listed })
+    }
+}
+
+/// Directory update operation attached to v8 `SetRecord` and `SetPage`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SiteDirOp {
+    Keep,
+    Upsert { name: String, title: String, page: u16, now: u64 },
+    Remove,
+}
+
+impl SiteDirOp {
+    pub fn encode(&self, writer: &mut Writer) {
+        match self {
+            Self::Keep => writer.u8(0),
+            Self::Upsert { name, title, page, now } => {
+                writer.u8(1);
+                writer.string(name);
+                writer.string(title);
+                writer.u16(*page);
+                writer.u64(*now);
+            }
+            Self::Remove => writer.u8(2),
         }
     }
 }
@@ -373,6 +841,14 @@ impl<'bytes> Reader<'bytes> {
         Ok(self.take(1)?[0])
     }
 
+    fn u16(&mut self) -> Result<u16, String> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("two bytes")))
+    }
+
+    fn u32_val(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
+    }
+
     fn u64(&mut self) -> Result<u64, String> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
     }
@@ -382,7 +858,7 @@ impl<'bytes> Reader<'bytes> {
     }
 
     fn u32(&mut self) -> Result<usize, String> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")) as usize)
+        Ok(self.u32_val()? as usize)
     }
 
     fn account(&mut self) -> Result<AccountId, String> {
@@ -401,6 +877,18 @@ impl<'bytes> Reader<'bytes> {
     fn is_some(&mut self) -> Result<bool, String> {
         Ok(self.u8()? != 0)
     }
+
+    fn optional_u16(&mut self) -> Result<Option<u16>, String> {
+        if self.is_some()? { Ok(Some(self.u16()?)) } else { Ok(None) }
+    }
+
+    fn optional_u64(&mut self) -> Result<Option<u64>, String> {
+        if self.is_some()? { Ok(Some(self.u64()?)) } else { Ok(None) }
+    }
+
+    fn optional_string(&mut self) -> Result<Option<String>, String> {
+        if self.is_some()? { Ok(Some(self.string()?)) } else { Ok(None) }
+    }
 }
 
 /// Minimal borsh writer, the reader's counterpart.
@@ -410,6 +898,10 @@ pub struct Writer(pub Vec<u8>);
 impl Writer {
     pub fn u8(&mut self, value: u8) {
         self.0.push(value);
+    }
+
+    pub fn u16(&mut self, value: u16) {
+        self.0.extend(value.to_le_bytes());
     }
 
     pub fn u32(&mut self, value: u32) {
@@ -443,6 +935,26 @@ impl Writer {
             Some(value) => {
                 self.0.push(1);
                 self.0.extend(value);
+            }
+        }
+    }
+
+    pub fn optional_u64(&mut self, value: Option<u64>) {
+        match value {
+            None => self.0.push(0),
+            Some(value) => {
+                self.0.push(1);
+                self.u64(value);
+            }
+        }
+    }
+
+    pub fn optional_string(&mut self, value: Option<&str>) {
+        match value {
+            None => self.0.push(0),
+            Some(value) => {
+                self.0.push(1);
+                self.string(value);
             }
         }
     }
@@ -576,22 +1088,57 @@ fn open(key: &[u8; 32], sealed: &[u8], associated: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// A registered name: the tag of who holds it, until when, and its profile opened.
+/// A registered name (top-level or subname): the tag of who holds it, until when,
+/// its v8 metadata (pricing tier, generation, NFT, listing, subname sales, site listing),
+/// and its profile opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
+    pub version: u8,
     /// The holder's [`owner_tag`] for this name; the chain stores no account.
     pub owner: OwnerTag,
     /// When the name lapses, in milliseconds since the Unix epoch, or
-    /// [`NEVER`] for a name held by a deposit.
+    /// [`NEVER`] for a permanent/deposit/claimed name.
     pub expires: u64,
     pub profile: Profile,
     /// Carried over from the earlier chain, so it can't be claimed again.
     pub claimed: bool,
+    pub price_tier: u8,
+    pub generation: [u8; 32],
+    pub subname_sale: Option<SubnameSale>,
+    pub nft_token_id: [u8; 32],
+    pub nft_shielded: bool,
+    pub listing: Option<Listing>,
+    pub listing_nonce: u64,
+    pub site_listed: Option<u16>,
+    /// `"permanent"` or `"revocable"` for a subname, `None` for a top-level name.
+    pub subname_kind: Option<String>,
 }
 
 impl Resolved {
-    /// Decodes the on-chain record `{version, owner, expires, sealed, claimed}` and opens it.
-    fn decode(bytes: &[u8], key: &[u8; 32], name: &str) -> Result<Self, String> {
+    /// Constructs a minimal `Resolved` (used by unit tests and v5/v6 fixtures).
+    #[cfg(test)]
+    pub fn simple(owner: OwnerTag, expires: u64, profile: Profile, claimed: bool) -> Self {
+        let price_tier = price_tier_for_len(profile.name.len().max(1));
+        Self {
+            version: 6,
+            owner,
+            expires,
+            profile,
+            claimed,
+            price_tier,
+            generation: [0; 32],
+            subname_sale: None,
+            nft_token_id: [0; 32],
+            nft_shielded: false,
+            listing: None,
+            listing_nonce: 0,
+            site_listed: None,
+            subname_kind: None,
+        }
+    }
+
+    /// Decodes an on-chain top-level record (v5, v6, v7, or v8) and opens its sealed profile.
+    pub fn decode(bytes: &[u8], key: &[u8; 32], name: &str) -> Result<Self, String> {
         let mut reader = Reader { bytes };
         let version = reader.u8()?;
         let owner = reader.account()?;
@@ -599,27 +1146,94 @@ impl Resolved {
         let sealed = reader.byte_vec()?;
         // Version 5 records (the LEZ 0.3 testnet) end at `sealed`: nothing was claimed there.
         let claimed = version >= 6 && reader.u8()? != 0;
-        Ok(Self { owner, expires, profile: Profile::open(key, sealed, name), claimed })
+        let (price_tier, generation, subname_sale) = if version >= 7 {
+            let price_tier = reader.u8()?;
+            let generation = reader.account()?;
+            let subname_sale = if reader.is_some()? {
+                Some(SubnameSale { price: reader.u128()?, payout: reader.account()? })
+            } else {
+                None
+            };
+            (price_tier, generation, subname_sale)
+        } else {
+            (price_tier_for_len(name.len()), [0; 32], None)
+        };
+        let (nft_token_id, nft_shielded, listing, listing_nonce, site_listed) = if version >= 8 {
+            let nft_token_id = reader.account()?;
+            let nft_shielded = reader.u8()? != 0;
+            let listing = if reader.is_some()? {
+                Some(Listing {
+                    price: reader.u128()?,
+                    pay_to: reader.account()?,
+                    expires_at: reader.optional_u64()?,
+                    nonce: reader.u64()?,
+                    in_market: reader.u8()? != 0,
+                })
+            } else {
+                None
+            };
+            let listing_nonce = reader.u64()?;
+            let site_listed = reader.optional_u16()?;
+            (nft_token_id, nft_shielded, listing, listing_nonce, site_listed)
+        } else {
+            ([0; 32], false, None, 0, None)
+        };
+        Ok(Self {
+            version,
+            owner,
+            expires,
+            profile: Profile::open(key, sealed, name),
+            claimed,
+            price_tier,
+            generation,
+            subname_sale,
+            nft_token_id,
+            nft_shielded,
+            listing,
+            listing_nonce,
+            site_listed,
+            subname_kind: None,
+        })
     }
 
-    /// Whether the name is held by a deposit, and so never lapses.
+    /// Whether the name is permanent or held by a deposit, and so never lapses.
     pub fn never_expires(&self) -> bool {
         self.expires == NEVER
     }
 
-    /// Whether `account` holds the name `id` this record is for.
+    /// Whether `account` holds the name with identifier `id`.
     pub fn is_held_by(&self, id: &NameId, account: &AccountId) -> bool {
         self.owner == owner_tag(id, account)
     }
 
-    /// Whether the name has expired and is in its grace period. A name held by
-    /// a deposit never is.
+    /// Whether `account` holds `name` (using `slot_id` on v7/v8, or `derived.id` on v5/v6).
+    pub fn is_held_by_name(&self, name: &str, derived: &Derived, account: &AccountId) -> bool {
+        let slot = slot_id(name, &derived.id);
+        self.owner == owner_tag(&slot, account) || (self.version < 7 && self.owner == owner_tag(&derived.id, account))
+    }
+
+    /// Whether the name has expired and is in (or past) its grace period.
     pub fn lapsed(&self, now: u64) -> bool {
         !self.never_expires() && self.expires <= now
     }
 
+    /// Whether the name is currently inside its 30-day grace period.
+    pub fn in_grace(&self, now: u64) -> bool {
+        self.lapsed(now) && !self.gone(now)
+    }
+
+    /// When the grace period ends (for finite-term names).
+    pub fn grace_ends(&self) -> Option<u64> {
+        (!self.never_expires()).then(|| self.expires.saturating_add(GRACE_MS))
+    }
+
+    /// Milliseconds elapsed since grace ended, if the name is past grace.
+    pub fn rerelease_elapsed(&self, now: u64) -> Option<u64> {
+        let end = self.grace_ends()?;
+        (now >= end).then(|| now - end)
+    }
+
     /// Whether the name is past its grace period, and so counts as unregistered.
-    /// A name held by a deposit never is.
     pub fn gone(&self, now: u64) -> bool {
         !self.never_expires() && now >= self.expires.saturating_add(GRACE_MS)
     }
@@ -633,7 +1247,6 @@ impl Resolved {
         }
     }
 
-    /// The name in the JSON shape SPEC.md gives.
     /// The name this one forwards to (SPEC.md §7, Forwarding): its `forward` entry, if
     /// that is a valid name other than this one. A client follows it one hop.
     pub fn forward_target(&self) -> Option<String> {
@@ -642,25 +1255,73 @@ impl Resolved {
     }
 
     pub fn to_json(&self) -> Value {
+        self.to_json_with(None, local_now())
+    }
+
+    pub fn to_json_with(&self, settings: Option<&Settings>, now: u64) -> Value {
         let profile = &self.profile;
         let texts: Map<String, Value> = profile
             .texts
             .iter()
             .map(|(key, value)| (key.clone(), Value::from(value.clone())))
             .collect();
+        let has_nft = self.nft_token_id != [0; 32];
+        let nft_program = settings.map(|s| s.nft_program).filter(|p| *p != [0; 32]);
+        let nft_json = if has_nft {
+            json!({
+                "token_id": hex(&self.nft_token_id),
+                "token_account": nft_program.as_ref().map(|p| account_text(&nft_token_address(p, &self.nft_token_id))),
+                "program": nft_program.as_ref().map(account_text),
+                "shielded": self.nft_shielded,
+            })
+        } else {
+            Value::Null
+        };
+        let listing_json = self.listing.as_ref().map(|listing| {
+            let (seller_receives, fee) = sale_split(listing.price);
+            json!({
+                "price": listing.price.to_string(),
+                "fee": fee.to_string(),
+                "seller_receives": seller_receives.to_string(),
+                "pay_to": account_text(&listing.pay_to),
+                "expires_at": listing.expires_at,
+                "nonce": listing.nonce,
+                "in_market": listing.in_market,
+            })
+        });
+        let subname_sale_json = self.subname_sale.as_ref().map(|sale| {
+            json!({
+                "price": sale.price.to_string(),
+                "payout": account_text(&sale.payout),
+            })
+        });
+        let subname_parent = split_subname(&profile.name).map(|(_, parent)| parent.to_owned());
         json!({
             "name": profile.name,
             "display": format!("{}{NAME_SUFFIX}", profile.name),
             "owner_tag": hex(&self.owner),
             "expires": self.expires_json(),
             "never": self.never_expires(),
-            "lapsed": self.lapsed(local_now()),
+            "permanent": self.never_expires(),
+            "lapsed": self.lapsed(now),
+            "in_grace": self.in_grace(now),
+            "grace_ends": self.grace_ends(),
             "claimed": self.claimed,
+            "price_tier": self.price_tier,
             "account": profile.account.as_ref().map(account_text),
             "npk": profile.npk.as_ref().map(|npk| hex(npk)),
             "vpk": (!profile.vpk.is_empty()).then(|| hex(&profile.vpk)),
             "texts": texts,
             "forward": self.forward_target(),
+            "discover_off": discover_is_off(profile),
+            "site_listed": self.site_listed,
+            "nft": nft_json,
+            "listing": listing_json,
+            "listing_nonce": self.listing_nonce,
+            "subname_sale": subname_sale_json,
+            "subname": self.subname_kind.is_some(),
+            "subname_kind": self.subname_kind,
+            "parent": subname_parent,
         })
     }
 
@@ -1300,18 +1961,172 @@ impl Registry {
         Ok(self.record(name, derived)?.filter(|resolved| !resolved.gone(local_now())))
     }
 
-    /// The record of `name` exactly as the chain holds it, lapsed or not.
+    /// The record of `name` (top-level or `label.parent`) as the chain holds it, lapsed or not.
     pub fn record(&self, name: &str, derived: &Derived) -> Result<Option<Resolved>, String> {
+        let slot = slot_id(name, &derived.id);
         #[cfg(test)]
-        if let Some(found) = RECORDS.with(|records| records.borrow().iter().find(|(id, _)| *id == derived.id).map(|(_, record)| record.clone())) {
+        if let Some(found) = RECORDS.with(|records| {
+            records
+                .borrow()
+                .iter()
+                .find(|(id, _)| *id == slot || *id == derived.id)
+                .map(|(_, record)| record.clone())
+        }) {
             stub_wait(self.deadline)?;
             return Ok(Some(found));
         }
-        let bytes = self.state(&record_address(&self.program, &derived.id))?;
+        if let Some((_, parent)) = split_subname(name) {
+            let parent_derived = derive(parent);
+            let parent_slot = slot_id(parent, &parent_derived.id);
+            let bytes = self.state(&subname_record_address(&self.program, &parent_slot, &derived.id))?;
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            let sub = SubnameRecord::decode(&bytes)?;
+            let kind_label = match sub.kind {
+                SubnameKind::Permanent => "permanent".to_owned(),
+                SubnameKind::Revocable { parent_generation } => {
+                    let Some(parent_rec) = self.record(parent, &parent_derived)? else {
+                        return Ok(None);
+                    };
+                    if parent_rec.gone(local_now()) || parent_rec.generation != parent_generation {
+                        return Ok(None);
+                    }
+                    "revocable".to_owned()
+                }
+            };
+            return Ok(Some(Resolved {
+                version: sub.version,
+                owner: sub.owner,
+                expires: NEVER,
+                profile: Profile::open(&derived.key, &sub.sealed, name),
+                claimed: false,
+                price_tier: PRICE_TIER_8_PLUS,
+                generation: [0; 32],
+                subname_sale: None,
+                nft_token_id: [0; 32],
+                nft_shielded: false,
+                listing: None,
+                listing_nonce: 0,
+                site_listed: None,
+                subname_kind: Some(kind_label),
+            }));
+        }
+        let bytes = self.state(&record_address(&self.program, &slot))?;
         if bytes.is_empty() {
             return Ok(None);
         }
         Resolved::decode(&bytes, &derived.key, name).map(Some)
+    }
+
+    /// Reads the `SiteDirHeader` PDA (empty header if not yet initialized).
+    pub fn site_dir_header(&self) -> Result<SiteDirHeader, String> {
+        let bytes = self.state(&site_dir_header_address(&self.program))?;
+        if bytes.is_empty() {
+            return Ok(SiteDirHeader::empty());
+        }
+        SiteDirHeader::decode(&bytes)
+    }
+
+    /// Reads the on-chain sites directory (`SiteDirHeader` + `SiteBucket(0..16, page)`),
+    /// verifies every entry locally via Argon2id + `slot_id` (dropping spoofs), and filters
+    /// entries whose name is past its grace period.
+    pub fn site_directory(&self, page_filter: Option<u16>) -> Result<Value, String> {
+        let header = self.site_dir_header()?;
+        let now = local_now();
+        let mut sites = Vec::new();
+        for bucket_idx in 0..SITE_BUCKETS {
+            let max_page = header.active_page[usize::from(bucket_idx)];
+            let (start_p, end_p) = match page_filter {
+                Some(p) if p <= max_page => (p, p),
+                Some(_) => continue,
+                None => (0, max_page),
+            };
+            for p in start_p..=end_p {
+                if self.deadline.passed() {
+                    break;
+                }
+                let bytes = self.state(&site_bucket_address(&self.program, bucket_idx, p))?;
+                if bytes.is_empty() {
+                    continue;
+                }
+                let Ok(bucket) = SiteBucket::decode(&bytes) else { continue };
+                for entry in bucket.entries {
+                    if !is_valid_label(&entry.name) {
+                        continue;
+                    }
+                    if entry.name_expires != NEVER && now >= entry.name_expires.saturating_add(GRACE_MS) {
+                        continue;
+                    }
+                    let expected = slot_id(&entry.name, &derive(&entry.name).id);
+                    if expected != entry.id {
+                        continue;
+                    }
+                    sites.push(json!({
+                        "name": entry.name,
+                        "title": entry.title,
+                        "updated_at": entry.updated_at,
+                        "name_expires": if entry.name_expires == NEVER { Value::Null } else { Value::from(entry.name_expires) },
+                    }));
+                }
+            }
+        }
+        sites.sort_by(|a, b| b["updated_at"].as_u64().cmp(&a["updated_at"].as_u64()));
+        Ok(json!({
+            "total_listed": header.total_listed,
+            "sites": sites,
+        }))
+    }
+
+    /// Reads all 16 `MarketBucket` PDAs, filters expired listings, and verifies any
+    /// optional plaintext `display_name` locally via Argon2id + `tiered_id`.
+    pub fn market_listings(&self) -> Result<Vec<Value>, String> {
+        let now = local_now();
+        let mut listings = Vec::new();
+        for bucket_idx in 0..MARKET_BUCKETS {
+            if self.deadline.passed() {
+                break;
+            }
+            let bytes = self.state(&market_bucket_address(&self.program, bucket_idx))?;
+            if bytes.is_empty() {
+                continue;
+            }
+            let Ok(bucket) = MarketBucket::decode(&bytes) else { continue };
+            for entry in bucket.entries {
+                if entry.name_expires != NEVER && now >= entry.name_expires {
+                    continue;
+                }
+                if entry.expires_at.is_some_and(|exp| now >= exp) {
+                    continue;
+                }
+                let verified_name = entry.display_name.as_deref().and_then(|name| {
+                    if !is_valid_label(name) {
+                        return None;
+                    }
+                    let tier = price_tier_for_len(name.len());
+                    if tier != entry.price_tier {
+                        return None;
+                    }
+                    let expected = tiered_id(&derive(name).id, tier);
+                    (expected == entry.id).then(|| name.to_owned())
+                });
+                let (seller_receives, fee) = sale_split(entry.price);
+                listings.push(json!({
+                    "id": hex(&entry.id),
+                    "name": verified_name,
+                    "price": entry.price.to_string(),
+                    "fee": fee.to_string(),
+                    "seller_receives": seller_receives.to_string(),
+                    "pay_to": account_text(&entry.pay_to),
+                    "expires_at": entry.expires_at,
+                    "name_expires": if entry.name_expires == NEVER { Value::Null } else { Value::from(entry.name_expires) },
+                    "price_tier": entry.price_tier,
+                    "nonce": entry.nonce,
+                    "nft_token_id": hex(&entry.nft_token_id),
+                }));
+            }
+        }
+        Ok(listings)
     }
 
     /// When the commitment `promised` was made, as its account records it
@@ -1349,13 +2164,19 @@ impl Registry {
             .ok_or_else(|| "could not read the chain's clock, so nothing was sent".to_owned())
     }
 
-    /// The page published under a name, or `None` when it has none or the
+    /// The page published under a name (top-level or subname), or `None` when it has none or the
     /// name is no longer registered.
     pub fn page(&self, name: &str, derived: &Derived) -> Result<Option<Value>, String> {
         if self.resolve(name, derived)?.is_none() {
             return Ok(None);
         }
-        let bytes = self.state(&page_address(&self.program, &derived.id))?;
+        let addr = if let Some((_, parent)) = split_subname(name) {
+            let parent_slot = slot_id(parent, &derive(parent).id);
+            subname_page_address(&self.program, &parent_slot, &derived.id)
+        } else {
+            page_address(&self.program, &slot_id(name, &derived.id))
+        };
+        let bytes = self.state(&addr)?;
         if bytes.is_empty() {
             return Ok(None);
         }
@@ -1383,7 +2204,7 @@ impl Registry {
         }
         let derived = derive(&claimed);
         let confirmed = self.resolve(&claimed, &derived)?.is_some_and(|resolved| {
-            resolved.is_held_by(&derived.id, account) || resolved.profile.account == Some(*account)
+            resolved.is_held_by_name(&claimed, &derived, account) || resolved.profile.account == Some(*account)
         });
         Ok(confirmed.then_some(claimed))
     }
@@ -1545,12 +2366,12 @@ mod tests {
     /// SPEC.md §7, Forwarding: a valid other name, normalised, shown in `resolve`.
     #[test]
     fn a_record_says_where_it_forwards() {
-        let with = |value: &str| Resolved {
-            owner: [1; 32],
-            expires: NEVER,
-            profile: Profile { name: "nameswallet".into(), texts: vec![("forward".into(), value.into())], ..Profile::default() },
-            claimed: false,
-        };
+        let with = |value: &str| Resolved::simple(
+            [1; 32],
+            NEVER,
+            Profile { name: "nameswallet".into(), texts: vec![("forward".into(), value.into())], ..Profile::default() },
+            false,
+        );
         assert_eq!(with("names").forward_target().as_deref(), Some("names"));
         assert_eq!(with(" @Names ").forward_target().as_deref(), Some("names"));
         assert_eq!(with("nameswallet").forward_target(), None, "not to itself");
@@ -1765,12 +2586,14 @@ mod tests {
             Settings {
                 admin: [1; 32],
                 treasury: [2; 32],
-                prices: [1, 2, 3],
+                prices: [[1, 2, 3, 0]; PRICE_TIERS],
                 mode: MODE_DEPOSIT,
                 deposits: [100_000_000, 2_000_000_000],
                 claims_root: [3; 32],
                 claims_until: 7,
                 claims_program: [4; 32],
+                premium_start: 0,
+                nft_program: [0; 32],
             }
         );
         assert!(settings.deposit_mode());
@@ -1786,16 +2609,114 @@ mod tests {
 
     #[test]
     fn typed_names_and_accounts_are_normalised_and_checked() {
-        for typed in ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  "] {
+        for typed in ["jef", "jef.lez", "Jef.LEZ", "  jef.lez  ", "lns://jef"] {
             assert_eq!(parse_name(typed).as_deref(), Ok("jef"), "{typed}");
         }
-        for bad in ["", ".lez", "jef.eth", "-jef", "jef-", "j f", &"a".repeat(33)] {
+        assert_eq!(parse_name("Blog.Jef.LEZ").as_deref(), Ok("blog.jef"));
+        assert_eq!(split_subname("blog.jef"), Some(("blog", "jef")));
+        assert!(parse_top_level_name("blog.jef").is_err());
+        for bad in ["", ".lez", "a.b.c", "a--b", "-jef", "jef-", "j f", &"a".repeat(33)] {
             assert!(parse_name(bad).is_err(), "{bad}");
         }
         let text = account_text(&PROGRAM);
         assert_eq!(parse_account(&text), Ok(PROGRAM));
         assert_eq!(parse_account(&format!("Public/{text}")), Ok(PROGRAM));
         assert!(parse_account("not-an-account").is_err());
+    }
+
+    #[test]
+    fn v8_slot_id_sale_split_and_rerelease_premium() {
+        assert_eq!(price_tier_for_len(5), PRICE_TIER_5);
+        assert_eq!(price_tier_for_len(6), PRICE_TIER_6_7);
+        assert_eq!(price_tier_for_len(7), PRICE_TIER_6_7);
+        assert_eq!(price_tier_for_len(8), PRICE_TIER_8_PLUS);
+
+        let base = [0x11; 32];
+        assert_ne!(slot_id("alice", &base), base);
+        assert_eq!(slot_id("blog.alice", &base), base);
+        assert_eq!(sale_split(40), (39, 1));
+        assert_eq!(sale_split(41), (39, 2));
+        assert_eq!(sale_split(1000), (975, 25));
+        assert_eq!(rerelease_premium(1024, 0), 1024);
+        assert_eq!(rerelease_premium(1024, DAY_MS), 512);
+        assert_eq!(rerelease_premium(1024, DAY_MS / 2), 768);
+        assert_eq!(rerelease_premium(1024, PREMIUM_DURATION_MS), 0);
+        assert_eq!(parse_term("permanent"), Ok(TERM_PERMANENT));
+        assert_eq!(term_label(TERM_PERMANENT), "permanent");
+        assert!(validate_site_title("My Site").is_ok());
+        assert!(validate_site_title(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn v8_settings_record_and_buckets_decode() {
+        let mut w = Writer::default();
+        w.u8(8);
+        w.0.extend([1; 32]); // admin
+        w.0.extend([2; 32]); // treasury
+        for tier in 0..PRICE_TIERS {
+            for term in 0..TERMS {
+                w.u128(((tier + 1) * 100 + term) as u128);
+            }
+        }
+        w.u8(MODE_FEE);
+        w.u128(10);
+        w.u128(20);
+        w.0.extend([3; 32]); // claims_root
+        w.u64(0);
+        w.0.extend([4; 32]); // claims_program
+        w.u128(4_000_000_000); // premium_start
+        w.0.extend([9; 32]); // nft_program
+        let s = Settings::decode(&w.0).expect("v8 settings decode");
+        assert_eq!(s.price_for(0, 3), 103);
+        assert_eq!(s.price_for(2, 1), 301);
+        assert_eq!(s.premium_start, 4_000_000_000);
+        assert_eq!(s.nft_program, [9; 32]);
+
+        // v8 NameRecord with listing, subname_sale, nft, site_listed.
+        let mut r = Writer::default();
+        r.u8(8);
+        r.0.extend([1; 32]); // owner
+        r.u64(NEVER);
+        r.bytes(&[]); // sealed
+        r.bool(false); // claimed
+        r.u8(PRICE_TIER_5);
+        r.0.extend([0xaa; 32]); // generation
+        r.u8(1); // Some(SubnameSale)
+        r.u128(500);
+        r.0.extend([0xbb; 32]);
+        r.0.extend([0xcc; 32]); // nft_token_id
+        r.bool(false); // nft_shielded
+        r.u8(1); // Some(Listing)
+        r.u128(1000);
+        r.0.extend([0xdd; 32]);
+        r.optional_u64(Some(9999));
+        r.u64(7); // nonce
+        r.bool(true); // in_market
+        r.u64(7); // listing_nonce
+        r.u8(1); // Some(site_listed)
+        r.u16(2);
+        let rec = Resolved::decode(&r.0, &[0; 32], "alice").expect("v8 record decodes");
+        assert_eq!(rec.price_tier, PRICE_TIER_5);
+        assert_eq!(rec.nft_token_id, [0xcc; 32]);
+        assert_eq!(rec.site_listed, Some(2));
+        assert_eq!(rec.listing.unwrap().price, 1000);
+        assert_eq!(rec.subname_sale.unwrap().price, 500);
+        let j = rec.to_json_with(Some(&s), 100);
+        assert_eq!(j["listing"]["fee"], "25");
+        assert_eq!(j["listing"]["seller_receives"], "975");
+        assert_eq!(j["nft"]["token_id"], "cc".repeat(32));
+        assert_eq!(j["site_listed"], 2);
+
+        // SiteDirHeader + SiteBucket + MarketBucket decode
+        let mut sh = Writer::default();
+        sh.u8(8);
+        for i in 0..SITE_BUCKETS {
+            sh.u16(u16::from(i));
+        }
+        sh.u32(42);
+        let hdr = SiteDirHeader::decode(&sh.0).expect("header");
+        assert_eq!(hdr.total_listed, 42);
+        assert_eq!(hdr.active_page[3], 3);
     }
 
     /// The shape `getAccountView` answers in; `gateway/app-src/vectors/engine-report.json` has real ones.

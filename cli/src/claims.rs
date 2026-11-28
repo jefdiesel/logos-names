@@ -221,15 +221,17 @@ mod tests {
     #[test]
     fn claim_settings_are_kept_unless_changed() {
         let current = Settings {
-            version: 6,
+            version: 8,
             admin: ALICE,
             treasury: ALICE,
-            prices: [0; 3],
+            prices: [[0; 4]; 3],
             mode: 1,
             deposits: [0; 2],
             claims_root: [7; 32],
             claims_until: MIN_COMMIT_AGE_MS,
             claims_program: PROGRAM,
+            premium_start: 0,
+            nft_program: AccountId::new([0; 32]),
         };
         let kept = ClaimSettings { list: None, until: None }.over(Some(&current));
         assert_eq!((kept.root, kept.until, kept.program), ([7; 32], MIN_COMMIT_AGE_MS, PROGRAM));

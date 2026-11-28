@@ -30,9 +30,10 @@ use lee_core::{
 use names_core::{
     GRACE_MS, Instruction, LengthProof, MAX_COMMIT_AGE_MS, MIN_COMMIT_AGE_MS, MODE_DEPOSIT, MODE_FEE,
     LEGACY_SUFFIX, Message as RegistryMessage, NAME_SUFFIX, PUBLIC_MIN_COMMIT_AGE_MS,
-    PUBLIC_TIME_WINDOW_MS, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId,
-    commitment_seed, deposit_address, name_seeds, settings_seed, shortlist,
-    NameRecord, Page, Settings, commitment,
+    PUBLIC_TIME_WINDOW_MS, SiteDirOp, TERM_PERMANENT, TIER_LOCKED, TIER_THREE, TIME_WINDOW_MS, NameId,
+    commitment_seed, deposit_address, name_seeds, nft_token_address, nft_token_id, price_tier_for_len,
+    sale_split, settings_seed, shortlist, split_subname, subname_page_address, subname_record_address,
+    tiered_id, NameRecord, Page, Settings, commitment,
     normalize_name, owner_tag, page_address, record_address, settings_address,
     validate_name,
 };
@@ -400,7 +401,7 @@ enum Command {
         /// appears on chain; each change then takes a proof of a few minutes.
         #[arg(long, value_parser = parse_account)]
         owner: Option<AccountId>,
-        /// How long to hold the name: 30d, 1y or 5y.
+        /// How long to hold the name: 30d, 1y, 5y or permanent.
         #[arg(long, default_value = "1y", value_parser = parse_term)]
         term: u8,
         /// Claim this time, in milliseconds, instead of reading the chain's clock.
@@ -417,27 +418,28 @@ enum Command {
         #[arg(long)]
         public: bool,
     },
-    /// Hold a name for longer. Anyone may pay for it.
+    /// Hold a name for longer (30d, 1y, 5y or permanent). Anyone may pay for it.
     Renew {
         #[arg(value_parser = parse_name)]
         name: String,
-        /// How long to add: 30d, 1y or 5y.
+        /// How long to add: 30d, 1y, 5y or permanent.
         #[arg(long, default_value = "1y", value_parser = parse_term)]
         term: u8,
         /// Account that pays; the wallet must hold its key. Defaults to the owner.
         #[arg(long, value_parser = parse_account)]
         payer: Option<AccountId>,
     },
-    /// Set the registry's admin, treasury and prices. Anyone may while it has no
-    /// settings; afterwards the wallet must hold the admin's key.
+    /// Set the registry's admin, treasury, prices, premium and NFT program. Anyone may while
+    /// it has no settings; afterwards the wallet must hold the admin's key.
     Configure {
         #[arg(long)]
         admin: AccountId,
         /// Account the fees are paid to.
         #[arg(long)]
         treasury: AccountId,
-        /// Prices in base units for 30d, 1y and 5y, separated by commas (fee mode).
-        #[arg(long, value_delimiter = ',', default_value = "0,0,0")]
+        /// Prices in base units separated by commas: 12 values (3 length tiers x 4 terms:
+        /// 30d,1y,5y,permanent), 4 values (all tiers), or 3 legacy values (30d,1y,5y).
+        #[arg(long, value_delimiter = ',', default_value = "0,0,0,0")]
         prices: Vec<u128>,
         /// `deposit` (names are held by a refundable deposit) or `fee` (names are
         /// rented for a term and fees go to the treasury).
@@ -447,6 +449,12 @@ enum Command {
         /// separated by a comma (deposit mode).
         #[arg(long, value_delimiter = ',', default_value = "0,0")]
         deposits: Vec<u128>,
+        /// Starting day-0 falling re-release premium for lapsed names (0 disables).
+        #[arg(long, default_value_t = 0, value_parser = parse_shield, allow_hyphen_values = true)]
+        premium_start: u128,
+        /// The tied `lez_nft` v3 program ID (permanently bound on initial configure).
+        #[arg(long, value_parser = parse_account)]
+        nft_program: Option<AccountId>,
         /// Sign with this account instead of the settings' admin.
         #[arg(long, hide = true)]
         signer: Option<AccountId>,
@@ -465,6 +473,97 @@ enum Command {
         /// option the current claim settings stay.
         #[arg(long)]
         claims_until: Option<u64>,
+    },
+    /// Admin: update one cell of the 3x4 registration/renewal price table.
+    SetPrice {
+        /// Length tier: `5` (0), `6-7` (1), or `8+` (2).
+        #[arg(long, value_parser = v8::parse_price_tier)]
+        tier: u8,
+        /// Term: `30d`, `1y`, `5y`, or `permanent`.
+        #[arg(long, value_parser = parse_term)]
+        term: u8,
+        /// Price in native token base units (0 is allowed).
+        #[arg(value_parser = parse_shield, allow_hyphen_values = true)]
+        price: u128,
+        #[arg(long, hide = true)]
+        signer: Option<AccountId>,
+    },
+    /// Admin: set the starting 21-day falling re-release premium for lapsed names (0 disables).
+    SetPremium {
+        /// Starting premium in native token base units.
+        #[arg(value_parser = parse_shield, allow_hyphen_values = true)]
+        amount: u128,
+        #[arg(long, hide = true)]
+        signer: Option<AccountId>,
+    },
+    /// Admin: change the registry's treasury account while keeping all other settings.
+    SetTreasury {
+        #[arg(value_parser = parse_account)]
+        treasury: AccountId,
+        #[arg(long, hide = true)]
+        signer: Option<AccountId>,
+    },
+    /// Manage one-level subnames (`label.parent`): create, revoke, configure sales, or buy.
+    #[command(subcommand)]
+    Subname(v8::SubnameCommand),
+    /// List a top-level name for sale (fixed price >= 40; 2.5% treasury fee, 97.5% to seller).
+    List {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        /// Fixed sale price in base units (at least 40).
+        #[arg(value_parser = tokens::parse_amount, allow_hyphen_values = true)]
+        price: u128,
+        /// Public account receiving 97.5% of the sale price (required if seller is private).
+        #[arg(long, value_parser = parse_account)]
+        pay_to: Option<AccountId>,
+        /// Optional listing expiry (e.g. `7d`, `24h`, `30m`, or Unix ms timestamp).
+        #[arg(long)]
+        expires: Option<String>,
+        /// Publish the name in plaintext in the public marketplace directory (`MarketBucket`).
+        #[arg(long)]
+        public_name: bool,
+    },
+    /// Cancel an active marketplace listing for a name you hold.
+    Cancel {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+    /// Buy a listed top-level name (pays 97.5% to the seller and 2.5% to the registry treasury).
+    Buy {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        /// Account that buys and owns the name; defaults to the setup's private account.
+        #[arg(long, value_parser = parse_account)]
+        buyer: Option<AccountId>,
+    },
+    /// Browse names listed publicly in the on-chain marketplace directory.
+    Market {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Browse LNS sites listed in the on-chain sites directory (verified locally).
+    Sites {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Shield a name's tied NFT deed into a private deed account.
+    ShieldDeed {
+        #[arg(value_parser = parse_name)]
+        name: String,
+        #[arg(long, value_parser = parse_account)]
+        deed: AccountId,
+    },
+    /// Unshield a name's tied NFT deed back to the public NFT token record.
+    UnshieldDeed {
+        #[arg(value_parser = parse_name)]
+        name: String,
+    },
+    /// Refresh a shielded NFT deed's expiry after renewing the name.
+    RefreshDeed {
+        #[arg(value_parser = parse_name)]
+        name: String,
     },
     /// Print the root of the claims list a snapshot of the earlier chain makes, for
     /// `configure`, and how many names it holds.
@@ -565,6 +664,12 @@ enum Command {
         /// name's payment keys and public account stay.
         #[arg(long)]
         replace: bool,
+        /// Opt out of the public LNS sites directory (`discover=off`).
+        #[arg(long, conflicts_with = "discover")]
+        no_discover: bool,
+        /// Opt back into the public LNS sites directory (clears `discover=off`).
+        #[arg(long, conflicts_with = "no_discover")]
+        discover: bool,
     },
     /// Point NAME to another name (SPEC.md §7, Forwarding): paying, messaging or viewing NAME
     /// then uses TO, one hop. `--clear` removes the forward.
@@ -594,7 +699,11 @@ enum Command {
         name: String,
         /// The new holder, public or private. Only a tag of it reaches the chain.
         #[arg(value_parser = parse_new_owner)]
-        new_owner: AccountId },
+        new_owner: AccountId,
+        /// Transfer via the linked NFT program instead of the registry directly.
+        #[arg(long)]
+        via_nft: bool,
+    },
     /// Show a name in your browser: a profile card made from its entries, linking to
     /// its page (served at `/page`) when it has one. It is read from the chain
     /// on this machine and served only to this machine (127.0.0.1); no server sees
@@ -619,6 +728,15 @@ enum Command {
         file: PathBuf,
         #[arg(long, default_value = "text/html; charset=utf-8")]
         content_type: String,
+        /// Do not list this site in the public LNS sites directory (`discover=off`).
+        #[arg(long, conflicts_with = "discover")]
+        no_discover: bool,
+        /// List this site in the public LNS sites directory even if `discover=off` was set.
+        #[arg(long, conflicts_with = "no_discover")]
+        discover: bool,
+        /// Optional short title shown in the LNS sites directory (up to 64 bytes).
+        #[arg(long)]
+        title: Option<String>,
     },
     /// Remove the name's page.
     ClearPage {
@@ -833,6 +951,7 @@ mod prover;
 #[allow(dead_code)] // the module's own parts
 mod text;
 mod tokens;
+mod v8;
 mod zone;
 #[path = "../../basecamp-module/rust-lib/src/zones.rs"]
 #[allow(dead_code)] // the module's own parts
@@ -1060,11 +1179,12 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 fn parse_term(input: &str) -> Result<u8, String> {
-    match input {
+    match input.trim().to_ascii_lowercase().as_str() {
         "30d" => Ok(0),
         "1y" => Ok(1),
         "5y" => Ok(2),
-        _ => Err("term must be 30d, 1y or 5y".to_owned()),
+        "permanent" | "perm" => Ok(TERM_PERMANENT),
+        _ => Err("term must be 30d, 1y, 5y or permanent".to_owned()),
     }
 }
 
@@ -1112,10 +1232,12 @@ struct Client {
     proved_ms: Option<u64>,
 }
 
-/// What registering a name costs. `amount` leaves the payer, to the name's deposit
-/// account in deposit mode, and otherwise to `treasury`.
+/// What registering a name costs. `amount` (`base + premium`) leaves the payer, to the
+/// name's deposit account in deposit mode, and otherwise to `treasury`.
 struct Cost {
     amount: u128,
+    base: u128,
+    premium: u128,
     deposit: bool,
     treasury: Option<AccountId>,
 }
@@ -1363,30 +1485,47 @@ impl Client {
             .unwrap_or_else(|_| local_now().saturating_sub(60_000))
     }
 
-    /// What `payer` owes for `term`, and the treasury it goes to when there is a fee.
-    /// The treasury itself pays nothing.
-    async fn price(&self, payer: AccountId, term: u8) -> Result<(u128, Option<AccountId>)> {
+    /// What `payer` owes for `price_tier` and `term`, and the treasury it goes to when there
+    /// is a fee. The treasury itself pays nothing.
+    async fn price(&self, price_tier: u8, payer: AccountId, term: u8) -> Result<(u128, Option<AccountId>)> {
         Ok(match self.settings().await? {
             Some(settings) if settings.mode == MODE_FEE && settings.treasury != payer => {
-                let fee = settings.prices[usize::from(term)];
+                let fee = settings.prices[usize::from(price_tier)][usize::from(term)];
                 (fee, (fee != 0).then_some(settings.treasury))
             }
             _ => (0, None),
         })
     }
 
-    /// What registering a name of tier `tier` costs `payer`: in deposit mode the deposit
-    /// for its length, otherwise the fee for `term`.
-    async fn registration_cost(&self, tier: u8, payer: AccountId, term: u8) -> Result<Cost> {
+    /// What registering a name of shortlist `tier` and length `price_tier` costs `payer`,
+    /// including any 21-day falling re-release premium when overwriting a lapsed `existing` record.
+    async fn registration_cost(
+        &self,
+        tier: u8,
+        price_tier: u8,
+        payer: AccountId,
+        term: u8,
+        existing: Option<&NameRecord>,
+        now: u64,
+    ) -> Result<Cost> {
         match self.settings().await? {
             Some(settings) if settings.mode == MODE_DEPOSIT => {
                 // The admin places names without a deposit.
                 let amount = if payer == settings.admin { 0 } else { settings.deposits[usize::from(tier == TIER_THREE)] };
-                Ok(Cost { amount, deposit: true, treasury: None })
+                Ok(Cost { amount, base: amount, premium: 0, deposit: true, treasury: None })
             }
-            _ => {
-                let (amount, treasury) = self.price(payer, term).await?;
-                Ok(Cost { amount, deposit: false, treasury })
+            settings => {
+                let (base, mut treasury) = self.price(price_tier, payer, term).await?;
+                let (premium, _) = if settings.as_ref().is_some_and(|s| s.treasury == payer) {
+                    (0, None)
+                } else {
+                    v8::lapsed_premium(settings.as_ref(), existing, now)
+                };
+                let amount = base.saturating_add(premium);
+                if amount > 0 && treasury.is_none() {
+                    treasury = settings.as_ref().map(|s| s.treasury);
+                }
+                Ok(Cost { amount, base, premium, deposit: false, treasury })
             }
         }
     }
@@ -1432,17 +1571,21 @@ impl Client {
     /// The record of `name` and its opened profile, whether or not the name has
     /// lapsed: its holder may still change it. A record whose sealed bytes are empty
     /// or do not open as this name's has nothing set: a blank profile.
+    ///
+    /// Note: in v8, `Derived.id` returned here is the top-level name's `slot_id`
+    /// (`tiered_id(base_id, price_tier_for_len(name.len()))`).
     async fn lookup_held(&self, name: &str) -> Result<(Derived, NameRecord, Profile)> {
         let derived = derive(name);
+        let slot = v8::slot_id(name, &derived.id);
         let record = self
-            .record(&derived.id)
+            .record(&slot)
             .await?
             .ok_or_else(|| anyhow!("{name} is not registered"))?;
         let profile = open_profile(&derived.key, &record.sealed, name).unwrap_or_else(|| Profile {
             name: name.to_owned(),
             ..Profile::default()
         });
-        Ok((derived, record, profile))
+        Ok((Derived { id: slot, key: derived.key }, record, profile))
     }
 
     /// A new private account in the wallet, and the keys a payer needs to pay it
@@ -1482,11 +1625,17 @@ impl Client {
         public: bool,
         rpc: Option<&str>,
     ) -> Result<bool> {
-        let Derived { id, key } = derive(name);
+        if split_subname(name).is_some() {
+            bail!("{name} is a subname; use `names subname create {name}` or `names subname buy {name}`");
+        }
+        let Derived { id: base_id, key } = derive(name);
+        let price_tier = price_tier_for_len(name.len());
+        let slot = tiered_id(&base_id, price_tier);
         // Check first, so a taken name isn't given a receiving account it won't use.
         // The program refuses it anyway; this only makes the refusal come sooner.
-        if let Some(held) = self.record(&id).await? {
-            if held.owner == owner_tag(&id, &owner) && load_defaults().pending.contains_key(name) {
+        let existing = self.record(&slot).await?;
+        if let Some(held) = &existing {
+            if held.owner == owner_tag(&slot, &owner) && load_defaults().pending.contains_key(name) {
                 // An earlier reveal landed after `register` stopped waiting for it.
                 let mut defaults = load_defaults();
                 defaults.pending.remove(name);
@@ -1498,7 +1647,7 @@ impl Client {
                 bail!("{name}{NAME_SUFFIX} is already registered");
             }
         }
-        let (length, tier) = length_proof(&id)?;
+        let (length, tier) = length_proof(&base_id)?;
         if tier == TIER_LOCKED {
             let admin = self.settings().await?.map(|settings| settings.admin);
             if admin != Some(owner) {
@@ -1507,10 +1656,14 @@ impl Client {
                 );
             }
         }
-        let cost = self.registration_cost(tier, owner, term).await?;
+        let settings = self.settings().await?;
+        let quote_now = now.unwrap_or(self.now().await);
+        let cost = self
+            .registration_cost(tier, price_tier, owner, term, existing.as_ref(), quote_now)
+            .await?;
         let (fee, deposit) = (cost.amount, cost.deposit);
-        if let Some(settings) = self.settings().await? {
-            if settings.claims_root != [0; 32] && self.now().await < settings.claims_until {
+        if let Some(settings) = &settings {
+            if settings.claims_root != [0; 32] && quote_now < settings.claims_until {
                 println!(
                     "warning: names from the earlier chain can still be claimed, until {}. If {name}{NAME_SUFFIX} was held there, its holder's claim replaces this registration, and the deposit stays in the name's account for them",
                     readable(settings.claims_until)
@@ -1522,8 +1675,21 @@ impl Client {
                 "{name}{NAME_SUFFIX} takes a deposit of {fee}, held for as long as you keep the name and refunded when you release it"
             );
             println!("(the deposit stops name squatting: holding many names ties up many deposits; nobody keeps it)");
+        } else if !deposit {
+            println!(
+                "{name}{NAME_SUFFIX} ({}, {}): price {} (base {}{})",
+                v8::tier_label(price_tier),
+                v8::term_label(term),
+                fee,
+                cost.base,
+                if cost.premium > 0 {
+                    format!(" + re-release premium {}", cost.premium)
+                } else {
+                    String::new()
+                }
+            );
         }
-        let holder = owner_tag(&id, &owner);
+        let holder = owner_tag(&slot, &owner);
 
         // Step 1: commit. The commitment hides the identifier, so watching
         // pending transactions doesn't let anyone claim the name first.
@@ -1534,11 +1700,6 @@ impl Client {
             .get(name)
             .filter(|p| p.owner == owner.to_string() && local_now() < p.made.saturating_add(MAX_COMMIT_AGE_MS))
             .and_then(|p| Some((parse_hex32(&p.secret)?, p.made, p.public)));
-        // The deposit or fee is only taken at the reveal (5 minutes on for public, 15 for
-        // private), and making a private name public takes two more private steps after it:
-        // all are checked now, before the commit, so a short account doesn't commit and fail
-        // at the end (register-as-public-silently-stays-private). A resumed registration
-        // checks its reveal as it sends it.
         if resumed.is_none() {
             if self.is_private(owner) {
                 let steps = self.registration_steps(name, owner, fee, deposit, public).await?;
@@ -1566,17 +1727,13 @@ impl Client {
             None => {
                 let mut secret = [0u8; 32];
                 getrandom::fill(&mut secret).map_err(|e| anyhow!("no randomness: {e}"))?;
-                let promised = commitment(&id, &holder, &secret);
+                let promised = commitment(&slot, &holder, &secret);
                 println!("step 1 of 2: committing to {name}{NAME_SUFFIX}");
                 if is_public_owner {
                     // Warm the cached registry bytecode before reading the chain clock so
                     // fetching it never consumes the 1-minute CommitPublic validity window.
                     let _ = self.program().await?;
                 }
-                // A private commit that missed its window is dropped and charged nothing, and
-                // the miss measured this computer's proof: one more try claims a time that
-                // allows for it. A public commit is not blindly retried because a reverted
-                // public transaction burns gas.
                 let mut attempt = 0;
                 let made = loop {
                     attempt += 1;
@@ -1610,7 +1767,6 @@ impl Client {
                     }
                     println!("the commitment did not land ({error:#}); trying again (attempt {} of {COMMIT_ATTEMPTS})", attempt + 1);
                 };
-                // note_proof saved the measurement to the file; keep it when this copy is saved.
                 defaults.proof_ms = load_defaults().proof_ms;
                 defaults.pending.insert(
                     name.to_owned(),
@@ -1621,8 +1777,6 @@ impl Client {
                 (secret, made, is_public_owner)
             }
         };
-        // What this commitment asked, now queued with it: a resumed one keeps a `--public`
-        // asked when it was made, and the background finish is told so by its own arguments.
         let public = defaults.then_public.iter().any(|queued| queued == name);
 
         // Step 2: reveal, once the commitment is old enough.
@@ -1665,8 +1819,6 @@ impl Client {
             println!("waiting {wait}s before revealing (the commitment must be {} minutes old)", wait_ms / 60_000);
             tokio::time::sleep(std::time::Duration::from_secs(wait.clamp(5, 30))).await;
         }
-        // Every name can be paid from the start: the profile carries receiving
-        // keys of a fresh private account.
         let (receiving, npk, vpk) = self.new_receiving_keys()?;
         let profile = Profile {
             name: name.to_owned(),
@@ -1676,16 +1828,10 @@ impl Client {
         };
         let sealed = seal_profile(&key, &profile);
         println!("payments to {name}{NAME_SUFFIX} will arrive privately at Private/{receiving}");
-        let promised = commitment(&id, &holder, &secret);
+        let promised = commitment(&slot, &holder, &secret);
         if is_public_owner {
-            // Warm the cached registry bytecode before reading the chain clock so
-            // fetching it never consumes the 1-minute public Register validity window.
             let _ = self.program().await?;
         }
-        // A reveal claims a time before its proof is made, and the program takes it only
-        // within TIME_WINDOW_MS (10 min private, 1 min public) of that (`proving_lead`);
-        // a slow proof or chain can land it outside. The commitment stays usable for
-        // MAX_COMMIT_AGE_MS, so private reveals try again.
         let window_ms = commit_window_ms(commit_public);
         let expires_at = made.saturating_add(MAX_COMMIT_AGE_MS);
         let mut attempt = 0;
@@ -1695,41 +1841,64 @@ impl Client {
                 Some(now) => now,
                 None => self.claim_time(owner).await?,
             };
-            let kind = if deposit { "a deposit" } else { "a fee" };
-            println!("step 2 of 2: registering {name}{NAME_SUFFIX} at {claimed} for {kind} of {fee}");
-            let mut mentions = self.on_record_and_page(&id, owner);
+            // Re-read existing record and recompute cost at `claimed` (falling premium decays over time).
+            let live_existing = self.record(&slot).await?;
+            let reveal_cost = self
+                .registration_cost(tier, price_tier, owner, term, live_existing.as_ref(), claimed)
+                .await?;
+            let reveal_fee = reveal_cost.amount;
+            let kind = if reveal_cost.deposit { "a deposit" } else { "a fee" };
+            println!(
+                "step 2 of 2: registering {name}{NAME_SUFFIX} ({}) at {claimed} for {kind} of {reveal_fee}{}",
+                v8::term_label(term),
+                if reveal_cost.premium > 0 {
+                    format!(" (base {} + premium {})", reveal_cost.base, reveal_cost.premium)
+                } else {
+                    String::new()
+                }
+            );
+            let mut mentions = self.on_record_and_page(&slot, owner);
             mentions.push(self.registry_actor(settings_seed()));
             mentions.push(self.registry_actor(commitment_seed(&promised)));
-            mentions.extend(self.paying(&id, owner, &cost));
+            // Declare the new tied NFT token PDA (and old token/market/site cleanup if overwriting a lapsed name).
+            let gen = v8::register_generation(&slot, &holder, claimed, &secret);
+            let new_token = nft_token_id(&slot, &gen);
+            self.push_nft_mention(&mut mentions, settings.as_ref(), &new_token);
+            if let Some(prev) = &live_existing {
+                if prev.nft_token_id != new_token {
+                    self.push_nft_mention(&mut mentions, settings.as_ref(), &prev.nft_token_id);
+                }
+                self.push_cleanup_mentions(&mut mentions, &slot, prev);
+            }
+            mentions.extend(self.paying(&slot, owner, &reveal_cost));
             let sent = self
                 .send(
                     mentions,
                     &Instruction::Register {
-                        id,
+                        id: base_id,
                         sealed: sealed.clone(),
                         term,
-                        fee,
-                        treasury: cost.treasury,
+                        fee: reveal_fee,
+                        treasury: reveal_cost.treasury,
                         now: claimed,
                         secret,
-                        deposit,
+                        deposit: reveal_cost.deposit,
                         length: length.clone(),
+                        price_tier,
                     },
-                    fee,
+                    reveal_fee,
                 )
                 .await;
             let Err(error) = sent else {
                 self.note_proof();
                 break;
             };
-            // The wait may have given up on a reveal that landed after all.
-            match self.record(&id).await {
+            match self.record(&slot).await {
                 Ok(Some(held)) if held.owner == holder => break,
                 Ok(Some(_)) => return Err(self.give_up(name, error.context("someone else holds the name"))),
                 _ => {}
             }
             if is_public_owner {
-                // A reverted public transaction burns gas; don't blindly retry in a loop.
                 return Err(self.give_up(name, error));
             }
             let (error, missed) = self.past_window(error, claimed).await;
@@ -1848,27 +2017,42 @@ impl Client {
         save_defaults(&defaults)?;
         Ok(log)
     }
-    /// Adds `term` to the time `name` is held for, paid by `payer` or else its owner.
+    /// Adds `term` (including `permanent`) to the time `name` is held for, paid by `payer` or else its owner.
     async fn renew(&mut self, name: &str, term: u8, payer: Option<AccountId>) -> Result<()> {
-        let (Derived { id, .. }, record, _) = self.lookup(name).await?;
+        if split_subname(name).is_some() {
+            bail!("subnames do not renew independently; renew the parent name instead");
+        }
+        let (Derived { id: slot, .. }, record, _) = self.lookup(name).await?;
         if record.expires == u64::MAX {
-            bail!("{name}{NAME_SUFFIX} is held by a deposit: it doesn't expire, so there is nothing to renew");
+            bail!("{name}{NAME_SUFFIX} is permanent (no expiry), so there is nothing to renew");
         }
         let payer = match payer {
             Some(payer) => payer,
-            None => self.holder(name, &id, &record)?,
+            None => self.holder(name, &slot, &record).or_else(|_| default_private())?,
         };
-        let (fee, treasury) = self.price(payer, term).await?;
-        let now = self.now().await;
-        println!("renewing {name}{NAME_SUFFIX} at {now} for a fee of {fee}");
-        let [record, ..] = name_seeds(&id);
+        let settings = self.settings().await?;
+        let (fee, treasury) = self.price(record.price_tier, payer, term).await?;
+        let now = self.claim_time(payer).await?;
+        println!(
+            "renewing {name}{NAME_SUFFIX} ({}, {}) at {now} for a fee of {fee}",
+            v8::tier_label(record.price_tier),
+            v8::term_label(term)
+        );
+        let [rec_seed, ..] = name_seeds(&slot);
         let mut mentions = vec![
             self.own_actor(payer),
-            self.registry_actor(record),
+            self.registry_actor(rec_seed),
             self.registry_actor(settings_seed()),
         ];
-        mentions.extend(self.paying(&id, payer, &Cost { amount: fee, deposit: false, treasury }));
-        self.send(mentions, &Instruction::Renew { id, term, fee, treasury, now }, fee).await
+        self.push_nft_mention(&mut mentions, settings.as_ref(), &record.nft_token_id);
+        if record.listing.as_ref().is_some_and(|l| l.in_market) {
+            mentions.push(self.market_bucket_actor(&slot));
+        }
+        if let Some(page) = record.site_listed {
+            mentions.push(self.registry_actor(names_core::site_bucket_seed(names_core::bucket_of(&slot), page)));
+        }
+        mentions.extend(self.paying(&slot, payer, &Cost { amount: fee, base: fee, premium: 0, deposit: false, treasury }));
+        self.send(mentions, &Instruction::Renew { id: slot, term, fee, treasury, now }, fee).await
     }
 
     /// Sets the registry's settings, signed by their admin or, while there are none,
@@ -1878,9 +2062,11 @@ impl Client {
         &mut self,
         admin: AccountId,
         treasury: AccountId,
-        prices: [u128; 3],
+        prices: [[u128; 4]; 3],
         mode: u8,
         deposits: [u128; 2],
+        premium_start: u128,
+        nft_program: Option<AccountId>,
         signer: Option<AccountId>,
         claims: claims::ClaimSettings,
     ) -> Result<()> {
@@ -1890,6 +2076,9 @@ impl Client {
             (None, Some(settings)) => settings.admin,
             (None, None) => self.program,
         };
+        let nft_program = nft_program
+            .or_else(|| settings.as_ref().map(|s| s.nft_program))
+            .unwrap_or_else(|| AccountId::new([0; 32]));
         // A change of prices must not end a claim period.
         let claims = claims.over(settings.as_ref());
         self.send(
@@ -1903,6 +2092,8 @@ impl Client {
                 claims_root: claims.root,
                 claims_until: claims.until,
                 claims_program: claims.program,
+                premium_start,
+                nft_program,
             },
             0,
         )
@@ -1925,16 +2116,18 @@ impl Client {
         if snapshot.program != settings.claims_program || snapshot.root() != settings.claims_root {
             bail!("that snapshot is not the one this registry's claims list was made from");
         }
-        let Derived { id, .. } = derive(name);
+        let Derived { id: base_id, .. } = derive(name);
+        let price_tier = price_tier_for_len(name.len());
+        let slot = tiered_id(&base_id, price_tier);
         let (proof, record) = snapshot
-            .claim(&id)
+            .claim(&base_id)
             .ok_or_else(|| anyhow!("{name}{NAME_SUFFIX} is not in the snapshot"))?;
         let key_chain = self.wallet.storage().key_chain();
         let holder = key_chain
             .public_account_ids()
             .map(|(account, _)| account)
             .chain(key_chain.private_account_ids().map(|(account, _)| account))
-            .find(|account| owner_tag(&id, account) == record.owner)
+            .find(|account| owner_tag(&base_id, account) == record.owner)
             .ok_or_else(|| {
                 anyhow!(
                     "no account in this wallet held {name}{NAME_SUFFIX} on the earlier chain. A public account comes back \
@@ -1942,29 +2135,53 @@ impl Client {
                      public` until its ID appears); a private one does not, because LEZ 0.4 derives other private account IDs"
                 )
             })?;
-        if let Some(held) = self.record(&id).await? {
+        let existing = self.record(&slot).await?;
+        if let Some(held) = &existing {
             if held.claimed {
                 bail!("{name}{NAME_SUFFIX} was already claimed");
             }
             println!("{name}{NAME_SUFFIX} was registered here since; this claim replaces that registration");
         }
         println!("claiming {name}{NAME_SUFFIX}, held by {holder} on the earlier chain");
-        let mut mentions = self.on_record_and_page(&id, holder);
+        let mut mentions = self.on_record_and_page(&slot, holder);
         mentions.push(self.registry_actor(settings_seed()));
-        self.send(mentions, &Instruction::Claim { id, sealed: record.sealed.clone(), now, proof }, 0).await?;
+        let new_owner = owner_tag(&slot, &holder);
+        let gen = v8::claim_generation(&slot, &new_owner, now);
+        let new_token = nft_token_id(&slot, &gen);
+        self.push_nft_mention(&mut mentions, Some(&settings), &new_token);
+        if let Some(prev) = &existing {
+            if prev.nft_token_id != new_token {
+                self.push_nft_mention(&mut mentions, Some(&settings), &prev.nft_token_id);
+            }
+            self.push_cleanup_mentions(&mut mentions, &slot, prev);
+        }
+        self.send(
+            mentions,
+            &Instruction::Claim {
+                id: base_id,
+                sealed: record.sealed.clone(),
+                now,
+                proof,
+                price_tier,
+            },
+            0,
+        )
+        .await?;
         let mut defaults = load_defaults();
         if !defaults.names.contains(&name.to_owned()) {
             defaults.names.push(name.to_owned());
             save_defaults(&defaults)?;
         }
         println!("{name}{NAME_SUFFIX} is yours again");
-        // The claim emptied the page; the old one goes back in a transaction of its own,
-        // since a page can be far larger than a claim.
-        if let Some(page) = snapshot.page(&id) {
+        if let Some(page) = snapshot.page(&base_id) {
             println!("restoring its page");
             self.send(
-                self.on_record_and_page(&id, holder),
-                &Instruction::SetPage { id, sealed: page },
+                self.on_record_and_page(&slot, holder),
+                &Instruction::SetPage {
+                    id: slot,
+                    sealed: page,
+                    site_dir: SiteDirOp::Keep,
+                },
                 0,
             )
             .await?;
@@ -1975,15 +2192,40 @@ impl Client {
     /// Changes the profile of `name`: reads and opens it, applies `change`, then
     /// seals the whole of it again and replaces the record's sealed bytes.
     async fn edit(&mut self, name: &str, change: impl FnOnce(&mut Profile) -> Result<()>) -> Result<()> {
-        let (Derived { id, key }, record, mut profile) = self.lookup_held(name).await?;
-        let holder = self.holder(name, &id, &record)?;
+        if split_subname(name).is_some() {
+            return self.edit_subname(name, change).await;
+        }
+        let (Derived { id: slot, key }, record, mut profile) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &slot, &record)?;
         change(&mut profile)?;
         validate_profile(&profile).map_err(|reason| anyhow!(reason))?;
         let sealed = seal_profile(&key, &profile);
-        let [record, ..] = name_seeds(&id);
+        let has_page = !self.actor_state(page_address(&self.program, &slot)).await?.is_empty();
+        let active_page = if has_page && record.site_listed.is_none() && !v8::discover_is_off(&profile) {
+            self.site_dir_header().await?.active_page[usize::from(names_core::bucket_of(&slot))]
+        } else {
+            0
+        };
+        let now = self.now().await;
+        let site_dir = v8::site_dir_op_for_edit(name, &record, &profile, has_page, now, active_page);
+        let [rec_seed, ..] = name_seeds(&slot);
+        let mut mentions = vec![self.own_actor(holder), self.registry_actor(rec_seed)];
+        match &site_dir {
+            SiteDirOp::Keep => {}
+            SiteDirOp::Upsert { page, .. } => mentions.extend(self.site_actors(&slot, *page)),
+            SiteDirOp::Remove => {
+                if let Some(page) = record.site_listed {
+                    mentions.extend(self.site_actors(&slot, page));
+                }
+            }
+        }
         self.send(
-            vec![self.own_actor(holder), self.registry_actor(record)],
-            &Instruction::SetRecord { id, sealed },
+            mentions,
+            &Instruction::SetRecord {
+                id: slot,
+                sealed,
+                site_dir,
+            },
             0,
         )
         .await
@@ -1991,8 +2233,24 @@ impl Client {
 
     /// Seals `page` as the page of `name`; `None` removes the page.
     async fn set_page(&mut self, name: &str, page: Option<PageContent>) -> Result<()> {
-        let (Derived { id, key }, record, _) = self.lookup_held(name).await?;
-        let holder = self.holder(name, &id, &record)?;
+        self.set_page_with_opts(name, page, false, false, None).await
+    }
+
+    /// Seals `page` as the page of `name`, with explicit sites-directory opt-out/title options.
+    async fn set_page_with_opts(
+        &mut self,
+        name: &str,
+        page: Option<PageContent>,
+        no_discover: bool,
+        force_discover: bool,
+        title: Option<&str>,
+    ) -> Result<()> {
+        if split_subname(name).is_some() {
+            return self.set_page_subname(name, page).await;
+        }
+        let (Derived { id: slot, key }, record, profile) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &slot, &record)?;
+        let publishing = page.is_some();
         let sealed = match page {
             Some(page) => {
                 validate_page(&page).map_err(|reason| anyhow!(reason))?;
@@ -2000,26 +2258,70 @@ impl Client {
             }
             None => Vec::new(),
         };
-        self.send(self.on_record_and_page(&id, holder), &Instruction::SetPage { id, sealed }, 0).await
+        let active_page = if publishing && !no_discover {
+            self.site_dir_header().await?.active_page[usize::from(names_core::bucket_of(&slot))]
+        } else {
+            0
+        };
+        let now = self.now().await;
+        let site_dir = v8::site_dir_op_for_page(
+            name,
+            &record,
+            &profile,
+            publishing,
+            no_discover,
+            force_discover,
+            title,
+            now,
+            active_page,
+        );
+        let mut mentions = self.on_record_and_page(&slot, holder);
+        match &site_dir {
+            SiteDirOp::Keep => {}
+            SiteDirOp::Upsert { page, .. } => mentions.extend(self.site_actors(&slot, *page)),
+            SiteDirOp::Remove => {
+                if let Some(page) = record.site_listed {
+                    mentions.extend(self.site_actors(&slot, page));
+                }
+            }
+        }
+        self.send(
+            mentions,
+            &Instruction::SetPage {
+                id: slot,
+                sealed,
+                site_dir,
+            },
+            0,
+        )
+        .await
     }
 
     /// Hands `name` to `new_owner`, clearing what the current owner set on it.
     async fn transfer(&mut self, name: &str, new_owner: AccountId) -> Result<()> {
+        if split_subname(name).is_some() {
+            return self.transfer_subname(name, new_owner).await;
+        }
         if new_owner == self.program {
             bail!("that is the registry program's account, which can't hold a name");
         }
-        let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
-        // To its own holder it would only cost a fee and clear the name's receiving keys
-        // and texts (transfer-to-self-wipes-receiving-keys).
-        if holds_already(&id, &record.owner, &new_owner) {
+        let (Derived { id: slot, .. }, record, _) = self.lookup_held(name).await?;
+        if holds_already(&slot, &record.owner, &new_owner) {
             bail!("{new_owner} already holds {name}{NAME_SUFFIX}, so nothing was sent");
         }
-        let holder = self.holder(name, &id, &record)?;
+        let holder = self.holder(name, &slot, &record)?;
+        let settings = self.settings().await?;
+        let now = self.now().await;
+        let mut mentions = self.on_record_and_page(&slot, holder);
+        mentions.push(self.registry_actor(settings_seed()));
+        self.push_nft_mention(&mut mentions, settings.as_ref(), &record.nft_token_id);
+        self.push_cleanup_mentions(&mut mentions, &slot, &record);
         self.send(
-            self.on_record_and_page(&id, holder),
+            mentions,
             &Instruction::Transfer {
-                id,
-                new_owner: owner_tag(&id, &new_owner),
+                id: slot,
+                new_owner: owner_tag(&slot, &new_owner),
+                now,
             },
             0,
         )
@@ -2028,31 +2330,37 @@ impl Client {
 
     /// Releases `name`, emptying its record and page.
     async fn release(&mut self, name: &str) -> Result<()> {
-        let (Derived { id, .. }, record, _) = self.lookup_held(name).await?;
-        let holder = self.holder(name, &id, &record)?;
+        if split_subname(name).is_some() {
+            return self.release_subname(name).await;
+        }
+        let (Derived { id: slot, .. }, record, _) = self.lookup_held(name).await?;
+        let holder = self.holder(name, &slot, &record)?;
+        let settings = self.settings().await?;
         // The deposit account's whole balance comes back to whoever releases.
-        let held = deposit_address(&self.program, &id);
-        // A read that failed is no refund of 0: the release would leave the deposit behind.
+        let held = deposit_address(&self.program, &slot);
         let refund = self
             .wallet
             .get_account_balance(held)
             .await
             .with_context(|| format!("could not read {name}{NAME_SUFFIX}'s deposit, so nothing was released"))?;
-        let mut mentions = self.on_record_and_page(&id, holder);
+        let mut mentions = self.on_record_and_page(&slot, holder);
+        mentions.push(self.registry_actor(settings_seed()));
+        self.push_nft_mention(&mut mentions, settings.as_ref(), &record.nft_token_id);
+        self.push_cleanup_mentions(&mut mentions, &slot, &record);
         if refund > 0 {
             println!("releasing {name}{NAME_SUFFIX}; its deposit of {refund} comes back to you");
-            mentions.push(self.registry_balance(name_seeds(&id)[2]));
+            mentions.push(self.registry_balance(name_seeds(&slot)[2]));
             mentions.push(self.signer(holder).balance());
         }
-        self.send(mentions, &Instruction::Release { id, refund }, 0).await
+        self.send(mentions, &Instruction::Release { id: slot, refund }, 0).await
     }
 
     /// Sends `instruction` from the signer whose actor is `mentions[0]`; `spent` is
     /// what it moves out of the signer's balance besides the fee.
     async fn send(&mut self, mentions: Vec<AccountMention>, instruction: &Instruction, spent: u128) -> Result<()> {
-        let program = self.program().await?;
+        let programs = self.programs_for(&mentions).await?;
         let message = borsh::to_vec(&RegistryMessage::Instruction(instruction.clone()))?;
-        self.transact(mentions, message, vec![(self.program, program)], spent, call_cycles(instruction)).await
+        self.transact(mentions, message, programs, spent, call_cycles(instruction)).await
     }
 
     /// Sends `message` to the actor `mentions[0]` and confirms it applied. `mentions`
@@ -2635,6 +2943,9 @@ impl Client {
 
     /// The name's page, opened with its key, if it has one.
     async fn page(&self, name: &str) -> Result<Option<PageContent>> {
+        if split_subname(name).is_some() {
+            return self.page_subname(name).await;
+        }
         let (Derived { id, key }, _, _) = self.lookup(name).await?;
         let bytes = self.actor_state(page_address(&self.program, &id)).await?;
         if bytes.is_empty() {
@@ -2645,8 +2956,33 @@ impl Client {
     }
 
     async fn resolve(&self, name: &str) -> Result<serde_json::Value> {
-        let (Derived { id, key }, record, profile) = self.lookup(name).await?;
-        let page_bytes = self.actor_state(page_address(&self.program, &id)).await?;
+        if split_subname(name).is_some() {
+            return self.resolve_subname(name).await;
+        }
+        let (Derived { id: slot, key }, record, profile) = self.lookup_held(name).await?;
+        let settings = self.settings().await?;
+        let now = local_now();
+        let grace_ends = (record.expires != u64::MAX).then(|| record.expires.saturating_add(GRACE_MS));
+        let past_grace = grace_ends.is_some_and(|g| now >= g);
+        if past_grace {
+            let (premium, premium_ends) = v8::lapsed_premium(settings.as_ref(), Some(&record), now);
+            if premium > 0 {
+                return Ok(serde_json::json!({
+                    "name": name,
+                    "registered": false,
+                    "lapsed": true,
+                    "in_grace": false,
+                    "past_grace": true,
+                    "expired_at": record.expires,
+                    "grace_ended": grace_ends,
+                    "rerelease_premium": premium.to_string(),
+                    "premium_ends": premium_ends,
+                    "price_tier": record.price_tier,
+                }));
+            }
+            bail!("{name} is not registered");
+        }
+        let page_bytes = self.actor_state(page_address(&self.program, &slot)).await?;
         let page = if page_bytes.is_empty() {
             None
         } else {
@@ -2660,25 +2996,60 @@ impl Client {
                 "bytes": page.body.len(),
             })
         });
+        let discover_off = v8::discover_is_off(&profile);
         let texts: serde_json::Map<String, serde_json::Value> = profile
             .texts
             .into_iter()
             .map(|text| (text.key, text.value.into()))
             .collect();
+        let in_grace = record.expires != u64::MAX && now >= record.expires;
+        let nft_program = settings.as_ref().map(|s| s.nft_program).filter(|p| *p != AccountId::new([0; 32]));
+        let nft_json = if record.nft_token_id != [0; 32] {
+            serde_json::json!({
+                "token_id": hex::encode(record.nft_token_id),
+                "token_account": nft_program.map(|p| nft_token_address(&p, &record.nft_token_id).to_string()),
+                "program": nft_program.map(|p| p.to_string()),
+                "shielded": record.nft_shielded,
+            })
+        } else {
+            serde_json::Value::Null
+        };
+        let listing_json = record.listing.map(|l| {
+            let (seller, fee) = sale_split(l.price);
+            serde_json::json!({
+                "price": l.price.to_string(),
+                "fee": fee.to_string(),
+                "seller_receives": seller.to_string(),
+                "pay_to": l.pay_to.to_string(),
+                "expires_at": l.expires_at,
+                "nonce": l.nonce,
+                "in_market": l.in_market,
+            })
+        });
+        let subname_sale_json = record.subname_sale.map(|s| {
+            serde_json::json!({
+                "price": s.price.to_string(),
+                "payout": s.payout.to_string(),
+            })
+        });
         Ok(serde_json::json!({
             "name": name,
-            // The chain keeps only a tag of the holder; this wallet can tell
-            // whether it is one of its own accounts, and nobody can tell more.
-            "held_by": self.holder(name, &id, &record).ok().map(|account| account.to_string()),
+            "held_by": self.holder(name, &slot, &record).ok().map(|account| account.to_string()),
+            "price_tier": record.price_tier,
+            "permanent": record.expires == u64::MAX,
             "expires": (record.expires != u64::MAX).then_some(record.expires),
-            // A name held by a deposit never expires (its expiry is u64::MAX).
             "expires_date": if record.expires == u64::MAX { "never".to_owned() } else { readable(record.expires) },
-            "lapsed": local_now() >= record.expires,
-            // A name never shows an address: payers' wallets use its receiving keys
-            // without printing them, and `names pay` pays them.
+            "lapsed": in_grace,
+            "in_grace": in_grace,
+            "grace_ends": grace_ends,
+            "rerelease_premium_start": settings.as_ref().filter(|s| s.premium_start > 0).map(|s| s.premium_start.to_string()),
             "payable_privately": profile.npk.is_some() && !profile.vpk.is_empty(),
-            // Only if the holder chose to publish one.
             "public_account": profile.account.map(|account| AccountId::new(account).to_string()),
+            "nft": nft_json,
+            "listing": listing_json,
+            "subname_sale": subname_sale_json,
+            "site_listed": record.site_listed,
+            "discover_off": discover_off,
             "texts": texts,
             "page": page,
         }))
@@ -3282,7 +3653,7 @@ const CHANGE_CYCLES: u64 = 65_590;
 /// The arguments of the background `names register` that finishes a registration: the same
 /// name, holder and term, `--public` only when this registration asked for it.
 fn finisher_args(name: &str, owner: AccountId, term: u8, public: bool) -> Vec<String> {
-    let term = ["30d", "1y", "5y"][usize::from(term)];
+    let term = ["30d", "1y", "5y", "permanent"][usize::from(term)];
     let mut args: Vec<String> = ["register", name, "--owner", &owner.to_string(), "--term", term, "--wait"].iter().map(|arg| (*arg).to_owned()).collect();
     if public {
         args.push("--public".to_owned());
@@ -3693,25 +4064,14 @@ fn lez03_actor_state(reply: &serde_json::Value, program: &str) -> Option<Vec<u8>
     }
 }
 
-/// The registry before version 6 (the one on the LEZ 0.3 testnet).
-const BEFORE_CLAIMS: u8 = 6;
-
-/// A name record as this build reads it: one written before version 6 ends at `sealed`
-/// and was never claimed, so it gets the `claimed` byte it lacks.
-fn lez03_record(mut bytes: Vec<u8>) -> Vec<u8> {
-    if bytes.first().is_some_and(|version| *version < BEFORE_CLAIMS) {
-        bytes.push(0);
-    }
-    bytes
+/// A name record as this build reads it: v5/v6/v7 records are upgraded to v8 defaults.
+fn lez03_record(bytes: Vec<u8>) -> Vec<u8> {
+    v8::upgrade_record_bytes(bytes)
 }
 
-/// The settings as this build reads them: ones written before version 6 have no claims
-/// list, so they get an empty one (root, end time and earlier registry, all zeros).
-fn lez03_settings(mut bytes: Vec<u8>) -> Vec<u8> {
-    if bytes.first().is_some_and(|version| *version < BEFORE_CLAIMS) {
-        bytes.extend([0; 32 + 8 + 32]);
-    }
-    bytes
+/// The settings as this build reads them: v5/v6/v7 settings are upgraded to v8 defaults.
+fn lez03_settings(bytes: Vec<u8>) -> Vec<u8> {
+    v8::upgrade_settings_bytes(bytes)
 }
 
 /// A native balance from a sequencer's `getAccountView` result (16 little-endian bytes
@@ -4071,11 +4431,24 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if let Command::Address { name } = &cli.command {
-        let Derived { id, .. } = derive(name);
-        println!("id     {}", hex::encode(id));
-        println!("record {}", record_address(&program, &id));
-        println!("page   {}", page_address(&program, &id));
-        println!("deposit {}", deposit_address(&program, &id));
+        if let Some((_, parent)) = split_subname(name) {
+            let parent_slot = v8::slot_id(parent, &derive(parent).id);
+            let sub_id = derive(name).id;
+            println!("parent_slot {}", hex::encode(parent_slot));
+            println!("sub_id      {}", hex::encode(sub_id));
+            println!("record      {}", subname_record_address(&program, &parent_slot, &sub_id));
+            println!("page        {}", subname_page_address(&program, &parent_slot, &sub_id));
+            return Ok(());
+        }
+        let Derived { id: base_id, .. } = derive(name);
+        let tier = price_tier_for_len(name.len());
+        let slot = tiered_id(&base_id, tier);
+        println!("base_id {}", hex::encode(base_id));
+        println!("slot_id {}", hex::encode(slot));
+        println!("tier    {} ({})", tier, v8::tier_label(tier));
+        println!("record  {}", record_address(&program, &slot));
+        println!("page    {}", page_address(&program, &slot));
+        println!("deposit {}", deposit_address(&program, &slot));
         return Ok(());
     }
 
@@ -4088,6 +4461,8 @@ async fn main() -> Result<()> {
                     | Command::Chain(_)
                     | Command::Open { .. }
                     | Command::Settings
+                    | Command::Market { .. }
+                    | Command::Sites { .. }
                     | Command::VerifyAccount { .. }
                     | Command::Token(tokens::TokenCommand::Info { .. })
                     | Command::Module(
@@ -4197,10 +4572,17 @@ async fn main() -> Result<()> {
         Command::Receive { fee_from, list, all } => client.receive(fee_from, list, all).await,
         Command::Mine { add } => {
             if let Some(name) = add {
-                let (Derived { id, .. }, record, _) = client.lookup(&name).await?;
-                client
-                    .holder(&name, &id, &record)
-                    .with_context(|| format!("this wallet doesn't hold {name}{NAME_SUFFIX}, so it isn't added"))?;
+                if split_subname(&name).is_some() {
+                    let (_, sub_derived, sub, _, _) = client.lookup_subname(&name, true).await?;
+                    client
+                        .subname_holder(&name, &sub_derived.id, &sub)
+                        .with_context(|| format!("this wallet doesn't hold {name}{NAME_SUFFIX}, so it isn't added"))?;
+                } else {
+                    let (Derived { id, .. }, record, _) = client.lookup(&name).await?;
+                    client
+                        .holder(&name, &id, &record)
+                        .with_context(|| format!("this wallet doesn't hold {name}{NAME_SUFFIX}, so it isn't added"))?;
+                }
                 let mut defaults = load_defaults();
                 if !defaults.names.contains(&name) {
                     defaults.names.push(name.clone());
@@ -4230,8 +4612,33 @@ async fn main() -> Result<()> {
             // held": an app takes that for a name gone (cli-mine-empty-list-when-account-views-fail).
             let mut unread = 0_usize;
             for name in &defaults.names {
-                let id = derive(name).id;
-                let record = match client.record(&id).await {
+                if let Some((_, parent)) = split_subname(name) {
+                    let parent_slot = v8::slot_id(parent, &derive(parent).id);
+                    let sub_id = derive(name).id;
+                    let sub = match client.subname_record(&parent_slot, &sub_id).await {
+                        Ok(sub) => sub,
+                        Err(_) => {
+                            unread += 1;
+                            println!("{name}{NAME_SUFFIX}  unknown: the sequencer didn't answer");
+                            continue;
+                        }
+                    };
+                    match sub {
+                        Some(sub) if client.subname_holder(name, &sub_id, &sub).is_ok() => {
+                            let private = matches!(client.subname_holder(name, &sub_id, &sub), Ok(a) if client.is_private(a));
+                            let by = if private { "; held privately" } else { "; held by a public account" };
+                            let kind = match sub.kind {
+                                names_core::SubnameKind::Permanent => "permanent subname",
+                                names_core::SubnameKind::Revocable { .. } => "revocable subname",
+                            };
+                            println!("{name}{NAME_SUFFIX}  {kind}{by}");
+                        }
+                        _ => println!("{name}{NAME_SUFFIX}  no longer held by this wallet"),
+                    }
+                    continue;
+                }
+                let slot = v8::slot_id(name, &derive(name).id);
+                let record = match client.record(&slot).await {
                     Ok(record) => record.filter(|record| local_now() < record.expires.saturating_add(GRACE_MS)),
                     Err(_) => {
                         unread += 1;
@@ -4240,18 +4647,25 @@ async fn main() -> Result<()> {
                     }
                 };
                 match record {
-                    Some(record) if client.holder(name, &id, &record).is_ok() => {
+                    Some(record) if client.holder(name, &slot, &record).is_ok() => {
                         // Apps read this suffix to tell a private holder from a public one.
-                        let private = matches!(client.holder(name, &id, &record), Ok(account) if client.is_private(account));
+                        let private = matches!(client.holder(name, &slot, &record), Ok(account) if client.is_private(account));
                         let by = if private { "; held privately" } else { "; held by a public account" };
+                        let listed = record
+                            .listing
+                            .map(|l| format!("; listed for {}", l.price))
+                            .unwrap_or_default();
                         if record.expires == u64::MAX {
-                            println!("{name}{NAME_SUFFIX}  held by a deposit (no expiry){by}");
+                            println!("{name}{NAME_SUFFIX}  permanent (no expiry){listed}{by}");
+                        } else if local_now() >= record.expires {
+                            let grace_end = record.expires.saturating_add(GRACE_MS);
+                            println!(
+                                "{name}{NAME_SUFFIX}  lapsed (grace until {}){listed}{by}",
+                                readable(grace_end)
+                            );
                         } else {
-                            let state = if local_now() >= record.expires { "lapsed" } else { "held" };
-                            println!("{name}{NAME_SUFFIX}  {state} until {}{by}", readable(record.expires));
+                            println!("{name}{NAME_SUFFIX}  held until {}{listed}{by}", readable(record.expires));
                         }
-                        // Asked to be public and still private: said on a line of its own, which
-                        // the app reads (register-as-public-silently-stays-private).
                         if private && defaults.then_public.contains(name) && !defaults.pending.contains_key(name) {
                             match defaults.public_failed.get(name) {
                                 Some(why) => println!("{name}{NAME_SUFFIX}  not public yet: making it public stopped: {why}; `names make-public {name}` tries again"),
@@ -4332,6 +4746,8 @@ async fn main() -> Result<()> {
             prices,
             mode,
             deposits,
+            premium_start,
+            nft_program,
             signer,
             claims_snapshot,
             claims_root,
@@ -4339,16 +4755,58 @@ async fn main() -> Result<()> {
             claims_until,
         } => {
             let claims = claims::ClaimSettings::from_args(claims_snapshot, claims_root, claims_program, claims_until)?;
-            let prices = <[u128; 3]>::try_from(prices)
-                .map_err(|_| anyhow!("--prices takes three prices: 30d,1y,5y"))?;
+            let prices = v8::parse_prices_matrix(&prices).map_err(|e| anyhow!(e))?;
             let deposits = <[u128; 2]>::try_from(deposits)
                 .map_err(|_| anyhow!("--deposits takes two amounts: normal,three-character"))?;
             let mode = if mode == "deposit" { MODE_DEPOSIT } else { MODE_FEE };
-            client.configure(admin, treasury, prices, mode, deposits, signer, claims).await
+            client
+                .configure(
+                    admin,
+                    treasury,
+                    prices,
+                    mode,
+                    deposits,
+                    premium_start,
+                    nft_program,
+                    signer,
+                    claims,
+                )
+                .await
         }
+        Command::SetPrice { tier, term, price, signer } => {
+            client.set_price(tier, term, price, signer).await
+        }
+        Command::SetPremium { amount, signer } => client.set_premium(amount, signer).await,
+        Command::SetTreasury { treasury, signer } => client.set_treasury(treasury, signer).await,
+        Command::Subname(cmd) => client.subname(cmd).await,
+        Command::List {
+            name,
+            price,
+            pay_to,
+            expires,
+            public_name,
+        } => {
+            client
+                .list_name(&name, price, pay_to, expires.as_deref(), public_name)
+                .await
+        }
+        Command::Cancel { name } => client.cancel_listing(&name).await,
+        Command::Buy { name, buyer } => {
+            let buyer = match buyer {
+                Some(b) => b,
+                None => default_private()?,
+            };
+            client.buy_name(&name, buyer).await
+        }
+        Command::Market { json } => client.market(json).await,
+        Command::Sites { json } => client.sites(json).await,
+        Command::ShieldDeed { name, deed } => client.shield_deed(&name, deed).await,
+        Command::UnshieldDeed { name } => client.unshield_deed(&name).await,
+        Command::RefreshDeed { name } => client.refresh_deed(&name).await,
         Command::Settings => {
             let settings = client.settings().await?.map(|settings| {
                 serde_json::json!({
+                    "version": settings.version,
                     "admin": settings.admin.to_string(),
                     "mode": if settings.mode == MODE_DEPOSIT { "deposit" } else { "fee" },
                     "deposits": {
@@ -4356,11 +4814,9 @@ async fn main() -> Result<()> {
                         "three_characters": settings.deposits[1].to_string(),
                     },
                     "treasury": settings.treasury.to_string(),
-                    "prices": {
-                        "30d": settings.prices[0].to_string(),
-                        "1y": settings.prices[1].to_string(),
-                        "5y": settings.prices[2].to_string(),
-                    },
+                    "prices": v8::prices_json(&settings.prices),
+                    "premium_start": settings.premium_start.to_string(),
+                    "nft_program": settings.nft_program.to_string(),
                     "claims": {
                         "root": hex::encode(settings.claims_root),
                         "until": settings.claims_until,
@@ -4466,7 +4922,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Profile { name, display, bio, avatar, theme, color, font, cid, set, clear, replace } => {
+        Command::Profile { name, display, bio, avatar, theme, color, font, cid, set, mut clear, replace, no_discover, discover } => {
             let mut changes: Vec<(String, String)> = Vec::new();
             for (key, value) in [("display", display), ("bio", bio), ("theme", theme), ("color", color), ("font", font), ("cid", cid)] {
                 if let Some(value) = value {
@@ -4476,9 +4932,14 @@ async fn main() -> Result<()> {
             if let Some(path) = avatar {
                 changes.push(("avatar".to_owned(), image_data_url(&path)?));
             }
+            if no_discover {
+                changes.push((v8::DISCOVER_KEY.to_owned(), "off".to_owned()));
+            } else if discover {
+                clear.push(v8::DISCOVER_KEY.to_owned());
+            }
             changes.extend(set);
             if changes.is_empty() && clear.is_empty() && !replace {
-                bail!("nothing to change: give at least one entry, --set, --clear or --replace");
+                bail!("nothing to change: give at least one entry, --set, --clear, --no-discover, --discover or --replace");
             }
             client
                 .edit(&name, |profile| {
@@ -4543,7 +5004,13 @@ async fn main() -> Result<()> {
                 })
                 .await
         }
-        Command::Transfer { name, new_owner } => client.transfer(&name, new_owner).await,
+        Command::Transfer { name, new_owner, via_nft } => {
+            if via_nft {
+                client.transfer_via_nft(&name, new_owner).await
+            } else {
+                client.transfer(&name, new_owner).await
+            }
+        }
         Command::Release { name } => client.release(&name).await,
         Command::Open { name, port, no_browser, storage } => {
             let name = client.following(&name).await?;
@@ -4556,11 +5023,20 @@ async fn main() -> Result<()> {
             name,
             file,
             content_type,
+            no_discover,
+            discover,
+            title,
         } => {
             let body = std::fs::read(&file)
                 .with_context(|| format!("cannot read {}", file.display()))?;
             client
-                .set_page(&name, Some(PageContent { content_type, body }))
+                .set_page_with_opts(
+                    &name,
+                    Some(PageContent { content_type, body }),
+                    no_discover,
+                    discover,
+                    title.as_deref(),
+                )
                 .await
         }
         Command::ClearPage { name } => client.set_page(&name, None).await,
@@ -4578,7 +5054,11 @@ async fn main() -> Result<()> {
             }
         }
         Command::Resolve { name } => {
-            let used = client.following(&name).await?;
+            let used = if split_subname(&name).is_some() {
+                name.clone()
+            } else {
+                client.following(&name).await.unwrap_or_else(|_| name.clone())
+            };
             let mut resolved = client.resolve(&used).await?;
             if used != name {
                 resolved["forwarded_from"] = name.into();
